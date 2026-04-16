@@ -1,0 +1,148 @@
+name: AI PR Review
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+
+# 最小権限。pull_request_target は使わない（PR コードを信頼しない方針）
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  ai-review:
+    # Draft PR ではスキップ
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      # ① base ブランチ側のスクリプト/ワークフローを取得する。
+      #    PR ヘッド側のコードはチェックアウトしない（改変された ai_pr_review.py
+      #    に OPENAI_API_KEY 抜き取りコードを仕込まれるリスクを排除するため）。
+      - name: Checkout base branch (trusted scripts)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      # 実際にどの ref / SHA を使ったかを必ずログに残す（base 側で動いている証跡）
+      - name: Show checked out ref
+        run: |
+          echo "PR base ref:  ${{ github.event.pull_request.base.ref }}"
+          echo "PR base sha:  ${{ github.event.pull_request.base.sha }}"
+          echo "PR head sha:  ${{ github.event.pull_request.head.sha }}"
+          echo "checked-out HEAD:"
+          git rev-parse HEAD
+          echo "checked-out script hash:"
+          sha256sum .github/scripts/ai_pr_review.py || true
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: .github/scripts/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r .github/scripts/requirements.txt
+
+      # ② diff だけを取得する（PR コード自体は workspace に展開しない）
+      - name: Generate diff
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          # 巨大差分対策の上限（文字数）。先頭+末尾ハイブリッドで保持する
+          DIFF_MAX_CHARS: "120000"
+          DIFF_TAIL_CHARS: "30000"
+        run: |
+          set -euo pipefail
+
+          # base / head の両 SHA を取り込む（チェックアウトはしない）
+          git fetch --no-tags --depth=1 origin "${BASE_SHA}"
+          git fetch --no-tags --depth=1 origin "${HEAD_SHA}"
+
+          # 差分を生成（バイナリ・秘匿ファイル・ロック類を除外）
+          git diff \
+            --no-color \
+            --binary=false \
+            --unified=3 \
+            "${BASE_SHA}" "${HEAD_SHA}" \
+            -- . \
+            ':(exclude)package-lock.json' \
+            ':(exclude)pnpm-lock.yaml' \
+            ':(exclude)yarn.lock' \
+            ':(exclude)dist/**' \
+            ':(exclude)node_modules/**' \
+            ':(exclude).env' \
+            ':(exclude).env.*' \
+            ':(exclude)**/.env' \
+            ':(exclude)**/.env.*' \
+            ':(exclude)**/service-account*.json' \
+            ':(exclude)**/*-firebase-adminsdk-*.json' \
+            ':(exclude)**/*.png' \
+            ':(exclude)**/*.jpg' \
+            ':(exclude)**/*.jpeg' \
+            ':(exclude)**/*.gif' \
+            ':(exclude)**/*.webp' \
+            ':(exclude)**/*.ico' \
+            ':(exclude)**/*.pdf' \
+            > pr.diff || true
+
+          # 巨大差分は先頭 + 末尾のハイブリッドで残す（中央のみ落とす）
+          DIFF_BYTES=$(wc -c < pr.diff)
+          echo "diff bytes: ${DIFF_BYTES}"
+          if [ "${DIFF_BYTES}" -gt "${DIFF_MAX_CHARS}" ]; then
+            HEAD_KEEP=$(( DIFF_MAX_CHARS - DIFF_TAIL_CHARS ))
+            head -c "${HEAD_KEEP}" pr.diff > pr.diff.head
+            tail -c "${DIFF_TAIL_CHARS}" pr.diff > pr.diff.tail
+            {
+              cat pr.diff.head
+              printf "\n\n... [diff truncated: original=%s bytes, kept head=%s + tail=%s] ...\n\n" \
+                "${DIFF_BYTES}" "${HEAD_KEEP}" "${DIFF_TAIL_CHARS}"
+              cat pr.diff.tail
+            } > pr.diff.trimmed
+            mv pr.diff.trimmed pr.diff
+            rm -f pr.diff.head pr.diff.tail
+          fi
+
+          # 空 diff のときも後続が落ちないようにマーカーを置く
+          if [ ! -s pr.diff ]; then
+            echo "(no reviewable diff)" > pr.diff
+          fi
+
+      # ③ 常にこのステップを通す。OPENAI_API_KEY が未設定の場合も
+      #    Python 側で skip 結果を生成し、同じ upsert 経路で PR コメントを
+      #    上書きするため、重複コメントは構造的に発生しない。
+      - name: Run AI review (always upsert single comment)
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-4.1-mini' }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python .github/scripts/ai_pr_review.py
+
+      - name: Upload review artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-pr-review-${{ github.event.pull_request.number }}
+          path: |
+            ai_review_result.json
+            ai_review_comment.md
+            pr.diff
+          retention-days: 14
+          if-no-files-found: warn

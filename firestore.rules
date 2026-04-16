@@ -1,0 +1,473 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ========================================
+    // ヘルパー関数
+    // ========================================
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isSelf(uid) {
+      return isSignedIn() && request.auth.uid == uid;
+    }
+
+    function userDoc() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (userDoc().role == 'admin' || userDoc().role == 'master');
+    }
+
+    function isWarehouse() {
+      return isSignedIn() && userDoc().role == 'warehouse';
+    }
+
+    function isStaff() {
+      return isSignedIn() && userDoc().role == 'staff';
+    }
+
+    function isSalon() {
+      return isSignedIn() && userDoc().role == 'salon';
+    }
+
+    function isDealer() {
+      return isSignedIn() && userDoc().role == 'dealer';
+    }
+
+    // subRole が 'admin' or 'staff' のいずれかで明示されていること（未設定拒否）
+    // dealer / salon のみ該当。移行完了後は必須。
+    function hasValidSubRole() {
+      return isSignedIn()
+        && userDoc().subRole is string
+        && (userDoc().subRole == 'admin' || userDoc().subRole == 'staff');
+    }
+
+    // dealer / salon の admin サブロール（書き込み可能）
+    // 未設定は拒否（移行完了を前提）
+    function isSalonAdmin() {
+      return isSalon() && hasValidSubRole() && userDoc().subRole == 'admin';
+    }
+    function isDealerAdmin() {
+      return isDealer() && hasValidSubRole() && userDoc().subRole == 'admin';
+    }
+
+    // 在庫管理権限: admin, staff, warehouse
+    function hasInventoryAccess() {
+      return isAdmin() || isStaff() || isWarehouse();
+    }
+
+    // ========================================
+    // users コレクション
+    // 本人は自分のドキュメントだけ読める
+    // 全スタッフが一覧を読める（チャットDM用）
+    // 書き込みは本人 or admin のみ
+    // ========================================
+    match /users/{uid} {
+      allow get:    if isSignedIn();
+      allow list:   if isSignedIn();
+      allow create: if isAdmin()
+                     || (isSelf(uid)
+                         && request.resource.data.role in ['staff', 'dealer', 'warehouse', 'salon', 'client']
+                         && request.resource.data.uid == uid);
+      allow update: if isAdmin()
+                     || (isSelf(uid)
+                        && request.resource.data.role == resource.data.role); // 本人は role 変更不可（admin/masterを除く）
+      allow delete: if isAdmin();
+    }
+
+    // ========================================
+    // salons コレクション
+    // 全スタッフ読める。書き込みは admin と担当営業のみ
+    // ========================================
+    match /salons/{salonId} {
+      allow read:   if isSignedIn();
+      allow create: if isAdmin() || isStaff();
+      allow update: if isAdmin() || isStaff()
+                     || (isSignedIn()
+                         && resource.data.assignedUid == request.auth.uid);
+      allow delete: if isAdmin();
+
+      // メモ履歴サブコレクション（追記型）
+      match /notes/{noteId} {
+        allow read:   if isSignedIn();
+        allow create: if isSignedIn()
+                       && request.resource.data.authorUid == request.auth.uid;
+        allow update: if false; // 編集不可
+        allow delete: if isAdmin(); // 削除は admin のみ
+      }
+    }
+
+    // ========================================
+    // attendance コレクション
+    // 本人は自分のだけ読み書き可。admin は全員分読み書き可（修正用）
+    // docId は ${uid}_${YYYY-MM-DD} 形式に制約
+    // ========================================
+    match /attendance/{recordId} {
+      allow read:   if isSignedIn()
+                     && (resource.data.uid == request.auth.uid || isAdmin());
+      allow create: if isSignedIn()
+                     && request.resource.data.uid == request.auth.uid
+                     && recordId.matches('^' + request.auth.uid + '_\\d{4}-\\d{2}-\\d{2}$');
+      allow update: if (isSignedIn()
+                        && resource.data.uid == request.auth.uid)
+                     || isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // ========================================
+    // attendance_monthly コレクション（集計キャッシュ）
+    // Step 3 で Cloud Functions が書き込む。今は admin の手動書き込み許可
+    // ========================================
+    match /attendance_monthly/{recordId} {
+      allow read:  if isSignedIn()
+                    && (resource.data.uid == request.auth.uid || isAdmin());
+      allow write: if isAdmin();
+    }
+
+    // ========================================
+    // orders コレクション
+    // admin/staff は全件読める。dealer は自社の注文のみ読める
+    // 書き込みは admin のみ
+    // ========================================
+    match /orders/{orderId} {
+      allow read:  if isSignedIn()
+                    && (userDoc().role in ['master', 'admin', 'staff', 'dealer']
+                        || resource.data.companyName == userDoc().companyName);  // salon は自社のみ
+      allow write: if isAdmin() || isStaff();
+    }
+
+    // ========================================
+    // dealerSalons コレクション（代理店↔サロン紐付け）
+    // admin のみ読み書き可
+    // ========================================
+    match /dealerSalons/{docId} {
+      allow read:  if isSignedIn();
+      allow write: if isAdmin();
+    }
+
+    // ========================================
+    // kickbacks コレクション（キックバック清算書）
+    // admin は全件読み書き。dealer は自社の清算書のみ読める
+    // ========================================
+    match /kickbacks/{docId} {
+      allow read:  if isSignedIn()
+                    && (isAdmin()
+                        || resource.data.dealerCode == userDoc().dealerCode);
+      allow write: if isAdmin();
+    }
+
+    // ========================================
+    // chatRooms コレクション（社内チャット）
+    // ログイン済みスタッフ全員が読み書き可
+    // ========================================
+    match /chatRooms/{roomId} {
+      allow read, write: if isSignedIn();
+
+      match /messages/{msgId} {
+        allow read:   if isSignedIn();
+        allow create: if isSignedIn()
+                       && request.resource.data.uid == request.auth.uid;
+        allow update: if false;
+        allow delete: if isSignedIn()
+                       && resource.data.uid == request.auth.uid;
+      }
+
+      match /readers/{readerId} {
+        allow read, write: if isSignedIn();
+      }
+    }
+
+    // ========================================
+    // inventoryMasters コレクション（在庫マスタ設定：ブランド・分類・倉庫）
+    // admin / staff が読み書き可
+    // ========================================
+    match /inventoryMasters/{docId} {
+      allow read:  if isSignedIn();
+      allow write: if isAdmin() || isStaff();
+    }
+
+    // ========================================
+    // products コレクション（在庫管理：商品マスタ）
+    // admin / staff / warehouse が操作可。削除は admin のみ
+    // ========================================
+    match /products/{docId} {
+      allow read:  if isSignedIn();
+      allow create: if hasInventoryAccess();
+      allow update: if hasInventoryAccess();
+      allow delete: if isAdmin();
+    }
+
+    // ========================================
+    // productCosts コレクション（原価マスタ：商品名 → 単価原価）
+    // admin / staff が読み書き可
+    // ========================================
+    match /productCosts/{docId} {
+      allow read:   if isSignedIn() && (isAdmin() || isStaff());
+      allow write:  if isAdmin() || isStaff();
+    }
+
+    // ========================================
+    // stockHistory コレクション（入出庫履歴）
+    // admin / staff / warehouse が書き込み可。削除は admin のみ
+    // ========================================
+    match /stockHistory/{docId} {
+      allow read:   if isSignedIn();
+      allow create: if hasInventoryAccess();
+      allow update: if hasInventoryAccess();
+      allow delete: if isAdmin();
+    }
+
+    // ========================================
+    // allowedEmails コレクション（ログイン許可リスト）
+    // 全員が読める（ログイン時のチェックに必要）
+    // 書き込みは admin のみ
+    // ========================================
+    match /allowedEmails/{docId} {
+      allow read:  if true;
+      allow write: if isAdmin();
+    }
+
+    // ========================================
+    // settings コレクション（権限設定など）
+    // 全員読める（権限チェックに必要）。書き込みは admin のみ
+    // ========================================
+    match /settings/{docId} {
+      allow read:  if isSignedIn();
+      allow write: if isAdmin();
+    }
+
+    // ========================================
+    // publicReceipts コレクション（公開領収書）
+    // お客様がメールのリンクからダウンロードするために認証不要で読める
+    // 書き込みは admin のみ（Bカート取り込み時に自動生成）
+    // ========================================
+    match /publicReceipts/{docId} {
+      allow read:  if true;
+      allow write: if isAdmin() || isStaff();
+    }
+
+    // ========================================
+    // invoices コレクション（グループC代理店向け請求書）
+    // admin は全件読み書き。dealer は自社の請求書のみ読める
+    // ========================================
+    match /invoices/{docId} {
+      allow read:  if isSignedIn()
+                    && (isAdmin()
+                        || resource.data.dealerCode == userDoc().dealerCode);
+      allow write: if isAdmin();
+    }
+
+    // ========================================
+    // dealerDocuments コレクション（代理店・サロン向け資料）
+    // ログイン済みユーザーは読める。書き込みは admin のみ
+    // ========================================
+    match /dealerDocuments/{docId} {
+      allow read:  if isSignedIn();
+      allow write: if isAdmin();
+    }
+
+    // ========================================
+    // メルマガ関連コレクション
+    // admin のみ読み書き可
+    // ========================================
+    match /newsletters/{docId} {
+      allow read, write: if isAdmin();
+    }
+    match /nl_readers/{docId} {
+      allow read:   if isAdmin();
+      allow write:  if isAdmin();
+      // 公開フォームからの登録・解除（認証不要）
+      allow create: if request.resource.data.source == 'form'
+                     && request.resource.data.email is string
+                     && request.resource.data.consentMethod == 'web_form';
+      allow update: if resource.data.email is string
+                     && request.resource.data.status == 'unsubscribed'
+                     && request.resource.data.unsubscribeMethod == 'web_form';
+    }
+    match /nl_templates/{docId} {
+      allow read, write: if isAdmin();
+    }
+    match /nl_logs/{docId} {
+      allow read, write: if isAdmin();
+    }
+
+    // ========================================
+    // purchases コレクション（工場への発注管理）
+    // admin / staff は全件読み書き可
+    // ========================================
+    match /purchases/{docId} {
+      allow read:  if isSignedIn() && (isAdmin() || isStaff());
+      allow write: if isAdmin() || isStaff();
+    }
+
+    // ========================================
+    // quotations コレクション（見積書管理）
+    // admin / staff は全件読み書き可
+    // ========================================
+    match /quotations/{docId} {
+      allow read:  if isSignedIn() && (isAdmin() || isStaff());
+      allow write: if isAdmin() || isStaff();
+    }
+
+    // ========================================
+    // orderInvoices コレクション（受注に紐づく請求書）
+    // admin / staff は全件読み書き可
+    // ========================================
+    match /orderInvoices/{docId} {
+      allow read:  if isSignedIn() && (isAdmin() || isStaff());
+      allow write: if isAdmin() || isStaff();
+    }
+
+    // ========================================
+    // BPマスタコレクション（取引先・商品・仕入れ先・納品先）
+    // 会社別: rt_bp_*, rc_bp_*
+    // admin / staff は全件読み書き可
+    // ========================================
+    match /rt_bp_clients/{docId} {
+      allow read:  if isSignedIn() && (isAdmin() || isStaff());
+      allow write: if isAdmin() || isStaff();
+    }
+    match /rt_bp_products/{docId} {
+      allow read:  if isSignedIn() && (isAdmin() || isStaff());
+      allow write: if isAdmin() || isStaff();
+    }
+    match /rt_bp_suppliers/{docId} {
+      allow read:  if isSignedIn() && (isAdmin() || isStaff());
+      allow write: if isAdmin() || isStaff();
+    }
+    match /rt_bp_destinations/{docId} {
+      allow read:  if isSignedIn() && (isAdmin() || isStaff());
+      allow write: if isAdmin() || isStaff();
+    }
+    match /rc_bp_clients/{docId} {
+      allow read:  if isSignedIn() && (isAdmin() || isStaff());
+      allow write: if isAdmin() || isStaff();
+    }
+    match /rc_bp_products/{docId} {
+      allow read:  if isSignedIn() && (isAdmin() || isStaff());
+      allow write: if isAdmin() || isStaff();
+    }
+    match /rc_bp_suppliers/{docId} {
+      allow read:  if isSignedIn() && (isAdmin() || isStaff());
+      allow write: if isAdmin() || isStaff();
+    }
+    match /rc_bp_destinations/{docId} {
+      allow read:  if isSignedIn() && (isAdmin() || isStaff());
+      allow write: if isAdmin() || isStaff();
+    }
+    // 旧コレクション（互換性）
+    match /bp_clients/{docId} {
+      allow read:  if isSignedIn() && (isAdmin() || isStaff());
+      allow write: if isAdmin() || isStaff();
+    }
+    match /bp_products/{docId} {
+      allow read:  if isSignedIn() && (isAdmin() || isStaff());
+      allow write: if isAdmin() || isStaff();
+    }
+    match /bp_suppliers/{docId} {
+      allow read:  if isSignedIn() && (isAdmin() || isStaff());
+      allow write: if isAdmin() || isStaff();
+    }
+    match /bp_destinations/{docId} {
+      allow read:  if isSignedIn() && (isAdmin() || isStaff());
+      allow write: if isAdmin() || isStaff();
+    }
+
+    // ========================================
+    // rt_projects コレクション（ロイヤルトラスト案件管理）
+    // admin / staff は全件読み書き可
+    // ========================================
+    match /rt_projects/{docId} {
+      allow read:  if isSignedIn() && (isAdmin() || isStaff());
+      allow write: if isAdmin() || isStaff();
+    }
+
+    // ========================================
+    // rc_projects コレクション（ロイヤルコスメ案件管理）
+    // admin / staff は全件読み書き可
+    // ========================================
+    match /rc_projects/{docId} {
+      allow read:  if isSignedIn() && (isAdmin() || isStaff());
+      allow write: if isAdmin() || isStaff();
+    }
+
+    // ========================================
+    // customers コレクション（サロン管理：エンドユーザー顧客マスタ）
+    // サロンは自社（companyName 一致）の顧客のみ読み書き可
+    // ただし subRole='staff' は書き込み不可（閲覧のみ）
+    // 本社 admin/staff は集計用に全件読めるが、画面側で個別表示しない運用
+    // ========================================
+    match /customers/{customerId} {
+      allow read:   if isSignedIn()
+                     && (isAdmin() || isStaff()
+                         || resource.data.salonCompanyName == userDoc().companyName);
+      allow create: if isSignedIn()
+                     && (isAdmin()
+                         || (isSalonAdmin()
+                             && request.resource.data.salonCompanyName == userDoc().companyName));
+      allow update: if isSignedIn()
+                     && (isAdmin()
+                         || (isSalonAdmin()
+                             && resource.data.salonCompanyName == userDoc().companyName));
+      allow delete: if isAdmin()
+                     || (isSalonAdmin() && resource.data.salonCompanyName == userDoc().companyName);
+
+      // 来店履歴サブコレクション（staff も閲覧のみ、書き込みは admin/salonAdmin）
+      match /visits/{visitId} {
+        allow read:  if isSignedIn()
+                      && (isAdmin() || isStaff()
+                          || get(/databases/$(database)/documents/customers/$(customerId))
+                              .data.salonCompanyName == userDoc().companyName);
+        allow write: if isSignedIn()
+                      && (isAdmin()
+                          || (isSalonAdmin()
+                              && get(/databases/$(database)/documents/customers/$(customerId))
+                                  .data.salonCompanyName == userDoc().companyName));
+      }
+
+      // おすすめ履歴サブコレクション（staff は閲覧のみ）
+      match /recommendations/{recoId} {
+        allow read:  if isSignedIn()
+                      && (isAdmin() || isStaff()
+                          || get(/databases/$(database)/documents/customers/$(customerId))
+                              .data.salonCompanyName == userDoc().companyName);
+        allow write: if isSignedIn()
+                      && (isAdmin()
+                          || (isSalonAdmin()
+                              && get(/databases/$(database)/documents/customers/$(customerId))
+                                  .data.salonCompanyName == userDoc().companyName));
+      }
+    }
+
+    // ========================================
+    // salonProducts コレクション（サロン管理：店販レコメンド用商品マスタ）
+    // 全サロンが共有するカタログ。読み取りはログイン済み全員、書き込みは admin/staff のみ
+    // ========================================
+    match /salonProducts/{productId} {
+      allow read:  if isSignedIn();
+      allow write: if isAdmin() || isStaff();
+    }
+
+    // ========================================
+    // lineConfigs コレクション（サロン別 LINE Messaging API 設定）
+    // docId = salonCompanyName。サロン本人と admin のみ
+    // ========================================
+    match /lineConfigs/{salonCompanyName} {
+      allow read:  if isSignedIn()
+                    && (isAdmin() || salonCompanyName == userDoc().companyName);
+      allow write: if isSignedIn()
+                    && (isAdmin() || salonCompanyName == userDoc().companyName);
+    }
+
+    // ========================================
+    // それ以外は全拒否（保険）
+    // ========================================
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
