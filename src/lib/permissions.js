@@ -48,7 +48,8 @@
  * role / subRole:
  *   role: 'master' | 'admin' | 'staff' | 'dealer' | 'salon' | 'warehouse'
  *   subRole: 'admin' | 'staff'（dealer / salon のみ使用）
- *   2026-04-16 以降、dealer/salon の subRole 未設定は拒否対象（rules で弾く）
+ *   2026-04-17 カットオーバー完了: subRole 未設定は UI / rules の両方で拒否（strict）
+ *   以降 dealer/salon アカウントは招待時に必ず subRole をセットすること。
  */
 
 // ====== 基本判定 ======
@@ -59,17 +60,19 @@ export function isWarehouse(p) { return p?.role === 'warehouse' }
 export function isDealer(p) { return p?.role === 'dealer' }
 export function isSalon(p) { return p?.role === 'salon' }
 
-// dealer / salon のサブロール
-// 2026-04-16 の一括付与完了後は subRole 必ず入っている想定
-// 互換保護のため subRole 未設定時は admin 扱い（UI 層のみ、rules では拒否）
+// dealer / salon のサブロール（strict モード）
+// 2026-04-16 に subRole 一括付与スクリプト（scripts/backfill-subrole.mjs）を実行し、
+// 2026-04-17 の dry-run で「未設定 0件」を確認。監査ログ: subRoleBackfillLogs/NiaoxkIBMvQrZFE3hBc8
+// → lax フォールバック（未設定=admin扱い）を撤去。rules の hasValidSubRole() と完全一致させる。
+// 以降 subRole が未設定のユーザーは UI 上も「権限なし」として振る舞う（設計ミス検知）。
 export function isDealerAdmin(p) {
-  return isDealer(p) && (p?.subRole === 'admin' || !p?.subRole)
+  return isDealer(p) && p?.subRole === 'admin'
 }
 export function isDealerStaff(p) {
   return isDealer(p) && p?.subRole === 'staff'
 }
 export function isSalonAdmin(p) {
-  return isSalon(p) && (p?.subRole === 'admin' || !p?.subRole)
+  return isSalon(p) && p?.subRole === 'admin'
 }
 export function isSalonStaff(p) {
   return isSalon(p) && p?.subRole === 'staff'
