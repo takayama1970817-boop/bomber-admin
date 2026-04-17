@@ -64,6 +64,14 @@ service cloud.firestore {
       return isAdmin() || isStaff() || isWarehouse();
     }
 
+    // customers/{customerId} の salonCompanyName がログインユーザーの
+    // companyName と一致するか。visits/recommendations サブコレクションで
+    // 繰り返し呼ばれるので helper に抽出した（DRY 化）。
+    function isMyCustomer(customerId) {
+      return get(/databases/$(database)/documents/customers/$(customerId))
+                .data.salonCompanyName == userDoc().companyName;
+    }
+
     // ========================================
     // users コレクション
     // 本人は自分のドキュメントだけ読める
@@ -428,40 +436,41 @@ service cloud.firestore {
 
       // 来店履歴サブコレクション
       // create: サロン admin/staff 両方可（現場運用優先）
-      // update/delete: salonAdmin のみ（破壊系は厳格）
+      // update: salonAdmin + 本社admin、および salonStaff の「自分が作成した visit」のみ
+      // delete: salonAdmin + 本社admin のみ（破壊系は staff 不可）
       match /visits/{visitId} {
         allow read:  if isSignedIn()
-                      && (isAdmin() || isStaff()
-                          || get(/databases/$(database)/documents/customers/$(customerId))
-                              .data.salonCompanyName == userDoc().companyName);
+                      && (isAdmin() || isStaff() || isMyCustomer(customerId));
         allow create: if isSignedIn()
                        && (isAdmin()
-                           || ((isSalonAdmin() || isSalonStaff())
-                               && get(/databases/$(database)/documents/customers/$(customerId))
-                                   .data.salonCompanyName == userDoc().companyName));
-        allow update, delete: if isSignedIn()
-                               && (isAdmin()
-                                   || (isSalonAdmin()
-                                       && get(/databases/$(database)/documents/customers/$(customerId))
-                                           .data.salonCompanyName == userDoc().companyName));
+                           || ((isSalonAdmin() || isSalonStaff()) && isMyCustomer(customerId)));
+        // update の条件:
+        //   createdBy は不変（全ルートで rewrite 禁止。salonStaff による権限奪取対策）
+        //   かつ以下のいずれか:
+        //     - 本社 admin
+        //     - salonAdmin かつ 自社顧客
+        //     - salonStaff かつ 自社顧客 かつ 自分が作成した visit
+        allow update: if isSignedIn()
+                       && request.resource.data.createdBy == resource.data.createdBy
+                       && (isAdmin()
+                           || (isMyCustomer(customerId)
+                               && (isSalonAdmin()
+                                   || (isSalonStaff()
+                                       && resource.data.createdBy == request.auth.uid))));
+        // delete は salonStaff 不可（破壊系は管理者のみ）
+        allow delete: if isSignedIn()
+                       && (isAdmin() || (isSalonAdmin() && isMyCustomer(customerId)));
       }
 
-      // おすすめ履歴サブコレクション（visits と同一ポリシー）
+      // おすすめ履歴サブコレクション（visits と同等のポリシー）
       match /recommendations/{recoId} {
         allow read:  if isSignedIn()
-                      && (isAdmin() || isStaff()
-                          || get(/databases/$(database)/documents/customers/$(customerId))
-                              .data.salonCompanyName == userDoc().companyName);
+                      && (isAdmin() || isStaff() || isMyCustomer(customerId));
         allow create: if isSignedIn()
                        && (isAdmin()
-                           || ((isSalonAdmin() || isSalonStaff())
-                               && get(/databases/$(database)/documents/customers/$(customerId))
-                                   .data.salonCompanyName == userDoc().companyName));
+                           || ((isSalonAdmin() || isSalonStaff()) && isMyCustomer(customerId)));
         allow update, delete: if isSignedIn()
-                               && (isAdmin()
-                                   || (isSalonAdmin()
-                                       && get(/databases/$(database)/documents/customers/$(customerId))
-                                           .data.salonCompanyName == userDoc().companyName));
+                               && (isAdmin() || (isSalonAdmin() && isMyCustomer(customerId)));
       }
     }
 
