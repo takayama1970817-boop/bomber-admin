@@ -475,6 +475,16 @@ service cloud.firestore {
     }
 
     // ========================================
+    // subRoleBackfillLogs コレクション（subRole 一括付与スクリプトの監査ログ）
+    // - write: 完全禁止（scripts/backfill-subrole.mjs が Admin SDK で直接書き込む）
+    // - read: 本社 admin のみ（社内の監査目的でのみ参照可）
+    // ========================================
+    match /subRoleBackfillLogs/{logId} {
+      allow read:  if isAdmin();
+      allow write: if false;
+    }
+
+    // ========================================
     // salonProducts コレクション（サロン管理：店販レコメンド用商品マスタ）
     // 全サロンが共有するカタログ。読み取りはログイン済み全員、書き込みは admin/staff のみ
     // ========================================
