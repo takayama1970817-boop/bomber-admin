@@ -13,6 +13,13 @@ import {
 } from 'firebase/firestore'
 import { db } from '../lib/firebase.js'
 import { fetchAllProducts } from '../lib/bcartApi.js'
+import { useAuth } from '../contexts/AuthContext.jsx'
+import {
+  canManageSalonProduct,
+  canSyncBcartProducts,
+  canBulkDeleteSalonProducts,
+  assertCan,
+} from '../lib/permissions.js'
 
 const SKIN_TYPE_OPTIONS = ['乾燥', '敏感', '混合', '脂性', '普通', 'エイジング']
 const CONCERN_OPTIONS = ['シミ', 'たるみ', 'シワ', '毛穴', 'ニキビ', 'くすみ', '赤み', '乾燥']
@@ -23,6 +30,10 @@ function fmtYen(n) {
 }
 
 export default function SalonProductsAdmin() {
+  const { profile } = useAuth()
+  const allowManage = canManageSalonProduct(profile)
+  const allowSync = canSyncBcartProducts(profile)
+  const allowBulkDelete = canBulkDeleteSalonProducts(profile)
   const [products, setProducts] = useState([])
   const [loading, setLoading] = useState(true)
   const [showForm, setShowForm] = useState(false)
@@ -68,6 +79,12 @@ export default function SalonProductsAdmin() {
   // 一括削除
   const handleBulkDelete = async () => {
     if (selectedIds.size === 0) return
+    // 二重防御：admin のみ許可（UI側で非表示でも直接呼ばれ得る）
+    try {
+      assertCan(canBulkDeleteSalonProducts, profile)
+    } catch (e) {
+      alert(e.message); return
+    }
     const targets = products.filter((p) => selectedIds.has(p.id))
     const names = targets.slice(0, 5).map((p) => `・${p.name}`).join('\n')
     const more = targets.length > 5 ? `\n…他${targets.length - 5}件` : ''
@@ -95,6 +112,12 @@ export default function SalonProductsAdmin() {
 
   // === Bカートから商品を同期 ===
   const handleSync = async () => {
+    // 二重防御：admin のみ許可（破壊リスク高）
+    try {
+      assertCan(canSyncBcartProducts, profile)
+    } catch (e) {
+      alert(e.message); return
+    }
     if (!confirm(`Bカートから「${filterBrand}」を含む商品を取得して、未登録分を salonProducts に追加します。\n\n※ 既存商品の肌タイプ・提案セリフは上書きしません。\n※ 価格は Bカート API に含まれないため後で手入力してください。\n\n続けますか？`)) return
     setSyncing(true)
     setSyncResult(null)
@@ -196,32 +219,43 @@ export default function SalonProductsAdmin() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <input
-            type="text"
-            value={filterBrand}
-            onChange={(e) => setFilterBrand(e.target.value)}
-            placeholder="ブランド名フィルタ"
-            className="rounded-lg border border-gray-300 px-3 py-2 text-sm w-32"
-          />
-          <button
-            onClick={handleSync}
-            disabled={syncing}
-            className="rounded-lg border border-blue-300 bg-blue-50 px-4 py-2 text-sm font-medium text-blue-700 hover:bg-blue-100 disabled:opacity-50"
-          >
-            {syncing ? '同期中…' : '🔄 Bカート同期(API)'}
-          </button>
-          <button
-            onClick={() => setShowCsvImport(true)}
-            className="rounded-lg border border-green-300 bg-green-50 px-4 py-2 text-sm font-medium text-green-700 hover:bg-green-100"
-          >
-            📥 BカートCSV取込
-          </button>
-          <button
-            onClick={() => { setEditing(null); setShowForm(true) }}
-            className="rounded-lg bg-pink-600 px-4 py-2 text-sm font-medium text-white hover:bg-pink-700"
-          >
-            + 商品を追加
-          </button>
+          {allowSync && (
+            <>
+              <input
+                type="text"
+                value={filterBrand}
+                onChange={(e) => setFilterBrand(e.target.value)}
+                placeholder="ブランド名フィルタ"
+                className="rounded-lg border border-gray-300 px-3 py-2 text-sm w-32"
+              />
+              <button
+                onClick={handleSync}
+                disabled={syncing}
+                className="rounded-lg border border-blue-300 bg-blue-50 px-4 py-2 text-sm font-medium text-blue-700 hover:bg-blue-100 disabled:opacity-50"
+              >
+                {syncing ? '同期中…' : '🔄 Bカート同期(API)'}
+              </button>
+              <button
+                onClick={() => setShowCsvImport(true)}
+                className="rounded-lg border border-green-300 bg-green-50 px-4 py-2 text-sm font-medium text-green-700 hover:bg-green-100"
+              >
+                📥 BカートCSV取込
+              </button>
+            </>
+          )}
+          {allowManage && (
+            <button
+              onClick={() => { setEditing(null); setShowForm(true) }}
+              className="rounded-lg bg-pink-600 px-4 py-2 text-sm font-medium text-white hover:bg-pink-700"
+            >
+              + 商品を追加
+            </button>
+          )}
+          {!allowManage && !allowSync && (
+            <span className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-2 text-xs text-gray-600">
+              🔒 閲覧のみ
+            </span>
+          )}
         </div>
       </div>
 
@@ -268,8 +302,8 @@ export default function SalonProductsAdmin() {
         </div>
       ) : (
         <>
-          {/* 選択時に出る一括操作バー */}
-          {selectedIds.size > 0 && (
+          {/* 選択時に出る一括操作バー（admin のみ） */}
+          {allowBulkDelete && selectedIds.size > 0 && (
             <div className="sticky top-2 z-10 mb-2 flex items-center justify-between rounded-lg border-2 border-pink-300 bg-pink-50 p-3 shadow-md">
               <div className="text-sm font-bold text-pink-700">
                 {selectedIds.size}件 選択中
@@ -295,19 +329,21 @@ export default function SalonProductsAdmin() {
           <table className="min-w-full divide-y divide-gray-200 text-sm">
             <thead className="bg-gray-50 text-xs uppercase text-gray-500">
               <tr>
-                <th className="px-3 py-3 text-center w-10">
-                  <input
-                    type="checkbox"
-                    checked={selectedIds.size > 0 && selectedIds.size === products.length}
-                    ref={(el) => {
-                      if (el) {
-                        const isIndet = selectedIds.size > 0 && (selectedIds.size !== products.length)
-                        el.indeterminate = isIndet
-                      }
-                    }}
-                    onChange={toggleSelectAll}
-                  />
-                </th>
+                {allowBulkDelete && (
+                  <th className="px-3 py-3 text-center w-10">
+                    <input
+                      type="checkbox"
+                      checked={selectedIds.size > 0 && selectedIds.size === products.length}
+                      ref={(el) => {
+                        if (el) {
+                          const isIndet = selectedIds.size > 0 && (selectedIds.size !== products.length)
+                          el.indeterminate = isIndet
+                        }
+                      }}
+                      onChange={toggleSelectAll}
+                    />
+                  </th>
+                )}
                 <th className="px-4 py-3 text-left">商品名</th>
                 <th className="px-4 py-3 text-right">価格</th>
                 <th className="px-4 py-3 text-left">対応肌タイプ</th>
@@ -319,13 +355,15 @@ export default function SalonProductsAdmin() {
             <tbody className="divide-y divide-gray-100">
               {products.map((p) => (
                 <tr key={p.id} className={`${selectedIds.has(p.id) ? 'bg-pink-50' : 'hover:bg-gray-50'}`}>
-                  <td className="px-3 py-3 text-center">
-                    <input
-                      type="checkbox"
-                      checked={selectedIds.has(p.id)}
-                      onChange={() => toggleSelect(p.id)}
-                    />
-                  </td>
+                  {allowBulkDelete && (
+                    <td className="px-3 py-3 text-center">
+                      <input
+                        type="checkbox"
+                        checked={selectedIds.has(p.id)}
+                        onChange={() => toggleSelect(p.id)}
+                      />
+                    </td>
+                  )}
                   <td className="px-4 py-3">
                     <div className="font-medium">{p.name}</div>
                     {p.suggestedScript && (
@@ -351,8 +389,12 @@ export default function SalonProductsAdmin() {
                     {p.active ? <span className="text-green-600">●</span> : <span className="text-gray-300">○</span>}
                   </td>
                   <td className="px-4 py-3 text-right">
-                    <button onClick={() => { setEditing(p); setShowForm(true) }}
-                      className="text-xs text-pink-600 hover:underline">編集</button>
+                    {allowManage ? (
+                      <button onClick={() => { setEditing(p); setShowForm(true) }}
+                        className="text-xs text-pink-600 hover:underline">編集</button>
+                    ) : (
+                      <span className="text-xs text-gray-300">—</span>
+                    )}
                   </td>
                 </tr>
               ))}
@@ -421,6 +463,7 @@ const COL = {
 }
 
 function BcartCsvImportModal({ filterBrand: defaultBrand, onClose, onDone }) {
+  const { profile } = useAuth()
   const [filterBrand, setFilterBrand] = useState(defaultBrand || 'VAVITTE')
   const [allRows, setAllRows] = useState([])
   const [filtered, setFiltered] = useState([])
@@ -463,6 +506,12 @@ function BcartCsvImportModal({ filterBrand: defaultBrand, onClose, onDone }) {
 
   const handleImport = async () => {
     if (!filtered.length) return
+    // 二重防御：CSV取込も破壊リスクが高いため admin のみ
+    try {
+      assertCan(canSyncBcartProducts, profile)
+    } catch (e) {
+      setError(e.message); return
+    }
     if (!confirm(`${filtered.length}件の商品を salonProducts に取込みます。\n\n価格は「上代」を採用、空なら単価にフォールバック。\n既存商品の肌タイプ・提案セリフは保護されます。\n\n続けますか？`)) return
 
     setImporting(true)
@@ -667,6 +716,7 @@ function BcartCsvImportModal({ filterBrand: defaultBrand, onClose, onDone }) {
 }
 
 function ProductForm({ editing, onClose, onSaved }) {
+  const { profile } = useAuth()
   const isEdit = !!editing
   const [name, setName] = useState(editing?.name || '')
   const [price, setPrice] = useState(editing?.price || '')
@@ -684,6 +734,12 @@ function ProductForm({ editing, onClose, onSaved }) {
 
   const handleSave = async () => {
     if (!name.trim()) { alert('商品名は必須です'); return }
+    // 二重防御：通常CRUDは admin/staff のみ
+    try {
+      assertCan(canManageSalonProduct, profile)
+    } catch (e) {
+      alert(e.message); return
+    }
     setSaving(true)
     try {
       const data = {
@@ -707,6 +763,7 @@ function ProductForm({ editing, onClose, onSaved }) {
       }
       onSaved()
     } catch (e) {
+      console.error('salonProducts 保存失敗:', e)
       alert('保存失敗: ' + e.message)
     } finally {
       setSaving(false)
@@ -715,12 +772,19 @@ function ProductForm({ editing, onClose, onSaved }) {
 
   const handleDelete = async () => {
     if (!isEdit) return
+    // 二重防御：単体削除も admin/staff のみ（一括削除は admin のみで別権限）
+    try {
+      assertCan(canManageSalonProduct, profile)
+    } catch (e) {
+      alert(e.message); return
+    }
     if (!confirm(`「${editing.name}」を削除しますか？`)) return
     setSaving(true)
     try {
       await deleteDoc(doc(db, 'salonProducts', editing.id))
       onSaved()
     } catch (e) {
+      console.error('salonProducts 削除失敗:', e)
       alert('削除失敗: ' + e.message)
       setSaving(false)
     }

@@ -17,9 +17,11 @@ import {
 import { db } from '../lib/firebase.js'
 import { useAuth } from '../contexts/AuthContext.jsx'
 import {
+  canCreateCustomer,
   canEditCustomer,
   canDeleteCustomer,
   canImportCsv,
+  canAddVisit,
   assertCan,
 } from '../lib/permissions.js'
 
@@ -45,6 +47,7 @@ const CONCERN_OPTIONS = ['シミ', 'たるみ', 'シワ', '毛穴', 'ニキビ',
 
 export default function SalonCustomers() {
   const { profile } = useAuth()
+  const allowCreate = canCreateCustomer(profile)
   const allowEdit = canEditCustomer(profile)
   const allowImport = canImportCsv(profile)
   const companyName = profile?.companyName || ''
@@ -153,7 +156,7 @@ export default function SalonCustomers() {
               📥 CSV取込
             </button>
           )}
-          {allowEdit && (
+          {allowCreate && (
             <button
               onClick={() => { setEditing(null); setShowForm(true) }}
               className="rounded-lg bg-pink-600 px-4 py-2 text-sm font-medium text-white hover:bg-pink-700"
@@ -161,14 +164,14 @@ export default function SalonCustomers() {
               + 新規顧客
             </button>
           )}
-          {!allowEdit && (
+          {!allowCreate && (
             <button
               type="button"
-              onClick={() => alert('この画面は現在「閲覧のみ」権限で開いています。\n\n新規追加・編集・削除を行うには「管理者」権限が必要です。\n担当管理者にアカウントの権限変更を依頼してください。')}
+              onClick={() => alert('この画面は現在「閲覧のみ」権限で開いています。\n\n新規追加・編集・削除を行うには権限が必要です。\n担当管理者にアカウントの権限変更を依頼してください。')}
               className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-2 text-xs text-gray-600 hover:bg-gray-100 cursor-pointer"
-              title="スタッフ権限では編集できません。管理者権限が必要です。"
+              title="権限がありません"
             >
-              🔒 閲覧のみ（スタッフ権限）
+              🔒 閲覧のみ
             </button>
           )}
         </div>
@@ -355,8 +358,9 @@ function CustomerForm({ companyName, editing, onClose, onSaved }) {
   const handleSave = async () => {
     if (!name.trim()) { alert('お名前は必須です'); return }
     // 二重防御：UI非表示を迂回されても保存前に権限チェック
+    // 新規は canCreateCustomer（salonStaff もOK）、編集は canEditCustomer（salonStaff NG）
     try {
-      assertCan(canEditCustomer, profile)
+      assertCan(isEdit ? canEditCustomer : canCreateCustomer, profile)
     } catch (e) {
       alert(e.message); return
     }
@@ -538,6 +542,8 @@ function CustomerForm({ companyName, editing, onClose, onSaved }) {
 // 顧客詳細パネル（来店履歴 + レコメンド統合）
 // ============================
 function CustomerDetail({ customer, onClose, onChanged }) {
+  const { profile } = useAuth()
+  const allowAddVisit = canAddVisit(profile)
   const [visits, setVisits] = useState([])
   const [products, setProducts] = useState([])
   const [loading, setLoading] = useState(true)
@@ -718,12 +724,14 @@ function CustomerDetail({ customer, onClose, onChanged }) {
       <div className="mt-4">
         <div className="flex items-center justify-between">
           <h4 className="text-sm font-bold text-gray-700">来店履歴</h4>
-          <button
-            onClick={() => setShowVisitForm(true)}
-            className="rounded-lg bg-pink-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-pink-700"
-          >
-            + 来店を登録
-          </button>
+          {allowAddVisit && (
+            <button
+              onClick={() => setShowVisitForm(true)}
+              className="rounded-lg bg-pink-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-pink-700"
+            >
+              + 来店を登録
+            </button>
+          )}
         </div>
         {loading ? (
           <div className="mt-2 text-sm text-gray-500">読み込み中…</div>
@@ -781,6 +789,7 @@ function CustomerDetail({ customer, onClose, onChanged }) {
 // 来店登録フォーム（① コア機能）
 // ============================
 function VisitForm({ customer, products, onClose, onSaved }) {
+  const { profile } = useAuth()
   const today = new Date().toISOString().slice(0, 10)
   const [visitDate, setVisitDate] = useState(today)
   const [menu, setMenu] = useState('')
@@ -820,6 +829,12 @@ function VisitForm({ customer, products, onClose, onSaved }) {
 
   const handleSave = async () => {
     if (!visitDate) { alert('来店日を入力してください'); return }
+    // 二重防御：来店登録の権限チェック（salonStaff もOKだが警告系ガード）
+    try {
+      assertCan(canAddVisit, profile)
+    } catch (e) {
+      alert(e.message); return
+    }
     setSaving(true)
     try {
       const visitTs = Timestamp.fromDate(new Date(visitDate))
