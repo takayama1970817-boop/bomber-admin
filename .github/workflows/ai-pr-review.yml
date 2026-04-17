@@ -79,9 +79,10 @@ jobs:
           git cat-file -e "${HEAD_SHA}^{commit}" || { echo "HEAD_SHA unreachable"; exit 1; }
 
           # 差分を生成（バイナリ・秘匿ファイル・ロック類を除外）
+          # --binary=false は存在しないオプション（"option 'binary' takes no value" エラーの原因）。
+          # バイナリを差分に含めないのが既定挙動なので、そのまま省略する。
           git diff \
             --no-color \
-            --binary=false \
             --unified=3 \
             "${BASE_SHA}" "${HEAD_SHA}" \
             -- . \
@@ -103,7 +104,11 @@ jobs:
             ':(exclude)**/*.webp' \
             ':(exclude)**/*.ico' \
             ':(exclude)**/*.pdf' \
-            > pr.diff || true
+            > pr.diff
+          # 注: かつて `|| true` で包んでいたが、git diff の構文エラー
+          # （--binary=false など）を握りつぶして 0 バイトになる事故が発生した。
+          # 正しく差分が空の場合は git diff が終了コード 0 で空出力を返すため、
+          # `|| true` なしでも動作する。構文エラーは確実に検知する方が安全。
 
           # 巨大差分は先頭 + 末尾のハイブリッドで残す（中央のみ落とす）
           DIFF_BYTES=$(wc -c < pr.diff)
