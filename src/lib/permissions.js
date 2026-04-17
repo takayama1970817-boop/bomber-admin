@@ -17,10 +17,16 @@
  * ============================================================================
  *                             | master | admin | staff | warehouse | dealerAdm | dealerStf | salonAdm | salonStf
  * canInvite                   |   ✅   |  ✅   |   ❌  |    ❌     |    ❌     |    ❌     |    ❌    |   ❌
+ * canCreateCustomer           |   ✅   |  ✅   |   ✅  |    ❌     |    ❌     |    ❌     |    ✅    |   ✅
  * canEditCustomer             |   ✅   |  ✅   |   ✅  |    ❌     |    ❌     |    ❌     |    ✅    |   ❌
  * canDeleteCustomer           |   ✅   |  ✅   |   ❌  |    ❌     |    ❌     |    ❌     |    ✅    |   ❌
  * canImportCsv                |   ✅   |  ✅   |   ✅  |    ❌     |    ✅     |    ❌     |    ✅    |   ❌
- * canAddVisit                 |   ✅   |  ✅   |   ❌  |    ❌     |    ❌     |    ❌     |    ✅    |   ❌
+ * canAddVisit                 |   ✅   |  ✅   |   ❌  |    ❌     |    ❌     |    ❌     |    ✅    |   ✅
+ * canEditVisit                |   ✅   |  ✅   |   ❌  |    ❌     |    ❌     |    ❌     |    ✅    |   ❌
+ * canDeleteVisit              |   ✅   |  ✅   |   ❌  |    ❌     |    ❌     |    ❌     |    ✅    |   ❌
+ * canManageSalonProduct       |   ✅   |  ✅   |   ✅  |    ❌     |    ❌     |    ❌     |    ❌    |   ❌
+ * canSyncBcartProducts        |   ✅   |  ✅   |   ❌  |    ❌     |    ❌     |    ❌     |    ❌    |   ❌
+ * canBulkDeleteSalonProducts  |   ✅   |  ✅   |   ❌  |    ❌     |    ❌     |    ❌     |    ❌    |   ❌
  * canEditSettings             |   ✅   |  ✅   |   ❌  |    ❌     |    ❌     |    ❌     |    ❌    |   ❌
  * canExportSettlement         |   ✅   |  ✅   |   ✅  |    ❌     |    ✅     |    ✅     |    ❌    |   ❌
  * canManageDocuments          |   ✅   |  ✅   |   ❌  |    ❌     |    ❌     |    ❌     |    ❌    |   ❌
@@ -71,7 +77,12 @@ export function isSalonStaff(p) {
 /** 招待（代理店・サロン招待、RT のみ） */
 export function canInvite(p) { return isAdmin(p) }
 
-/** サロンの顧客編集（S側 CRUD） */
+/** サロンの顧客新規登録（現場は動けるが壊せない方針：salonStaff も OK） */
+export function canCreateCustomer(p) {
+  return isSalon(p) || isAdmin(p) || isStaff(p)
+}
+
+/** サロンの顧客編集（salonStaff は NG） */
 export function canEditCustomer(p) {
   if (isSalonStaff(p)) return false
   return isSalon(p) || isAdmin(p) || isStaff(p)
@@ -89,10 +100,36 @@ export function canImportCsv(p) {
   return isSalonAdmin(p) || isDealerAdmin(p) || isAdmin(p) || isStaff(p)
 }
 
-/** 来店履歴の追加 */
+/** 来店履歴の追加（現場運用優先：salonStaff も OK） */
 export function canAddVisit(p) {
+  return isSalonAdmin(p) || isSalonStaff(p) || isAdmin(p)
+}
+
+/** 来店履歴の編集（破壊系なので salonStaff は NG。将来 createdBy で自分作成分のみ可に拡張予定） */
+export function canEditVisit(p) {
   if (isSalonStaff(p)) return false
   return isSalonAdmin(p) || isAdmin(p)
+}
+
+/** 来店履歴の削除（破壊系なので salonStaff は NG） */
+export function canDeleteVisit(p) {
+  if (isSalonStaff(p)) return false
+  return isSalonAdmin(p) || isAdmin(p)
+}
+
+/** 店販商品マスタの CRUD（本社 RT admin/staff のみ） */
+export function canManageSalonProduct(p) {
+  return isAdmin(p) || isStaff(p)
+}
+
+/** Bカートからの商品同期（API / CSV）— データ破壊リスクが高いため admin のみ */
+export function canSyncBcartProducts(p) {
+  return isAdmin(p)
+}
+
+/** 店販商品マスタの一括削除（admin のみ） */
+export function canBulkDeleteSalonProducts(p) {
+  return isAdmin(p)
 }
 
 /** 設定変更（ブランド・権限・キックバック設定など、RT のみ） */

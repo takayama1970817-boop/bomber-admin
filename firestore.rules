@@ -51,6 +51,10 @@ service cloud.firestore {
     function isSalonAdmin() {
       return isSalon() && hasValidSubRole() && userDoc().subRole == 'admin';
     }
+    // salon の staff サブロール（現場運用用：create可能、update/delete不可）
+    function isSalonStaff() {
+      return isSalon() && hasValidSubRole() && userDoc().subRole == 'staff';
+    }
     function isDealerAdmin() {
       return isDealer() && hasValidSubRole() && userDoc().subRole == 'admin';
     }
@@ -405,41 +409,59 @@ service cloud.firestore {
       allow read:   if isSignedIn()
                      && (isAdmin() || isStaff()
                          || resource.data.salonCompanyName == userDoc().companyName);
+
+      // create: 現場運用優先で salonAdmin / salonStaff 両方可（本社 admin/staff も可）
       allow create: if isSignedIn()
-                     && (isAdmin()
-                         || (isSalonAdmin()
+                     && (isAdmin() || isStaff()
+                         || ((isSalonAdmin() || isSalonStaff())
                              && request.resource.data.salonCompanyName == userDoc().companyName));
+
+      // update: 破壊系なので salonAdmin のみ（salonStaff は既存データ壊せない）
       allow update: if isSignedIn()
-                     && (isAdmin()
+                     && (isAdmin() || isStaff()
                          || (isSalonAdmin()
                              && resource.data.salonCompanyName == userDoc().companyName));
+
+      // delete: salonAdmin または本社 admin のみ
       allow delete: if isAdmin()
                      || (isSalonAdmin() && resource.data.salonCompanyName == userDoc().companyName);
 
-      // 来店履歴サブコレクション（staff も閲覧のみ、書き込みは admin/salonAdmin）
+      // 来店履歴サブコレクション
+      // create: サロン admin/staff 両方可（現場運用優先）
+      // update/delete: salonAdmin のみ（破壊系は厳格）
       match /visits/{visitId} {
         allow read:  if isSignedIn()
                       && (isAdmin() || isStaff()
                           || get(/databases/$(database)/documents/customers/$(customerId))
                               .data.salonCompanyName == userDoc().companyName);
-        allow write: if isSignedIn()
-                      && (isAdmin()
-                          || (isSalonAdmin()
-                              && get(/databases/$(database)/documents/customers/$(customerId))
-                                  .data.salonCompanyName == userDoc().companyName));
+        allow create: if isSignedIn()
+                       && (isAdmin()
+                           || ((isSalonAdmin() || isSalonStaff())
+                               && get(/databases/$(database)/documents/customers/$(customerId))
+                                   .data.salonCompanyName == userDoc().companyName));
+        allow update, delete: if isSignedIn()
+                               && (isAdmin()
+                                   || (isSalonAdmin()
+                                       && get(/databases/$(database)/documents/customers/$(customerId))
+                                           .data.salonCompanyName == userDoc().companyName));
       }
 
-      // おすすめ履歴サブコレクション（staff は閲覧のみ）
+      // おすすめ履歴サブコレクション（visits と同一ポリシー）
       match /recommendations/{recoId} {
         allow read:  if isSignedIn()
                       && (isAdmin() || isStaff()
                           || get(/databases/$(database)/documents/customers/$(customerId))
                               .data.salonCompanyName == userDoc().companyName);
-        allow write: if isSignedIn()
-                      && (isAdmin()
-                          || (isSalonAdmin()
-                              && get(/databases/$(database)/documents/customers/$(customerId))
-                                  .data.salonCompanyName == userDoc().companyName));
+        allow create: if isSignedIn()
+                       && (isAdmin()
+                           || ((isSalonAdmin() || isSalonStaff())
+                               && get(/databases/$(database)/documents/customers/$(customerId))
+                                   .data.salonCompanyName == userDoc().companyName));
+        allow update, delete: if isSignedIn()
+                               && (isAdmin()
+                                   || (isSalonAdmin()
+                                       && get(/databases/$(database)/documents/customers/$(customerId))
+                                           .data.salonCompanyName == userDoc().companyName));
       }
     }
 
