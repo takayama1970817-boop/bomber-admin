@@ -24,11 +24,14 @@ jobs:
       # ① base ブランチ側のスクリプト/ワークフローを取得する。
       #    PR ヘッド側のコードはチェックアウトしない（改変された ai_pr_review.py
       #    に OPENAI_API_KEY 抜き取りコードを仕込まれるリスクを排除するため）。
+      #    fetch-depth: 0 にして base 側の完全履歴を取得しておく。後続の
+      #    `git fetch origin HEAD_SHA` で取得した PR 先端コミットと diff を
+      #    算出するために必要（shallow clone だと SHA 同士の diff が空になる場合あり）。
       - name: Checkout base branch (trusted scripts)
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.base.sha }}
-          fetch-depth: 1
+          fetch-depth: 0
           persist-credentials: false
 
       # 実際にどの ref / SHA を使ったかを必ずログに残す（base 側で動いている証跡）
@@ -59,15 +62,21 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
           # 巨大差分対策の上限（文字数）。先頭+末尾ハイブリッドで保持する
           DIFF_MAX_CHARS: "120000"
           DIFF_TAIL_CHARS: "30000"
         run: |
           set -euo pipefail
 
-          # base / head の両 SHA を取り込む（チェックアウトはしない）
-          git fetch --no-tags --depth=1 origin "${BASE_SHA}"
-          git fetch --no-tags --depth=1 origin "${HEAD_SHA}"
+          # GitHub が公開している PR ref（refs/pull/<N>/head）経由で HEAD を取り込む。
+          # SHA 直接指定 + 浅い clone だと git diff が 0 バイトになるケースに遭遇したため、
+          # ref 経由で確実に到達可能にしておく。PR コードの checkout は行わない。
+          git fetch --no-tags origin "refs/pull/${PR_NUMBER}/head"
+
+          # 念のため実際に取り込んだか確認（SHA が差分算出に使えるか）
+          git cat-file -e "${BASE_SHA}^{commit}" || { echo "BASE_SHA unreachable"; exit 1; }
+          git cat-file -e "${HEAD_SHA}^{commit}" || { echo "HEAD_SHA unreachable"; exit 1; }
 
           # 差分を生成（バイナリ・秘匿ファイル・ロック類を除外）
           git diff \
