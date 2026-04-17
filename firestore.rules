@@ -72,6 +72,15 @@ service cloud.firestore {
                 .data.salonCompanyName == userDoc().companyName;
     }
 
+    // 招待・ユーザー作成時の subRole 必須バリデーション。
+    // role が dealer / salon の場合は subRole が 'admin' or 'staff' 必須。
+    // それ以外の role（master / admin / staff / warehouse / client）では subRole は無くてもよい。
+    // permissions.js の strict モード（2026-04-17 カットオーバー）と整合。
+    function hasRequiredSubRoleForInvite(data) {
+      return !(data.role in ['dealer', 'salon'])
+        || (data.subRole is string && (data.subRole == 'admin' || data.subRole == 'staff'));
+    }
+
     // ========================================
     // users コレクション
     // 本人は自分のドキュメントだけ読める
@@ -81,13 +90,17 @@ service cloud.firestore {
     match /users/{uid} {
       allow get:    if isSignedIn();
       allow list:   if isSignedIn();
-      allow create: if isAdmin()
-                     || (isSelf(uid)
-                         && request.resource.data.role in ['staff', 'dealer', 'warehouse', 'salon', 'client']
-                         && request.resource.data.uid == uid);
-      allow update: if isAdmin()
-                     || (isSelf(uid)
-                        && request.resource.data.role == resource.data.role); // 本人は role 変更不可（admin/masterを除く）
+      // create 時は role が dealer/salon なら subRole 必須（strict モード整合）
+      allow create: if (isAdmin()
+                        || (isSelf(uid)
+                            && request.resource.data.role in ['staff', 'dealer', 'warehouse', 'salon', 'client']
+                            && request.resource.data.uid == uid))
+                     && hasRequiredSubRoleForInvite(request.resource.data);
+      // update も dealer/salon に昇格するケースで subRole を要求する
+      allow update: if (isAdmin()
+                        || (isSelf(uid)
+                            && request.resource.data.role == resource.data.role))
+                     && hasRequiredSubRoleForInvite(request.resource.data);
       allow delete: if isAdmin();
     }
 
@@ -240,7 +253,11 @@ service cloud.firestore {
     // ========================================
     match /allowedEmails/{docId} {
       allow read:  if true;
-      allow write: if isAdmin();
+      // write 時に dealer/salon 招待なら subRole 必須。
+      // 管理者は admin なのですぐ通常書き込みできるが、subRole 欠損の招待レコードは
+      // 後続のログイン時にユーザーが lockout されてしまうためここで阻止する。
+      allow write: if isAdmin()
+                    && hasRequiredSubRoleForInvite(request.resource.data);
     }
 
     // ========================================
