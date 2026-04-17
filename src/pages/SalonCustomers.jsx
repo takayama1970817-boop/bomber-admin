@@ -22,6 +22,8 @@ import {
   canDeleteCustomer,
   canImportCsv,
   canAddVisit,
+  canEditVisit,
+  canDeleteVisit,
   assertCan,
 } from '../lib/permissions.js'
 
@@ -544,10 +546,14 @@ function CustomerForm({ companyName, editing, onClose, onSaved }) {
 function CustomerDetail({ customer, onClose, onChanged }) {
   const { profile } = useAuth()
   const allowAddVisit = canAddVisit(profile)
+  const allowEditVisit = canEditVisit(profile)
+  const allowDeleteVisit = canDeleteVisit(profile)
   const [visits, setVisits] = useState([])
   const [products, setProducts] = useState([])
   const [loading, setLoading] = useState(true)
   const [showVisitForm, setShowVisitForm] = useState(false)
+  const [editingVisit, setEditingVisit] = useState(null)
+  const [deletingVisitId, setDeletingVisitId] = useState(null)
 
   const loadVisits = async () => {
     setLoading(true)
@@ -581,6 +587,65 @@ function CustomerDetail({ customer, onClose, onChanged }) {
     loadVisits()
     loadProducts()
   }, [customer.id])
+
+  // 来店編集・削除後に customer のサマリーを再計算して更新する。
+  // delta 計算より全件再集計の方がズレが累積しないので単純で安全。
+  const recomputeCustomerAggregates = async () => {
+    try {
+      const snap = await getDocs(
+        collection(db, 'customers', customer.id, 'visits'),
+      )
+      let firstTs = null
+      let lastTs = null
+      let total = 0
+      snap.docs.forEach((d) => {
+        const data = d.data()
+        const ts = data.visitDate
+        if (ts) {
+          if (!firstTs || ts.seconds < firstTs.seconds) firstTs = ts
+          if (!lastTs || ts.seconds > lastTs.seconds) lastTs = ts
+        }
+        total += Number(data.totalAmount) || 0
+      })
+      await updateDoc(doc(db, 'customers', customer.id), {
+        firstVisit: firstTs,
+        lastVisit: lastTs,
+        visitCount: snap.size,
+        totalSpent: total,
+        updatedAt: serverTimestamp(),
+      })
+    } catch (e) {
+      // 集計失敗しても visit 自体の操作は既に成功しているので画面は更新する。
+      // ただしログには残す。
+      console.error('customer サマリー再計算失敗:', e)
+    }
+  }
+
+  // 来店削除
+  const handleDeleteVisit = async (visit) => {
+    // 二重防御：UI 非表示を迂回されても保存前にチェック
+    try {
+      assertCan(canDeleteVisit, profile)
+    } catch (e) {
+      alert(e.message); return
+    }
+    const when = fmtDate(visit.visitDate)
+    const amount = fmtYen(visit.totalAmount)
+    if (!confirm(`${when} の来店記録（${amount}）を削除します。\nこの操作は取り消せません。\n\n本当に削除しますか？`)) return
+
+    setDeletingVisitId(visit.id)
+    try {
+      await deleteDoc(doc(db, 'customers', customer.id, 'visits', visit.id))
+      await recomputeCustomerAggregates()
+      await loadVisits()
+      onChanged && onChanged()
+    } catch (e) {
+      console.error('来店削除失敗:', e)
+      alert('削除に失敗しました: ' + e.message)
+    } finally {
+      setDeletingVisitId(null)
+    }
+  }
 
   // レコメンドロジック
   const recommendations = useMemo(() => {
@@ -743,9 +808,28 @@ function CustomerDetail({ customer, onClose, onChanged }) {
           <ul className="mt-2 space-y-2">
             {visits.map((v) => (
               <li key={v.id} className="rounded-lg border border-gray-200 p-3 text-sm">
-                <div className="flex justify-between">
+                <div className="flex justify-between items-start gap-2">
                   <span className="font-medium">{fmtDate(v.visitDate)}</span>
-                  <span className="text-pink-600 font-bold">{fmtYen(v.totalAmount)}</span>
+                  <div className="flex items-center gap-2">
+                    <span className="text-pink-600 font-bold">{fmtYen(v.totalAmount)}</span>
+                    {allowEditVisit && (
+                      <button
+                        onClick={() => { setEditingVisit(v); setShowVisitForm(true) }}
+                        className="text-[10px] text-pink-600 hover:underline"
+                      >
+                        編集
+                      </button>
+                    )}
+                    {allowDeleteVisit && (
+                      <button
+                        onClick={() => handleDeleteVisit(v)}
+                        disabled={deletingVisitId === v.id}
+                        className="text-[10px] text-red-500 hover:underline disabled:opacity-50"
+                      >
+                        {deletingVisitId === v.id ? '削除中…' : '削除'}
+                      </button>
+                    )}
+                  </div>
                 </div>
                 {(v.menu || []).length > 0 && (
                   <div className="text-xs text-gray-600 mt-1">施術: {v.menu.join(', ')}</div>
@@ -773,10 +857,14 @@ function CustomerDetail({ customer, onClose, onChanged }) {
         <VisitForm
           customer={customer}
           products={products}
-          onClose={() => setShowVisitForm(false)}
-          onSaved={() => {
+          editing={editingVisit}
+          onClose={() => { setShowVisitForm(false); setEditingVisit(null) }}
+          onSaved={async () => {
             setShowVisitForm(false)
-            loadVisits()
+            setEditingVisit(null)
+            await loadVisits()
+            // 編集時はサマリー再計算（新規登録時は VisitForm 内で increment 済み）
+            if (editingVisit) await recomputeCustomerAggregates()
             onChanged && onChanged()
           }}
         />
@@ -788,15 +876,28 @@ function CustomerDetail({ customer, onClose, onChanged }) {
 // ============================
 // 来店登録フォーム（① コア機能）
 // ============================
-function VisitForm({ customer, products, onClose, onSaved }) {
+function VisitForm({ customer, products, editing, onClose, onSaved }) {
   const { profile } = useAuth()
+  const isEdit = !!editing
   const today = new Date().toISOString().slice(0, 10)
-  const [visitDate, setVisitDate] = useState(today)
-  const [menu, setMenu] = useState('')
-  const [menuPrice, setMenuPrice] = useState('')
-  const [productsSold, setProductsSold] = useState([]) // [{productId, productName, quantity, price}]
-  const [skinConditionNote, setSkinConditionNote] = useState('')
-  const [nextRecommendation, setNextRecommendation] = useState('')
+  const initialDate = (() => {
+    if (!editing?.visitDate) return today
+    const d = editing.visitDate.toDate ? editing.visitDate.toDate() : new Date(editing.visitDate)
+    return d.toISOString().slice(0, 10)
+  })()
+  const [visitDate, setVisitDate] = useState(initialDate)
+  const [menu, setMenu] = useState((editing?.menu || []).join(', '))
+  const [menuPrice, setMenuPrice] = useState(editing?.menuPrice ?? '')
+  const [productsSold, setProductsSold] = useState(
+    (editing?.productsSold || []).map((p) => ({
+      productId: p.productId,
+      productName: p.productName,
+      quantity: p.quantity,
+      price: p.price,
+    })),
+  )
+  const [skinConditionNote, setSkinConditionNote] = useState(editing?.skinConditionNote || '')
+  const [nextRecommendation, setNextRecommendation] = useState(editing?.nextRecommendation || '')
   const [saving, setSaving] = useState(false)
 
   const totalAmount = useMemo(() => {
@@ -829,9 +930,9 @@ function VisitForm({ customer, products, onClose, onSaved }) {
 
   const handleSave = async () => {
     if (!visitDate) { alert('来店日を入力してください'); return }
-    // 二重防御：来店登録の権限チェック（salonStaff もOKだが警告系ガード）
+    // 二重防御：新規は canAddVisit、編集は canEditVisit
     try {
-      assertCan(canAddVisit, profile)
+      assertCan(isEdit ? canEditVisit : canAddVisit, profile)
     } catch (e) {
       alert(e.message); return
     }
@@ -844,7 +945,7 @@ function VisitForm({ customer, products, onClose, onSaved }) {
         visitDate: visitTs,
         menu: menuArr,
         menuPrice: Number(menuPrice) || 0,
-        productsUsed: [],
+        productsUsed: editing?.productsUsed || [],
         productsSold: productsSold.map((p) => ({
           productId: p.productId,
           productName: p.productName,
@@ -854,31 +955,39 @@ function VisitForm({ customer, products, onClose, onSaved }) {
         totalAmount,
         skinConditionNote,
         nextRecommendation,
-        createdAt: serverTimestamp(),
       }
 
-      const batch = writeBatch(db)
-      const visitRef = doc(collection(db, 'customers', customer.id, 'visits'))
-      batch.set(visitRef, visitData)
+      if (isEdit) {
+        // 編集：visit のみ更新。customer 側のサマリーは親コンポーネント側で
+        //       recomputeCustomerAggregates() が再計算する。
+        await updateDoc(
+          doc(db, 'customers', customer.id, 'visits', editing.id),
+          { ...visitData, updatedAt: serverTimestamp() },
+        )
+      } else {
+        // 新規：visit 追加 + customer の visitCount/totalSpent/lastVisit を batch で一発更新
+        const batch = writeBatch(db)
+        const visitRef = doc(collection(db, 'customers', customer.id, 'visits'))
+        batch.set(visitRef, { ...visitData, createdAt: serverTimestamp() })
 
-      // 顧客サマリー更新
-      const customerRef = doc(db, 'customers', customer.id)
-      const customerUpdate = {
-        lastVisit: visitTs,
-        visitCount: increment(1),
-        totalSpent: increment(totalAmount),
-        updatedAt: serverTimestamp(),
-      }
-      // firstVisit が未設定なら今回をセット
-      if (!customer.firstVisit) {
-        customerUpdate.firstVisit = visitTs
-      }
-      batch.update(customerRef, customerUpdate)
+        const customerRef = doc(db, 'customers', customer.id)
+        const customerUpdate = {
+          lastVisit: visitTs,
+          visitCount: increment(1),
+          totalSpent: increment(totalAmount),
+          updatedAt: serverTimestamp(),
+        }
+        // firstVisit が未設定なら今回をセット
+        if (!customer.firstVisit) {
+          customerUpdate.firstVisit = visitTs
+        }
+        batch.update(customerRef, customerUpdate)
 
-      await batch.commit()
+        await batch.commit()
+      }
       onSaved()
     } catch (e) {
-      console.error(e)
+      console.error('来店保存失敗:', e)
       alert('保存に失敗しました: ' + e.message)
     } finally {
       setSaving(false)
@@ -892,7 +1001,7 @@ function VisitForm({ customer, products, onClose, onSaved }) {
         onClick={(e) => e.stopPropagation()}
       >
         <div className="mb-4 flex items-center justify-between">
-          <h2 className="text-lg font-bold">来店登録 — {customer.name} 様</h2>
+          <h2 className="text-lg font-bold">{isEdit ? '来店を編集' : '来店登録'} — {customer.name} 様</h2>
           <button onClick={onClose} className="text-gray-400 hover:text-gray-600">✕</button>
         </div>
 
@@ -986,7 +1095,7 @@ function VisitForm({ customer, products, onClose, onSaved }) {
           </button>
           <button onClick={handleSave} disabled={saving}
             className="rounded-lg bg-pink-600 px-4 py-2 text-sm font-medium text-white hover:bg-pink-700 disabled:opacity-50">
-            {saving ? '保存中…' : '来店を保存'}
+            {saving ? '保存中…' : (isEdit ? '変更を保存' : '来店を保存')}
           </button>
         </div>
       </div>
