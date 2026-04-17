@@ -601,9 +601,12 @@ function CustomerDetail({ customer, onClose, onChanged }) {
       snap.docs.forEach((d) => {
         const data = d.data()
         const ts = data.visitDate
-        if (ts) {
-          if (!firstTs || ts.seconds < firstTs.seconds) firstTs = ts
-          if (!lastTs || ts.seconds > lastTs.seconds) lastTs = ts
+        // Firestore Timestamp はナノ秒精度まで保持するため toMillis() で比較する。
+        // seconds だけだと同一秒内の visits でミリ秒差異が落ちる可能性があるため。
+        if (ts && typeof ts.toMillis === 'function') {
+          const ms = ts.toMillis()
+          if (!firstTs || ms < firstTs.toMillis()) firstTs = ts
+          if (!lastTs || ms > lastTs.toMillis()) lastTs = ts
         }
         total += Number(data.totalAmount) || 0
       })
