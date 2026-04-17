@@ -595,23 +595,25 @@ function CustomerDetail({ customer, onClose, onChanged }) {
       const snap = await getDocs(
         collection(db, 'customers', customer.id, 'visits'),
       )
+      // ミリ秒(number) で比較管理して型安全性を上げる。
+      // Timestamp オブジェクトは firstVisit/lastVisit に書き戻す用途のみ保持。
+      let firstMs = Infinity
+      let lastMs = -Infinity
       let firstTs = null
       let lastTs = null
       let total = 0
       snap.docs.forEach((d) => {
         const data = d.data()
         const ts = data.visitDate
-        // Firestore Timestamp はナノ秒精度まで保持するため toMillis() で比較する。
-        // seconds だけだと同一秒内の visits でミリ秒差異が落ちる可能性があるため。
         if (ts && typeof ts.toMillis === 'function') {
           const ms = ts.toMillis()
-          if (!firstTs || ms < firstTs.toMillis()) firstTs = ts
-          if (!lastTs || ms > lastTs.toMillis()) lastTs = ts
+          if (ms < firstMs) { firstMs = ms; firstTs = ts }
+          if (ms > lastMs) { lastMs = ms; lastTs = ts }
         }
         total += Number(data.totalAmount) || 0
       })
       await updateDoc(doc(db, 'customers', customer.id), {
-        firstVisit: firstTs,
+        firstVisit: firstTs, // visit が0件なら null のまま
         lastVisit: lastTs,
         visitCount: snap.size,
         totalSpent: total,
