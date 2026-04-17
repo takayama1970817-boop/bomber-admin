@@ -145,10 +145,28 @@ export function AuthProvider({ children }) {
               salonName = allowData.salonName || ''
             }
 
-            // subRole: allowedEmails から引き継ぎ（未設定時は既存動作互換で admin 扱い）
+            // subRole: allowedEmails から引き継ぎ
+            // 2026-04-17 strict モード移行後は dealer/salon の subRole 欠損は fail-closed。
+            // Firestore rules（hasRequiredSubRoleForInvite）でも拒否するため、
+            // ここで事前に明確なエラーメッセージを出してサインアウトさせる。
             const initialSubRole = allowSnap.empty
               ? ''
               : (allowSnap.docs[0].data().subRole || '')
+            const isSubRoleRequired = initialRole === 'dealer' || initialRole === 'salon'
+            if (isSubRoleRequired && !initialSubRole) {
+              console.error('[AuthContext] subRole 未設定のため初回作成を拒否:', {
+                email: fbUser.email,
+                role: initialRole,
+              })
+              await fbSignOut(auth)
+              setAuthError(
+                'このアカウントは権限（管理者/スタッフ）が設定されていません。\n'
+                + '招待をやり直すよう管理者にお問い合わせください。',
+              )
+              setUser(null)
+              setProfile(null)
+              return
+            }
 
             const data = {
               uid: fbUser.uid,
