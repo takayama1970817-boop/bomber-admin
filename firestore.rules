@@ -428,7 +428,8 @@ service cloud.firestore {
 
       // 来店履歴サブコレクション
       // create: サロン admin/staff 両方可（現場運用優先）
-      // update/delete: salonAdmin のみ（破壊系は厳格）
+      // update: salonAdmin + 本社admin、および salonStaff の「自分が作成した visit」のみ
+      // delete: salonAdmin + 本社admin のみ（破壊系は staff 不可）
       match /visits/{visitId} {
         allow read:  if isSignedIn()
                       && (isAdmin() || isStaff()
@@ -439,11 +440,23 @@ service cloud.firestore {
                            || ((isSalonAdmin() || isSalonStaff())
                                && get(/databases/$(database)/documents/customers/$(customerId))
                                    .data.salonCompanyName == userDoc().companyName));
-        allow update, delete: if isSignedIn()
-                               && (isAdmin()
-                                   || (isSalonAdmin()
-                                       && get(/databases/$(database)/documents/customers/$(customerId))
-                                           .data.salonCompanyName == userDoc().companyName));
+        // update は「本社admin」「salonAdmin」「自分が作成した salonStaff」のいずれか
+        // salonStaff の条件: サロン一致 AND createdBy == 自分の uid（旧データで createdBy 欠損なら不可）
+        allow update: if isSignedIn()
+                       && (isAdmin()
+                           || (isSalonAdmin()
+                               && get(/databases/$(database)/documents/customers/$(customerId))
+                                   .data.salonCompanyName == userDoc().companyName)
+                           || (isSalonStaff()
+                               && get(/databases/$(database)/documents/customers/$(customerId))
+                                   .data.salonCompanyName == userDoc().companyName
+                               && resource.data.createdBy == request.auth.uid));
+        // delete は salonStaff 不可（破壊系は管理者のみ）
+        allow delete: if isSignedIn()
+                       && (isAdmin()
+                           || (isSalonAdmin()
+                               && get(/databases/$(database)/documents/customers/$(customerId))
+                                   .data.salonCompanyName == userDoc().companyName));
       }
 
       // おすすめ履歴サブコレクション（visits と同一ポリシー）

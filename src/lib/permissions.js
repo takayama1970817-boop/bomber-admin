@@ -22,8 +22,11 @@
  * canDeleteCustomer           |   ✅   |  ✅   |   ❌  |    ❌     |    ❌     |    ❌     |    ✅    |   ❌
  * canImportCsv                |   ✅   |  ✅   |   ✅  |    ❌     |    ✅     |    ❌     |    ✅    |   ❌
  * canAddVisit                 |   ✅   |  ✅   |   ❌  |    ❌     |    ❌     |    ❌     |    ✅    |   ✅
- * canEditVisit                |   ✅   |  ✅   |   ❌  |    ❌     |    ❌     |    ❌     |    ✅    |   ❌
+ * canEditVisit                |   ✅   |  ✅   |   ❌  |    ❌     |    ❌     |    ❌     |    ✅    |   △(*1)
  * canDeleteVisit              |   ✅   |  ✅   |   ❌  |    ❌     |    ❌     |    ❌     |    ✅    |   ❌
+ *
+ * (*1) salonStaff の canEditVisit は visit.createdBy === 自分のuid のときのみ true。
+ *      visit 引数なし or createdBy が欠けた旧データは不可（保守的扱い）。
  * canManageSalonProduct       |   ✅   |  ✅   |   ✅  |    ❌     |    ❌     |    ❌     |    ❌    |   ❌
  * canSyncBcartProducts        |   ✅   |  ✅   |   ❌  |    ❌     |    ❌     |    ❌     |    ❌    |   ❌
  * canBulkDeleteSalonProducts  |   ✅   |  ✅   |   ❌  |    ❌     |    ❌     |    ❌     |    ❌    |   ❌
@@ -105,10 +108,27 @@ export function canAddVisit(p) {
   return isSalonAdmin(p) || isSalonStaff(p) || isAdmin(p)
 }
 
-/** 来店履歴の編集（破壊系なので salonStaff は NG。将来 createdBy で自分作成分のみ可に拡張予定） */
-export function canEditVisit(p) {
-  if (isSalonStaff(p)) return false
-  return isSalonAdmin(p) || isAdmin(p)
+/**
+ * 来店履歴の編集。
+ *
+ * - admin / salonAdmin は常に OK
+ * - salonStaff は `visit.createdBy === profile.uid` のときのみ OK
+ *   （自分が作成した来店なら現場で修正可能。他人が作成したものは触れない）
+ * - visit 引数を省略した場合の salonStaff は常に false（保守的扱い）
+ *
+ * @param {Object} profile - AuthContext の profile
+ * @param {Object} [visit] - 編集対象の visit ドキュメントデータ（createdBy を含む）
+ */
+export function canEditVisit(profile, visit) {
+  if (isAdmin(profile) || isSalonAdmin(profile)) return true
+  if (isSalonStaff(profile)) {
+    const uid = profile?.uid
+    const createdBy = visit?.createdBy
+    // visit 指定なし or createdBy が無い旧データは NG（旧データは salonAdmin に任せる）
+    if (!visit || !createdBy || !uid) return false
+    return createdBy === uid
+  }
+  return false
 }
 
 /** 来店履歴の削除（破壊系なので salonStaff は NG） */

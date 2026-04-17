@@ -546,7 +546,8 @@ function CustomerForm({ companyName, editing, onClose, onSaved }) {
 function CustomerDetail({ customer, onClose, onChanged }) {
   const { profile } = useAuth()
   const allowAddVisit = canAddVisit(profile)
-  const allowEditVisit = canEditVisit(profile)
+  // canEditVisit は visit ごとに判定する（salonStaff は自分作成分のみ可）
+  // 行単位で canEditVisit(profile, v) を呼ぶため allowEditVisit 一括判定は撤去
   const allowDeleteVisit = canDeleteVisit(profile)
   const [visits, setVisits] = useState([])
   const [products, setProducts] = useState([])
@@ -817,7 +818,7 @@ function CustomerDetail({ customer, onClose, onChanged }) {
                   <span className="font-medium">{fmtDate(v.visitDate)}</span>
                   <div className="flex items-center gap-2">
                     <span className="text-pink-600 font-bold">{fmtYen(v.totalAmount)}</span>
-                    {allowEditVisit && (
+                    {canEditVisit(profile, v) && (
                       <button
                         onClick={() => { setEditingVisit(v); setShowVisitForm(true) }}
                         className="text-[10px] text-pink-600 hover:underline"
@@ -935,9 +936,16 @@ function VisitForm({ customer, products, editing, onClose, onSaved }) {
 
   const handleSave = async () => {
     if (!visitDate) { alert('来店日を入力してください'); return }
-    // 二重防御：新規は canAddVisit、編集は canEditVisit
+    // 二重防御：新規は canAddVisit、編集は canEditVisit(profile, editing)
+    // 編集時は editing（元の visit 情報）を渡して createdBy を判定させる。
     try {
-      assertCan(isEdit ? canEditVisit : canAddVisit, profile)
+      if (isEdit) {
+        assertCan((p) => canEditVisit(p, editing), profile, {
+          userMessage: 'この来店記録を編集する権限がありません（他の担当者が登録したものは編集できません）',
+        })
+      } else {
+        assertCan(canAddVisit, profile)
+      }
     } catch (e) {
       alert(e.message); return
     }
@@ -965,6 +973,7 @@ function VisitForm({ customer, products, editing, onClose, onSaved }) {
       if (isEdit) {
         // 編集：visit のみ更新。customer 側のサマリーは親コンポーネント側で
         //       recomputeCustomerAggregates() が再計算する。
+        // createdBy は作成時の uid を保持したまま（上書きしない）。
         await updateDoc(
           doc(db, 'customers', customer.id, 'visits', editing.id),
           { ...visitData, updatedAt: serverTimestamp() },
@@ -973,7 +982,13 @@ function VisitForm({ customer, products, editing, onClose, onSaved }) {
         // 新規：visit 追加 + customer の visitCount/totalSpent/lastVisit を batch で一発更新
         const batch = writeBatch(db)
         const visitRef = doc(collection(db, 'customers', customer.id, 'visits'))
-        batch.set(visitRef, { ...visitData, createdAt: serverTimestamp() })
+        // createdBy に作成者の uid を保存（salonStaff が自分作成分のみ編集可にするため）。
+        // 未ログイン想定外だが安全側で null 許容、rules 側でも検証する。
+        batch.set(visitRef, {
+          ...visitData,
+          createdBy: profile?.uid || null,
+          createdAt: serverTimestamp(),
+        })
 
         const customerRef = doc(db, 'customers', customer.id)
         const customerUpdate = {
