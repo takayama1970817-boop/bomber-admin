@@ -442,7 +442,9 @@ service cloud.firestore {
                                    .data.salonCompanyName == userDoc().companyName));
         // update は「本社admin」「salonAdmin」「自分が作成した salonStaff」のいずれか
         // salonStaff の条件: サロン一致 AND createdBy == 自分の uid（旧データで createdBy 欠損なら不可）
+        // 追加制約: createdBy 自体は不変（全ルートで改ざん禁止。rewrite による権限奪取対策）
         allow update: if isSignedIn()
+                       && request.resource.data.createdBy == resource.data.createdBy
                        && (isAdmin()
                            || (isSalonAdmin()
                                && get(/databases/$(database)/documents/customers/$(customerId))
