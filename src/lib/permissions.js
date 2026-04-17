@@ -111,13 +111,29 @@ export function canAddVisit(p) {
 /**
  * 来店履歴の編集。
  *
- * - admin / salonAdmin は常に OK
- * - salonStaff は `visit.createdBy === profile.uid` のときのみ OK
- *   （自分が作成した来店なら現場で修正可能。他人が作成したものは触れない）
- * - visit 引数を省略した場合の salonStaff は常に false（保守的扱い）
+ * 権限マトリクス:
+ *   - admin / salonAdmin: visit の内容に関わらず常に true
+ *   - salonStaff:         visit.createdBy === profile.uid のときのみ true
+ *   - それ以外の role:     常に false
  *
- * @param {Object} profile - AuthContext の profile
+ * 仕様上の重要な注意点:
+ *   1. salonStaff に対して visit 引数を省略した場合は false を返す。
+ *      UI で行単位に visit を渡し忘れた場合、誤って「編集可」と判定しないため。
+ *   2. visit.createdBy が欠損している旧データは salonStaff からは編集不可。
+ *      createdBy がいつからセットされ始めたか追跡できないので、
+ *      保守的に「旧データは salonAdmin 以上に任せる」ポリシーとした。
+ *   3. profile.uid が欠けている（認証セッション壊れている）場合も false。
+ *      rules 側で createdBy == request.auth.uid を要求しているため、
+ *      UI で通しても rules で弾かれて一貫する。
+ *
+ * 三重防御:
+ *   UI 表示（行単位で本関数を呼ぶ）
+ *   + 保存前 assertCan（VisitForm 内）
+ *   + firestore.rules（visits.update に同等条件）
+ *
+ * @param {Object} profile - AuthContext の profile（role, subRole, uid を含む）
  * @param {Object} [visit] - 編集対象の visit ドキュメントデータ（createdBy を含む）
+ * @returns {boolean}
  */
 export function canEditVisit(profile, visit) {
   if (isAdmin(profile) || isSalonAdmin(profile)) return true

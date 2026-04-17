@@ -949,6 +949,13 @@ function VisitForm({ customer, products, editing, onClose, onSaved }) {
     } catch (e) {
       alert(e.message); return
     }
+    // 新規登録時は profile.uid が必須（createdBy に入るため）。
+    // 認証セッションが壊れている異常系を早期に弾き、rules 側で弾かれるより分かりやすいエラーにする。
+    if (!isEdit && !profile?.uid) {
+      alert('ログイン情報が取得できません。一度ログアウトして再ログインしてください。')
+      console.error('VisitForm: profile.uid が空のため新規作成を中止')
+      return
+    }
     setSaving(true)
     try {
       const visitTs = Timestamp.fromDate(new Date(visitDate))
@@ -983,10 +990,10 @@ function VisitForm({ customer, products, editing, onClose, onSaved }) {
         const batch = writeBatch(db)
         const visitRef = doc(collection(db, 'customers', customer.id, 'visits'))
         // createdBy に作成者の uid を保存（salonStaff が自分作成分のみ編集可にするため）。
-        // 未ログイン想定外だが安全側で null 許容、rules 側でも検証する。
+        // profile.uid の存在は上の早期リターンで保証済み。
         batch.set(visitRef, {
           ...visitData,
-          createdBy: profile?.uid || null,
+          createdBy: profile.uid,
           createdAt: serverTimestamp(),
         })
 
