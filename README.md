@@ -121,3 +121,4 @@ bomber-admin/
 
 - AI 自動 PR レビュー → [docs/ai-pr-review.md](docs/ai-pr-review.md)
 <!-- AIレビュー動作確認用 -->
+<!-- 2回目テスト -->
