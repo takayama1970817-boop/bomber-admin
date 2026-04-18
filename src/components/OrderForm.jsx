@@ -3,6 +3,7 @@ import {
   Timestamp,
   collection,
   doc,
+  getDoc,
   serverTimestamp,
   writeBatch,
 } from 'firebase/firestore'
@@ -63,6 +64,22 @@ export default function OrderForm({ salonId, currentLastOrderDate, onSaved, onCa
 
     setSaving(true)
     try {
+      // orders.read strict 化に備え、発注元サロンから companyName / dealerCode を取得して
+      // order に刻む（denormalize）。失敗してもフォーム操作は止めない（書けなかったら後で
+      // scripts/backfill-dealer-code.mjs で補完する想定）。
+      let companyName = null
+      let dealerCode = null
+      try {
+        const salonSnap = await getDoc(doc(db, 'salons', salonId))
+        if (salonSnap.exists()) {
+          const s = salonSnap.data()
+          companyName = (s.companyName || '').trim() || null
+          dealerCode = (s.dealerCode || '').trim() || null
+        }
+      } catch (e) {
+        console.warn('[OrderForm] salon 取得失敗（dealerCode 未解決で保存します）:', e.message)
+      }
+
       // batch write: orders 追加 + salons.lastOrderDate 更新
       const batch = writeBatch(db)
       const orderRef = doc(collection(db, 'orders'))
@@ -70,6 +87,8 @@ export default function OrderForm({ salonId, currentLastOrderDate, onSaved, onCa
 
       batch.set(orderRef, {
         salonId,
+        ...(companyName ? { companyName } : {}),
+        ...(dealerCode ? { dealerCode } : {}),
         orderDate: orderDateTs,
         total,
         items: validItems,

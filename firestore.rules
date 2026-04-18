@@ -64,6 +64,16 @@ service cloud.firestore {
       return isAdmin() || isStaff() || isWarehouse();
     }
 
+    // ========================================
+    // ERP Phase 1: 共通ヘルパー
+    // 設計書: docs/04_ERP_DATA_MODEL.md §6
+    // Phase 1 の ERP 画面は admin / internal(=staff) のみ有効
+    // factory / supplier / warehouse / dealer / salon は erp_ 系 collection アクセス不可
+    // ========================================
+    function isErpUser() {
+      return isSignedIn() && (isAdmin() || isStaff());
+    }
+
     // customers/{customerId} の salonCompanyName がログインユーザーの
     // companyName と一致するか。visits/recommendations サブコレクションで
     // 繰り返し呼ばれるので helper に抽出した（DRY 化）。
@@ -160,8 +170,14 @@ service cloud.firestore {
     // ========================================
     match /orders/{orderId} {
       allow read:  if isSignedIn()
-                    && (userDoc().role in ['master', 'admin', 'staff', 'dealer']
-                        || resource.data.companyName == userDoc().companyName);  // salon は自社のみ
+                    && (
+                      isAdmin() || isStaff()
+                      || (isDealer()
+                          && userDoc().get('dealerCode', '') != ''
+                          && resource.data.get('dealerCode', '') == userDoc().dealerCode)
+                      || (isSalon()
+                          && resource.data.companyName == userDoc().companyName)
+                    );
       allow write: if isAdmin() || isStaff();
     }
 
@@ -170,7 +186,13 @@ service cloud.firestore {
     // admin のみ読み書き可
     // ========================================
     match /dealerSalons/{docId} {
-      allow read:  if isSignedIn();
+      allow read:  if isSignedIn()
+                    && (
+                      isAdmin() || isStaff()
+                      || (isDealer()
+                          && userDoc().get('dealerCode', '') != ''
+                          && resource.data.dealerCode == userDoc().dealerCode)
+                    );
       allow write: if isAdmin();
     }
 
@@ -190,19 +212,33 @@ service cloud.firestore {
     // ログイン済みスタッフ全員が読み書き可
     // ========================================
     match /chatRooms/{roomId} {
-      allow read, write: if isSignedIn();
+      // 親ルームへのアクセス可否を一元化。messages / readers からも使う。
+      // - admin/staff/master: 全ルーム可
+      // - dealer: roomId == 'dealer_' + 自社 dealerCode のみ
+      // - salon: salon_*_hq パターンのみ（salon 間の可視化は既知の制限）
+      function canAccessRoom() {
+        return isSignedIn() && (
+          isAdmin() || isStaff()
+          || (isDealer()
+              && userDoc().get('dealerCode', '') != ''
+              && roomId == ('dealer_' + userDoc().dealerCode))
+          || (isSalon() && roomId.matches('^salon_.+_hq$'))
+        );
+      }
+
+      allow read, write: if canAccessRoom();
 
       match /messages/{msgId} {
-        allow read:   if isSignedIn();
-        allow create: if isSignedIn()
+        allow read:   if canAccessRoom();
+        allow create: if canAccessRoom()
                        && request.resource.data.uid == request.auth.uid;
         allow update: if false;
-        allow delete: if isSignedIn()
+        allow delete: if canAccessRoom()
                        && resource.data.uid == request.auth.uid;
       }
 
       match /readers/{readerId} {
-        allow read, write: if isSignedIn();
+        allow read, write: if canAccessRoom();
       }
     }
 
@@ -292,10 +328,39 @@ service cloud.firestore {
 
     // ========================================
     // dealerDocuments コレクション（代理店・サロン向け資料）
-    // ログイン済みユーザーは読める。書き込みは admin のみ
+    // visibility ベースのアクセス制御:
+    //   - all      : 全ログインユーザー
+    //   - dealers  : dealer + admin/master/staff
+    //   - salons   : salon + admin/master/staff
+    //   - specific : allowedDealers または allowedCompanies に一致する相手のみ
+    //                (admin/master/staff は常に読める)
+    // isActive == false は admin/master/staff 以外不可視。
+    // 書き込みは admin のみ。
     // ========================================
+    function canReadDealerDocument() {
+      let vis = resource.data.get('visibility', 'all');
+      let isActive = resource.data.get('isActive', true);
+      return isSignedIn() && (
+        isAdmin() || isStaff()
+        || (
+          isActive != false && (
+            vis == 'all'
+            || (vis == 'dealers' && isDealer())
+            || (vis == 'salons' && isSalon())
+            || (vis == 'specific' && (
+                 (isDealer()
+                   && userDoc().get('dealerCode', '') != ''
+                   && userDoc().dealerCode in resource.data.get('allowedDealers', []))
+                 || (isSalon()
+                   && userDoc().get('companyName', '') != ''
+                   && userDoc().companyName in resource.data.get('allowedCompanies', []))
+               ))
+          )
+        )
+      );
+    }
     match /dealerDocuments/{docId} {
-      allow read:  if isSignedIn();
+      allow read:  if canReadDealerDocument();
       allow write: if isAdmin();
     }
 
@@ -502,6 +567,16 @@ service cloud.firestore {
     }
 
     // ========================================
+    // ordersBackfillLogs コレクション（orders.dealerCode バックフィル監査ログ）
+    // - write: 完全禁止（scripts/backfill-dealer-code.mjs が Admin SDK で直接書き込む）
+    // - read: 本社 admin のみ（failedEntries の人手調査用）
+    // ========================================
+    match /ordersBackfillLogs/{logId} {
+      allow read:  if isAdmin();
+      allow write: if false;
+    }
+
+    // ========================================
     // salonProducts コレクション（サロン管理：店販レコメンド用商品マスタ）
     // 全サロンが共有するカタログ。読み取りはログイン済み全員、書き込みは admin/staff のみ
     // ========================================
@@ -519,6 +594,71 @@ service cloud.firestore {
                     && (isAdmin() || salonCompanyName == userDoc().companyName);
       allow write: if isSignedIn()
                     && (isAdmin() || salonCompanyName == userDoc().companyName);
+    }
+
+    // ========================================
+    // ERP Phase 1: 基幹業務 collection
+    // 設計書: docs/04_ERP_DATA_MODEL.md
+    // 原則: admin / internal(=staff) のみ read/write。物理削除禁止（delete: false）
+    // ========================================
+
+    // erp_orders（受注）
+    match /erp_orders/{id} {
+      allow read, create, update: if isErpUser();
+      allow delete: if false;
+    }
+
+    // erp_purchase_orders（発注）
+    match /erp_purchase_orders/{id} {
+      allow read, create, update: if isErpUser();
+      allow delete: if false;
+    }
+
+    // erp_inventory（在庫）
+    match /erp_inventory/{id} {
+      allow read: if isErpUser();
+      // 直接書き込みは admin のみ（楽観ロックで整合性管理）
+      allow create, update: if isErpUser();
+      allow delete: if false;
+    }
+
+    // erp_stock_ins（入庫）
+    match /erp_stock_ins/{id} {
+      allow read, create, update: if isErpUser();
+      allow delete: if false;
+    }
+
+    // erp_shipments（出荷）
+    // update 可能 field は極小セット。items/orderId/correctionOf は不変
+    match /erp_shipments/{id} {
+      allow read, create: if isErpUser();
+      allow update: if isErpUser()
+                     // correctionOf は一度設定したら変更禁止
+                     && (resource.data.correctionOf == null
+                         || resource.data.correctionOf == request.resource.data.correctionOf)
+                     // supersededBy は null の時のみ書き換え可
+                     && (resource.data.supersededBy == null
+                         || resource.data.supersededBy == request.resource.data.supersededBy);
+      allow delete: if false;
+    }
+
+    // erp_external_raw（外部システム生データ、Order 本体から分離保存）
+    // payload は一度書いたら変更禁止。orderId のみ後から update 可能
+    match /erp_external_raw/{id} {
+      allow read, create: if isErpUser();
+      allow update: if isErpUser()
+                     // payload は不変
+                     && resource.data.payload == request.resource.data.payload
+                     && resource.data.source == request.resource.data.source
+                     && resource.data.externalOrderId == request.resource.data.externalOrderId;
+      allow delete: if false;
+    }
+
+    // audit_logs（監査ログ、append-only）
+    match /audit_logs/{id} {
+      allow read: if isAdmin();
+      allow create: if isErpUser();
+      allow update, delete: if false;
     }
 
     // ========================================
