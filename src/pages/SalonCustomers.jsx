@@ -26,6 +26,12 @@ import {
   canDeleteVisit,
   assertCan,
 } from '../lib/permissions.js'
+import {
+  upsertRecommendationLog,
+  logRecommendationFromVisit,
+  RECOMMENDATION_STATUS,
+  RECOMMENDATION_SOURCE,
+} from '../lib/recommendationLog.js'
 
 function fmtDate(ts) {
   if (!ts) return '—'
@@ -555,6 +561,8 @@ function CustomerDetail({ customer, onClose, onChanged }) {
   const [showVisitForm, setShowVisitForm] = useState(false)
   const [editingVisit, setEditingVisit] = useState(null)
   const [deletingVisitId, setDeletingVisitId] = useState(null)
+  // ボタン押下中の productId を保持（二重送信防止 + 押下フィードバック）
+  const [logging, setLogging] = useState({ productId: null, action: null })
 
   const loadVisits = async () => {
     setLoading(true)
@@ -624,6 +632,29 @@ function CustomerDetail({ customer, onClose, onChanged }) {
       // 集計失敗しても visit 自体の操作は既に成功しているので画面は更新する。
       // ただしログには残す。
       console.error('customer サマリー再計算失敗:', e)
+    }
+  }
+
+  // レコメンド成約ログ（手動ボタン）
+  // status = 'sold' | 'declined' のいずれか
+  const handleLogRecommendation = async (product, status) => {
+    if (!product?.id) return
+    setLogging({ productId: product.id, action: status })
+    try {
+      await upsertRecommendationLog({
+        customerId: customer.id,
+        productId: product.id,
+        productName: product.name,
+        status,
+        source: RECOMMENDATION_SOURCE.MANUAL,
+        staffUid: profile?.uid,
+        staffName: profile?.name || profile?.email,
+      })
+    } catch (e) {
+      console.error('レコメンドログ保存失敗:', e)
+      alert('ログの保存に失敗しました: ' + e.message)
+    } finally {
+      setLogging({ productId: null, action: null })
     }
   }
 
@@ -785,6 +816,25 @@ function CustomerDetail({ customer, onClose, onChanged }) {
                     {p.suggestedScript.replace('{name}', customer.name)}
                   </div>
                 )}
+                {/* 提案結果ログ（Phase 1）: 画面を開いただけでは作らず、押した時のみ upsert */}
+                <div className="mt-2 flex items-center justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => handleLogRecommendation(p, RECOMMENDATION_STATUS.SOLD)}
+                    disabled={logging.productId === p.id}
+                    className="rounded-md bg-pink-600 px-3 py-1 text-[11px] font-medium text-white hover:bg-pink-700 disabled:opacity-50"
+                  >
+                    {logging.productId === p.id && logging.action === RECOMMENDATION_STATUS.SOLD ? '記録中…' : '売れた'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleLogRecommendation(p, RECOMMENDATION_STATUS.DECLINED)}
+                    disabled={logging.productId === p.id}
+                    className="rounded-md border border-gray-300 bg-white px-3 py-1 text-[11px] text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                  >
+                    {logging.productId === p.id && logging.action === RECOMMENDATION_STATUS.DECLINED ? '記録中…' : '断られた'}
+                  </button>
+                </div>
               </li>
             ))}
           </ul>
@@ -977,6 +1027,7 @@ function VisitForm({ customer, products, editing, onClose, onSaved }) {
         nextRecommendation,
       }
 
+      let newVisitId = null
       if (isEdit) {
         // 編集：visit のみ更新。customer 側のサマリーは親コンポーネント側で
         //       recomputeCustomerAggregates() が再計算する。
@@ -985,6 +1036,7 @@ function VisitForm({ customer, products, editing, onClose, onSaved }) {
           doc(db, 'customers', customer.id, 'visits', editing.id),
           { ...visitData, updatedAt: serverTimestamp() },
         )
+        newVisitId = editing.id
       } else {
         // 新規：visit 追加 + customer の visitCount/totalSpent/lastVisit を batch で一発更新
         const batch = writeBatch(db)
@@ -1011,7 +1063,23 @@ function VisitForm({ customer, products, editing, onClose, onSaved }) {
         batch.update(customerRef, customerUpdate)
 
         await batch.commit()
+        newVisitId = visitRef.id
       }
+
+      // レコメンド成約ログ連動（Phase 1）
+      // 新規登録時のみ productsSold の商品をレコメンド sold として upsert。
+      // （編集時の再実行は重複を生みやすいため Phase 2 で検討）
+      // ログ失敗は来店保存を失敗させず UX を壊さない。
+      if (!isEdit && visitData.productsSold.length > 0) {
+        await logRecommendationFromVisit({
+          customerId: customer.id,
+          productsSold: visitData.productsSold,
+          visitId: newVisitId,
+          staffUid: profile.uid,
+          staffName: profile.name || profile.email,
+        })
+      }
+
       onSaved()
     } catch (e) {
       console.error('来店保存失敗:', e)

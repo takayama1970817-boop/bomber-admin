@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
   collection,
+  collectionGroup,
   getDocs,
   addDoc,
   updateDoc,
@@ -44,6 +45,8 @@ export default function SalonProductsAdmin() {
   const [showCsvImport, setShowCsvImport] = useState(false)
   const [selectedIds, setSelectedIds] = useState(new Set())
   const [bulkDeleting, setBulkDeleting] = useState(false)
+  // productId -> { total, sold } の集計マップ
+  const [recoStats, setRecoStats] = useState({})
 
   const load = async () => {
     setLoading(true)
@@ -63,7 +66,29 @@ export default function SalonProductsAdmin() {
       setLoading(false)
     }
   }
-  useEffect(() => { load() }, [])
+
+  // 成約率集計：collectionGroup で recommendations を横断クエリ
+  // Phase 1 は期間フィルタなし・全件集計
+  const loadRecoStats = async () => {
+    try {
+      const snap = await getDocs(collectionGroup(db, 'recommendations'))
+      const map = {}
+      snap.docs.forEach((d) => {
+        const data = d.data()
+        const pid = data.productId
+        if (!pid) return
+        if (!map[pid]) map[pid] = { total: 0, sold: 0 }
+        map[pid].total += 1
+        if (data.status === 'sold') map[pid].sold += 1
+      })
+      setRecoStats(map)
+    } catch (e) {
+      // collectionGroup インデックスが未作成の場合や権限不足はログだけ残して画面は継続
+      console.error('レコメンド集計失敗:', e)
+      setRecoStats({})
+    }
+  }
+  useEffect(() => { load(); loadRecoStats() }, [])
 
   // 選択トグル
   const toggleSelect = (id) => {
@@ -349,6 +374,7 @@ export default function SalonProductsAdmin() {
                 <th className="px-4 py-3 text-left">対応肌タイプ</th>
                 <th className="px-4 py-3 text-left">対応お悩み</th>
                 <th className="px-4 py-3 text-center">公開</th>
+                <th className="px-4 py-3 text-right">成約率</th>
                 <th className="px-4 py-3 text-right">操作</th>
               </tr>
             </thead>
@@ -387,6 +413,18 @@ export default function SalonProductsAdmin() {
                   </td>
                   <td className="px-4 py-3 text-center">
                     {p.active ? <span className="text-green-600">●</span> : <span className="text-gray-300">○</span>}
+                  </td>
+                  <td className="px-4 py-3 text-right">
+                    {(() => {
+                      const s = recoStats[p.id]
+                      if (!s || s.total === 0) return <span className="text-xs text-gray-300">—</span>
+                      const rate = Math.round((s.sold / s.total) * 100)
+                      return (
+                        <span className="text-xs text-gray-700">
+                          {s.sold}/{s.total} <span className="text-pink-600 font-bold">({rate}%)</span>
+                        </span>
+                      )
+                    })()}
                   </td>
                   <td className="px-4 py-3 text-right">
                     {allowManage ? (
