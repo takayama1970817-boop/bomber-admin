@@ -248,6 +248,13 @@ async function main() {
       qty: p.order_pro_count || 1,
     }))
 
+    // orders.read strict 化に備え、Bカート側の customer_parent_id を dealerCode として刻む。
+    // ロジックは src/lib/dealerCodeResolver.js の resolveDealerCodeFromBcartOrder と同一。
+    // Node.js スクリプトから frontend lib を import できないため、ここではインライン化する。
+    const dealerCode = String(
+      order.customer_parent_id ?? order.parent_id ?? order.parent_member_id ?? '',
+    ).trim()
+
     const orderRef = doc(collection(db, 'orders'))
     batch.set(orderRef, {
       salonId,
@@ -265,6 +272,7 @@ async function main() {
       bcartCode: code,
       bcartOrderId: order.id,
       companyName,
+      ...(dealerCode ? { dealerCode } : {}),
       contact: order.customer_name || '',
       createdAt: serverTimestamp(),
     })

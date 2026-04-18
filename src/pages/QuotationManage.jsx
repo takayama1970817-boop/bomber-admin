@@ -15,6 +15,7 @@ import { db } from '../lib/firebase.js'
 import { useAuth } from '../contexts/AuthContext.jsx'
 import { calcTax, taxRowLabel } from '../lib/taxCalc.js'
 import { buildDocLayout, openPrintPreview } from '../lib/docGenerator.js'
+import { resolveDealerCodeByCompanyName } from '../lib/dealerCodeResolver.js'
 
 // ── ステータス定義 ──
 const STATUSES = [
@@ -616,12 +617,17 @@ export default function QuotationManage() {
 
     setConvertingId(quotation.id)
     try {
+      // orders.read strict 化に備え、見積の customerName から dealerCode を解決。
+      // 見つからない場合は null のまま保存（後で backfill-dealer-code.mjs で補完可能）。
+      const dealerCode = await resolveDealerCodeByCompanyName(db, quotation.customerName)
+
       const batch = writeBatch(db)
 
       // 新規ordersドキュメント作成
       const orderRef = doc(collection(db, 'orders'))
       batch.set(orderRef, {
         companyName: quotation.customerName,
+        ...(dealerCode ? { dealerCode } : {}),
         contact: quotation.customerPerson,
         email: quotation.customerEmail,
         address: quotation.customerAddress,

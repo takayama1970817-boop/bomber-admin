@@ -19,6 +19,17 @@ import {
 import ReceiptPrintable from '../components/ReceiptPrintable.jsx'
 import { generateReceiptPdf } from '../lib/generateReceiptPdf.js'
 import { fetchAllOrders, fetchAllOrderProducts, fetchOrdersSince } from '../lib/bcartApi.js'
+import { resolveDealerCodeFromBcartOrder } from '../lib/dealerCodeResolver.js'
+
+/**
+ * Bカート受注から dealerCode を正規化して取り出す。
+ * 仕様:
+ *   - ソース・オブ・トゥルース: Bカート顧客マスタの親子関係（customer_parent_id）
+ *   - dealer の dealerCode は Bカート親会員IDと一致する前提
+ *   - 解決できない場合は '' を保存
+ */
+// resolveDealerCodeFromBcartOrder は src/lib/dealerCodeResolver.js に移動。
+// （orders.read strict 化で他経路からも使うため 2026-04-18 に切り出し）
 
 export default function BcartImport() {
   const { isAdmin } = useAuth()
@@ -121,6 +132,7 @@ export default function BcartImport() {
           }
 
           const companyName = order.customer_comp_name || '（不明）'
+          const dealerCode = resolveDealerCodeFromBcartOrder(order)
           let salonId = salonMap[companyName]
 
           if (!salonId) {
@@ -173,6 +185,7 @@ export default function BcartImport() {
             bcartCode: code,
             bcartOrderId: order.id,
             companyName,
+            dealerCode,
             contact: order.customer_name || '',
             createdAt: serverTimestamp(),
           })
@@ -317,6 +330,7 @@ export default function BcartImport() {
             bcartCode: code,
             bcartOrderId: order.id,
             companyName,
+            dealerCode: resolveDealerCodeFromBcartOrder(order),
             contact: order.customer_name || '',
             createdAt: serverTimestamp(),
           })
@@ -416,6 +430,10 @@ export default function BcartImport() {
       let salonId = matchedSalon?.id
       let createdNewSalon = false
 
+      // メール解析では customer_parent_id が取れないため '' を保存。
+      // バックフィルスクリプト or 差分同期で後から解決される。
+      const resolvedDealerCode = ''
+
       if (!salonId) {
         // 新規サロン登録
         const salonRef = doc(collection(db, 'salons'))
@@ -475,6 +493,8 @@ export default function BcartImport() {
         source: 'bcart-email',
         status: 'new',
         bcartOrderNumber: parsed.order.orderNumber,
+        companyName: parsed.customer.companyName,
+        dealerCode: resolvedDealerCode,
         createdAt: serverTimestamp(),
       })
 
