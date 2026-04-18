@@ -14,6 +14,12 @@ import {
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage'
 import { db, storage } from '../lib/firebase.js'
 import { useAuth } from '../contexts/AuthContext.jsx'
+import {
+  canSendMessage,
+  canDeleteOwnChatMessage,
+  canManageChatRoom,
+  assertCan,
+} from '../lib/permissions.js'
 
 function fmtTime(ts) {
   if (!ts) return ''
@@ -138,6 +144,8 @@ export default function DealerChat() {
     const msg = text.trim()
     if (!msg && !attachFile) return
     if (sending) return
+    // 二重防御：送信はログイン済みなら誰でも可
+    try { assertCan(canSendMessage, profile) } catch (e) { alert(e.message); return }
     setSending(true)
     setUploading(!!attachFile)
     try {
@@ -183,12 +191,25 @@ export default function DealerChat() {
     }
   }
 
-  const handleDelete = async (msgId) => {
+  const handleDelete = async (msg) => {
+    // 二重防御：自分のメッセージなら canDeleteOwnChatMessage、他人のは canManageChatRoom
+    const isMine = msg?.uid === user?.uid
+    try {
+      if (isMine) {
+        assertCan(canDeleteOwnChatMessage, profile)
+      } else {
+        assertCan(canManageChatRoom, profile, {
+          userMessage: '他人のメッセージは管理者のみ削除できます',
+        })
+      }
+    } catch (e) {
+      alert(e.message); return
+    }
     if (!window.confirm('このメッセージを取り消しますか？')) return
     try {
-      await deleteDoc(doc(db, 'chatRooms', activeRoom, 'messages', msgId))
+      await deleteDoc(doc(db, 'chatRooms', activeRoom, 'messages', msg.id))
     } catch (e) {
-      console.error(e)
+      console.error('メッセージ削除失敗:', e)
     }
   }
 
@@ -327,7 +348,7 @@ export default function DealerChat() {
                       </div>
                       {mine && (
                         <button
-                          onClick={() => handleDelete(msg.id)}
+                          onClick={() => handleDelete(msg)}
                           style={{
                             background: '#fee2e2', border: '1px solid #fca5a5', color: '#dc2626',
                             cursor: 'pointer', fontSize: '11px', fontWeight: 'bold',

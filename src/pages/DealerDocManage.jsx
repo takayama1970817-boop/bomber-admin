@@ -12,6 +12,8 @@ import {
 } from 'firebase/firestore'
 import { ref, uploadBytesResumable, getDownloadURL, deleteObject } from 'firebase/storage'
 import { db, storage } from '../lib/firebase.js'
+import { useAuth } from '../contexts/AuthContext.jsx'
+import { canManageDocuments, assertCan } from '../lib/permissions.js'
 
 function fmtDate(ts) {
   if (!ts) return '—'
@@ -34,6 +36,7 @@ const CATEGORIES = [
 ]
 
 export default function DealerDocManage() {
+  const { profile } = useAuth()
   const [docs, setDocs] = useState([])
   const [loading, setLoading] = useState(true)
   const [editing, setEditing] = useState(null)
@@ -124,6 +127,8 @@ export default function DealerDocManage() {
   }
 
   const handleSave = async () => {
+    // 二重防御：資料管理は admin のみ（canManageDocuments）
+    try { assertCan(canManageDocuments, profile) } catch (e) { alert(e.message); return }
     if (!title.trim()) {
       alert('タイトルは必須です')
       return
@@ -185,6 +190,8 @@ export default function DealerDocManage() {
   }
 
   const handleDelete = async (id) => {
+    // 二重防御：資料削除は admin のみ
+    try { assertCan(canManageDocuments, profile) } catch (e) { alert(e.message); return }
     if (!confirm('この資料を削除しますか？')) return
     try {
       // Storage のファイルも削除
