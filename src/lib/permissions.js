@@ -35,7 +35,11 @@
  * canManageDocuments          |   ✅   |  ✅   |   ❌  |    ❌     |    ❌     |    ❌     |    ❌    |   ❌
  * canEditSalonAccount         |   ✅   |  ✅   |   ❌  |    ❌     |    ❌     |    ❌     |    ✅    |   ❌
  * canEditDealerAccount        |   ✅   |  ✅   |   ❌  |    ❌     |    ✅     |    ❌     |    ❌    |   ❌
+ * canManageDealerSalons       |   ✅   |  ✅   |   ❌  |    ❌     |    ❌     |    ❌     |    ❌    |   ❌
+ * canManageKickback           |   ✅   |  ✅   |   ❌  |    ❌     |    ❌     |    ❌     |    ❌    |   ❌
+ * canManageInvoice            |   ✅   |  ✅   |   ❌  |    ❌     |    ❌     |    ❌     |    ❌    |   ❌
  * canSendMessage (チャット送信)|   ✅   |  ✅   |   ✅  |    ✅     |    ✅     |    ✅     |    ✅    |   ✅
+ * canDeleteOwnChatMessage     |   ✅   |  ✅   |   ✅  |    ✅     |    ✅     |    ✅     |    ✅    |   ✅
  * canManageChatRoom (部屋管理) |   ✅   |  ✅   |   ❌  |    ❌     |    ❌     |    ❌     |    ❌    |   ❌
  * ============================================================================
  *
@@ -195,14 +199,87 @@ export function canEditDealerAccount(p) {
   return isDealerAdmin(p) || isAdmin(p)
 }
 
+/** 代理店↔サロン紐付けの管理（本社 admin のみ。RT の設定作業） */
+export function canManageDealerSalons(p) { return isAdmin(p) }
+
+/** キックバック清算書の管理（作成・編集・削除）。dealer 側は閲覧のみ */
+export function canManageKickback(p) { return isAdmin(p) }
+
+/** 代理店請求書の管理（作成・編集・削除）。dealer 側は自社分の閲覧のみ */
+export function canManageInvoice(p) { return isAdmin(p) }
+
 /** チャット送信（業務連絡なので全員可） */
 export function canSendMessage(p) {
   // ログイン済みなら誰でも送信可能（業務連絡の円滑化）
   return !!p?.role
 }
 
+/**
+ * 自分が投稿したチャットメッセージの削除。
+ *
+ * - 送信と同じくログイン済みユーザーなら自分の発言を消せる
+ * - 他人の発言は canManageChatRoom（admin）のみ触れる
+ * - 呼び出し側で `message.uid === profile.uid` の前提で使う
+ *   （rules 側でも `resource.data.uid == request.auth.uid` でガード済み）
+ */
+export function canDeleteOwnChatMessage(p) {
+  return !!p?.role
+}
+
 /** チャット部屋管理（作成・削除・メンバー変更、admin のみ） */
 export function canManageChatRoom(p) { return isAdmin(p) }
+
+// ====== ERP 関連権限（Phase 1 実装） ======================
+// 設計書: docs/04_ERP_DATA_MODEL.md §6
+// Phase 1 の ERP 画面は admin と internal(=既存 staff) のみ有効。
+// factory / supplier / warehouse / dealer / salon は erp_ collection アクセス禁止。
+
+/** internal = 既存 staff の ERP 文脈での呼称（エイリアス） */
+export function isInternal(p) { return p?.role === 'staff' }
+
+/** ERP 画面にアクセスできる人（admin/master/internal=staff） */
+export function isErpUser(p) { return isAdmin(p) || isInternal(p) }
+
+// --- 受注 ---
+export function canCreateOrder(p) { return isErpUser(p) }
+export function canEditOrder(p) { return isErpUser(p) }
+export function canApproveOrder(p) { return isAdmin(p) }
+export function canCancelOrder(p) { return isAdmin(p) }
+
+// --- 発注 ---
+export function canCreatePurchaseOrder(p) { return isErpUser(p) }
+export function canEditPurchaseOrder(p) { return isErpUser(p) }
+export function canApprovePurchaseOrder(p) { return isAdmin(p) }
+export function canSendPurchaseOrder(p) { return isErpUser(p) }
+
+// --- 在庫 ---
+export function canViewInventory(p) { return isErpUser(p) }
+export function canAdjustInventory(p) { return isAdmin(p) }
+
+// --- 入庫 ---
+export function canInputStockIn(p) { return isErpUser(p) }
+export function canApproveStockIn(p) { return isAdmin(p) }
+
+// --- 出荷 ---
+export function canCreateShipment(p) { return isErpUser(p) }
+export function canInputShipment(p) { return isErpUser(p) }
+export function canApproveShipment(p) { return isAdmin(p) || isInternal(p) }
+export function canCancelShipment(p) { return isAdmin(p) }
+
+// --- 監査ログ閲覧（admin のみ）---
+export function canViewAuditLog(p) { return isAdmin(p) }
+
+// --- Phase 1 では未使用（設計のみ、誤配線防止の TODO 付き）---
+/** TODO(Phase 2+): ProductionResult 入力（factory role 実装後に有効化） */
+export function canInputProductionResult(p) { return isAdmin(p) }
+/** TODO(Phase 2+): Production 承認 */
+export function canApproveProduction(p) { return isAdmin(p) }
+/** TODO(Phase 2+): 請求書作成 */
+export function canCreateInvoice(p) { return isAdmin(p) }
+/** TODO(Phase 2+): 請求書承認 */
+export function canApproveInvoice(p) { return isAdmin(p) }
+/** TODO(Phase 2+): 入金記録 */
+export function canRecordPayment(p) { return isAdmin(p) }
 
 // ====== assertCan（保存処理側のガード） ======
 /**

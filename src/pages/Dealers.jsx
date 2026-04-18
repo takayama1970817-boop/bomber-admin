@@ -19,6 +19,8 @@ import { createAccountWithoutSignout } from '../lib/createAccountWithoutSignout.
 import { signInExisting } from '../lib/createAccountWithoutSignout.js'
 import { downloadKbRulesXlsx } from '../lib/generateKbRulesXlsx.js'
 import { downloadKbRulesPdf } from '../lib/generateKbRulesPdf.js'
+import { useAuth } from '../contexts/AuthContext.jsx'
+import { canInvite, canEditDealerAccount, assertCan } from '../lib/permissions.js'
 
 const APP_URL = 'https://bomber-admin.web.app'
 
@@ -35,6 +37,7 @@ function fmtYen(n) {
 
 export default function Dealers() {
   const navigate = useNavigate()
+  const { profile } = useAuth()
   const [dealers, setDealers] = useState([])
   const [dealerAccounts, setDealerAccounts] = useState([]) // allowedEmails role=dealer
   const [loading, setLoading] = useState(true)
@@ -138,6 +141,8 @@ export default function Dealers() {
       alert('権限（管理者 / スタッフ）を選択してください')
       return
     }
+    // 二重防御：招待は admin のみ（canInvite）
+    try { assertCan(canInvite, profile) } catch (e) { alert(e.message); return }
 
     setInviting(true)
     setInvMsg('')
@@ -203,6 +208,8 @@ export default function Dealers() {
   }
 
   const handleCreateAccount = async () => {
+    // 二重防御：アカウント新規作成は admin のみ
+    try { assertCan(canInvite, profile) } catch (e) { alert(e.message); return }
     const email = createEmail.trim().toLowerCase()
     const company = createCompany.trim()
     const code = createCode.trim().toUpperCase()
@@ -313,6 +320,8 @@ export default function Dealers() {
   const [deleteConfirm, setDeleteConfirm] = useState(null) // 削除確認中の代理店
 
   const handleDeleteDealer = async (d) => {
+    // 二重防御：代理店削除は admin のみ
+    try { assertCan(canInvite, profile) } catch (e) { alert(e.message); return }
     setDeleting(d.email)
     try {
       // allowedEmails を削除（ログイン不可になる）
@@ -374,6 +383,8 @@ export default function Dealers() {
 
   const saveEditDealer = async () => {
     if (!editingDealer) return
+    // 二重防御：アカウント情報編集は admin または dealerAdmin
+    try { assertCan(canEditDealerAccount, profile) } catch (e) { alert(e.message); return }
     setEditSaving(true)
     try {
       const { id, ...data } = editingDealer
