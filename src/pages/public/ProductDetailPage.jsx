@@ -1,10 +1,19 @@
 import { Link, Navigate, useParams } from 'react-router-dom'
-import { getProductBySlug, products } from '../../data/products.js'
+import { usePublicProducts } from '../../hooks/usePublicProducts.js'
 
 export default function ProductDetailPage() {
   const { slug } = useParams()
-  const product = getProductBySlug(slug)
+  const { products, loading } = usePublicProducts()
 
+  if (loading) {
+    return (
+      <section className="py-24 text-center">
+        <div className="inline-block w-8 h-8 border-4 border-indigo-200 border-t-indigo-600 rounded-full animate-spin" />
+      </section>
+    )
+  }
+
+  const product = products.find((p) => p.slug === slug) || null
   if (!product) {
     return <Navigate to="/products" replace />
   }

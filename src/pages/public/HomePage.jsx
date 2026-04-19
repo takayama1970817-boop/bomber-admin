@@ -1,14 +1,11 @@
 import { Link } from 'react-router-dom'
-
-import { products as allProducts } from '../../data/products.js'
+import { usePublicProducts } from '../../hooks/usePublicProducts.js'
 
 const stats = [
   { value: '500+', label: '導入サロン数' },
   { value: '98%', label: '商品満足度' },
   { value: '92%', label: 'リピート率' },
 ]
-
-const featuredProducts = allProducts.slice(0, 3)
 
 const markets = [
   {
@@ -41,6 +38,9 @@ const markets = [
 ]
 
 export default function HomePage() {
+  const { products } = usePublicProducts()
+  const featuredProducts = products.slice(0, 3)
+
   return (
     <>
       {/* ── ヒーロー ── */}

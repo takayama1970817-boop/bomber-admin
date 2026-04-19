@@ -3,9 +3,12 @@
  * 使い方: node scripts/bcart-sync.mjs
  *
  * オプション:
- *   --year=2026       同期対象年（デフォルト: 2026）
- *   --all             全期間を同期
- *   --skip-products   受注明細の取得をスキップ
+ *   --year=2026         同期対象年（デフォルト: 2026）
+ *   --all               全期間を同期
+ *   --skip-products     受注明細の取得をスキップ
+ *   --products-master   【Phase 2-4】商品マスタのみ同期して終了
+ *                        Bカート products → Firestore publicProducts
+ *                        + src/data/productsGenerated.js を再生成
  */
 import { initializeApp } from 'firebase/app'
 import { getAuth, signInWithEmailAndPassword } from 'firebase/auth'
@@ -18,12 +21,19 @@ import {
   Timestamp,
   serverTimestamp,
 } from 'firebase/firestore'
+import { writeFileSync } from 'fs'
+import { resolve, dirname } from 'path'
+import { fileURLToPath } from 'url'
 import {
   BCART_BASE,
   getBcartToken,
   getFirebaseConfig,
   getScriptCredentials,
 } from './_env.mjs'
+import { toCategoryKey, toSlug, gradientFor } from '../src/data/products.js'
+
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = dirname(__filename)
 
 // === 設定 ===
 const BCART_TOKEN = getBcartToken()
@@ -40,6 +50,7 @@ const args = process.argv.slice(2)
 const yearArg = args.find((a) => a.startsWith('--year='))
 const syncAll = args.includes('--all')
 const skipProducts = args.includes('--skip-products')
+const productsMasterOnly = args.includes('--products-master')
 const TARGET_YEAR = yearArg ? parseInt(yearArg.split('=')[1]) : 2026
 
 // === レート制限対応 fetch ===
@@ -89,8 +100,173 @@ async function findYearStartOffset(year) {
   return lo
 }
 
+// === Bカート 商品マスタ → 公開ページ用 shape 変換 ===
+// Bカート products エンドポイントのレスポンス揺れ（事業者設定依存）を吸収する。
+function transformBcartProduct(raw) {
+  const code = String(raw.code ?? raw.product_code ?? raw.sku ?? raw.id ?? '').trim()
+  if (!code) return null
+
+  const name = String(raw.name ?? raw.product_name ?? '').trim()
+  if (!name) return null
+
+  const categoryName = String(
+    raw.category_name ?? raw.category ?? raw.main_category ?? ''
+  ).trim()
+  const categoryKey = toCategoryKey(categoryName)
+
+  const slugRaw = String(raw.slug ?? raw.url_slug ?? '').trim()
+  const slug = slugRaw ? toSlug(slugRaw) : toSlug(code)
+
+  const pub =
+    raw.is_public == null && raw.status == null
+      ? true
+      : !(
+          String(raw.is_public ?? raw.status ?? '')
+            .trim()
+            .toLowerCase() === '0' ||
+          String(raw.is_public ?? raw.status ?? '')
+            .trim()
+            .toLowerCase() === 'false' ||
+          String(raw.is_public ?? raw.status ?? '').trim() === '非公開'
+        )
+
+  const toNum = (v) => {
+    if (v == null || v === '') return null
+    const n = Number(String(v).replace(/[^\d.-]/g, ''))
+    return Number.isFinite(n) ? n : null
+  }
+
+  const description = String(raw.description ?? raw.long_description ?? '').trim()
+  const shortDesc = String(
+    raw.short_description ?? raw.summary ?? raw.sub_description ?? ''
+  ).trim() || description.slice(0, 150)
+
+  const featuresSrc = raw.features ?? raw.feature_list ?? ''
+  const features = Array.isArray(featuresSrc)
+    ? featuresSrc.map((f) => String(f).trim()).filter(Boolean)
+    : String(featuresSrc)
+        .split('|')
+        .map((f) => f.trim())
+        .filter(Boolean)
+
+  const image =
+    String(raw.image_url ?? raw.image1 ?? raw.main_image ?? raw.thumbnail ?? '').trim() ||
+    null
+
+  return {
+    slug,
+    code,
+    name,
+    category: categoryName || 'その他',
+    categoryKey,
+    badge: String(raw.badge ?? '').trim() || null,
+    unit: String(raw.unit ?? raw.capacity ?? '').trim() || null,
+    price: toNum(raw.price ?? raw.selling_price),
+    tagline: String(raw.tagline ?? raw.catchphrase ?? '').trim() || null,
+    shortDesc,
+    description,
+    features,
+    usage: String(raw.usage ?? raw.how_to_use ?? '').trim() || null,
+    image,
+    gradient: gradientFor(categoryKey),
+    displayOrder: toNum(raw.display_order ?? raw.sort_order ?? raw.sort) ?? 9999,
+    isPublic: pub,
+  }
+}
+
+// === 商品マスタのみ同期 ===
+async function syncProductsMaster() {
+  console.log('=== Bカート商品マスタ → Firestore publicProducts 同期 ===\n')
+
+  // 0. Firebase認証
+  console.log('0. Firebase認証中...')
+  await signInWithEmailAndPassword(auth, SCRIPT_EMAIL, SCRIPT_PASSWORD)
+  console.log('   認証OK\n')
+
+  // 1. Bカートから全商品取得
+  console.log('1. 商品データ取得中...')
+  const products = []
+  let offset = 0
+  while (true) {
+    const data = await bcartFetch('products', { limit: PAGE_SIZE, offset })
+    const key = Object.keys(data).find((k) => Array.isArray(data[k])) || 'products'
+    const items = data[key]
+    if (!items || items.length === 0) break
+    products.push(...items)
+    const total = data.meta?.total || '?'
+    console.log(`   offset=${offset}: 累計${products.length}件 (全${total}件中)`)
+    if (items.length < PAGE_SIZE) break
+    offset += PAGE_SIZE
+  }
+  console.log(`   → 商品: ${products.length}件\n`)
+
+  // 2. shape 変換 + フィルタ
+  console.log('2. 変換中...')
+  const transformed = []
+  const skipped = []
+  for (const raw of products) {
+    const item = transformBcartProduct(raw)
+    if (!item) { skipped.push({ reason: 'code/name 欠落', raw }); continue }
+    if (!item.isPublic) { skipped.push({ reason: '非公開', code: item.code }); continue }
+    transformed.push(item)
+  }
+  transformed.sort((a, b) => a.displayOrder - b.displayOrder)
+  console.log(`   取込対象: ${transformed.length}件 / スキップ: ${skipped.length}件\n`)
+
+  // 3. Firestore publicProducts に書き込み（docId = code）
+  console.log('3. Firestore publicProducts 書き込み中...')
+  let batch = writeBatch(db)
+  let batchCount = 0
+  for (const p of transformed) {
+    const ref = doc(db, 'publicProducts', p.code)
+    batch.set(ref, {
+      ...p,
+      syncedAt: serverTimestamp(),
+    })
+    batchCount++
+    if (batchCount >= 450) {
+      await batch.commit()
+      batch = writeBatch(db)
+      batchCount = 0
+    }
+  }
+  if (batchCount > 0) await batch.commit()
+  console.log(`   → ${transformed.length}件書き込み完了\n`)
+
+  // 4. src/data/productsGenerated.js を再生成（ビルド時フォールバック）
+  const outPath = resolve(__dirname, '..', 'src', 'data', 'productsGenerated.js')
+  const header = `// ⚠️ 自動生成ファイル — scripts/bcart-sync.mjs --products-master で上書きされます
+// 手動編集しないでください（カテゴリ辞書の拡張は src/data/products.js を編集）
+
+`
+  const body = `export const generatedProducts = ${JSON.stringify(transformed, null, 2)}\n\nexport const generatedAt = ${JSON.stringify(new Date().toISOString())}\n`
+  writeFileSync(outPath, header + body, 'utf-8')
+  console.log(`4. 静的フォールバック更新: ${outPath}\n`)
+
+  console.log('========================================')
+  console.log('  商品マスタ同期 完了')
+  console.log('========================================')
+  console.log(`  取得:     ${products.length}件`)
+  console.log(`  取込:     ${transformed.length}件`)
+  console.log(`  スキップ: ${skipped.length}件`)
+  if (skipped.length > 0) {
+    const reasons = skipped.reduce((acc, s) => {
+      acc[s.reason] = (acc[s.reason] || 0) + 1
+      return acc
+    }, {})
+    Object.entries(reasons).forEach(([r, c]) => console.log(`    - ${r}: ${c}件`))
+  }
+  console.log('')
+}
+
 // === メイン処理 ===
 async function main() {
+  // --products-master : 商品マスタのみ同期して終了
+  if (productsMasterOnly) {
+    await syncProductsMaster()
+    process.exit(0)
+  }
+
   const yearLabel = syncAll ? '全期間' : `${TARGET_YEAR}年`
   console.log(`=== BカートAPI → Firestore 同期（${yearLabel}） ===\n`)
 

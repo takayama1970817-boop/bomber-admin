@@ -586,6 +586,17 @@ service cloud.firestore {
     }
 
     // ========================================
+    // publicProducts コレクション（公開サイト商品マスタ / Bカート同期先）
+    // Phase 2-4: bcart-sync.mjs --products-master で書き込み
+    // Phase 2-5: HomePage / ProductsPage が読み込み
+    // 公開ページで使うため **read は誰でも可**。書き込みは admin or Cloud Functions のみ。
+    // ========================================
+    match /publicProducts/{productId} {
+      allow read:  if true;
+      allow write: if isAdmin();
+    }
+
+    // ========================================
     // lineConfigs コレクション（サロン別 LINE Messaging API 設定）
     // docId = salonCompanyName。サロン本人と admin のみ
     // ========================================

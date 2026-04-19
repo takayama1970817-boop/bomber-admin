@@ -1,8 +1,10 @@
 import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { products, CATEGORIES } from '../../data/products.js'
+import { CATEGORIES } from '../../data/products.js'
+import { usePublicProducts } from '../../hooks/usePublicProducts.js'
 
 export default function ProductsPage() {
+  const { products, loading } = usePublicProducts()
   const [activeCategory, setActiveCategory] = useState('all')
   const [keyword, setKeyword] = useState('')
 
@@ -89,7 +91,12 @@ export default function ProductsPage() {
       {/* 商品グリッド */}
       <section className="py-16 sm:py-20 bg-slate-50">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          {filtered.length === 0 ? (
+          {loading ? (
+            <div className="text-center py-20">
+              <div className="inline-block w-8 h-8 border-4 border-indigo-200 border-t-indigo-600 rounded-full animate-spin" />
+              <p className="mt-4 text-sm text-slate-500">商品を読み込んでいます...</p>
+            </div>
+          ) : filtered.length === 0 ? (
             <div className="text-center py-20">
               <p className="text-slate-500 text-sm">
                 該当する商品が見つかりませんでした
