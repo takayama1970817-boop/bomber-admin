@@ -27,10 +27,12 @@ const { sendSettlementEmail, resolveSettlementEmailLog } = require('./sendSettle
 exports.sendSettlementEmail = sendSettlementEmail
 exports.resolveSettlementEmailLog = resolveSettlementEmailLog
 
-// Telnyx FAX送信
-const { sendFax, telnyxWebhook } = require('./sendFax')
-exports.sendFax = sendFax
-exports.telnyxWebhook = telnyxWebhook
+// Telnyx FAX送信 — 今回の送信機能には不要のため deploy 対象から一時切り離し。
+// 必要になったら以下2行のコメントを外し、Telnyx 認証情報が整ったタイミングで再デプロイする。
+// ファイル本体 (functions/sendFax.js) は残置。
+// const { sendFax, telnyxWebhook } = require('./sendFax')
+// exports.sendFax = sendFax
+// exports.telnyxWebhook = telnyxWebhook
 
 /**
  * 管理者がFirebase Authユーザーを削除する

@@ -20,7 +20,8 @@ import { generateKickbackPdf } from '../lib/generateKickbackPdf.js'
 import { downloadEml } from '../lib/generateEml.js'
 import { fetchOrdersByMonth, fetchOrderProductsBatch } from '../lib/bcartApi.js'
 
-// 手動SES送信を許可するテスト代理店コード（今日のスコープ: 1件のみ）
+// 手動メール送信を許可するテスト代理店コード（今日のスコープ: 1件のみ）
+// 送信プロバイダ: SendGrid（Cloud Functions: sendSettlementEmail）
 //
 // Single Source of Truth: Firestore `settings/rt_company.testDealerCode`
 //   （seed-test-dealer.mjs が更新する。通常運用ではここだけを見る）
@@ -980,7 +981,7 @@ export default function KickbackManage() {
     const bccDisplay = willUseTestExtras && settlementTestBcc ? `\nBCC（非表示）: ${settlementTestBcc}` : ''
     const ccDisplay = willUseTestExtras && settlementTestCc ? `\nCC（代理店にも見える）: ${settlementTestCc}` : ''
     const confirmed = confirm(
-      `【本番SES送信】\n` +
+      `【本番送信（SendGrid）】\n` +
       `対象: ${stmt.dealerCode} / ${stmt.month}${stmt.isTest ? '（🧪 TEST SEND）' : ''}\n` +
       `宛先: ${testEmail || '(代理店登録メール)'}` +
       bccDisplay + ccDisplay +
@@ -997,7 +998,7 @@ export default function KickbackManage() {
       })
       if (res.data.warning) {
         alert(
-          `⚠️ SES送信は成功しましたが、ログ更新に失敗しました。\n\n` +
+          `⚠️ 送信は成功しましたが、ログ更新に失敗しました。\n\n` +
           `messageId: ${res.data.sesMessageId || '-'}\n宛先: ${res.data.toEmail}\n\n` +
           `この messageId を控え、「pending解除」から status=sent で手動確定してください。`,
         )
@@ -1719,7 +1720,7 @@ ${senderEmail}
                           const isPending = log?.status === 'pending'
                           const isFailed = log?.status === 'failed'
                           const disabled = sending || isSent || isPending
-                          let label = '📮 SES送信'
+                          let label = '📮 送信'
                           if (sending) label = '送信中...'
                           else if (isSent) label = '✅ 送信済'
                           else if (isPending) label = '⏳ 処理中'
@@ -1734,7 +1735,7 @@ ${senderEmail}
                                     ? `送信済み (messageId: ${log.sesMessageId || '-'})`
                                     : isFailed
                                       ? `前回失敗: ${log.errorMessage || '不明'}`
-                                      : 'Cloud Functions + SES で本番送信'
+                                      : 'Cloud Functions + SendGrid で本番送信'
                                 }
                                 className={`rounded border px-3 py-1 text-xs font-medium ${
                                   disabled

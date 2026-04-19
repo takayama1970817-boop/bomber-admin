@@ -1,17 +1,24 @@
 // functions/sendSettlementEmail.js
 // 清算書メール手動送信（admin限定・1帳票1ログで二重送信防止）
 //
+// 送信プロバイダ: SendGrid（2026-04-19 に SES から切り替え）
+//
 // 設計要点:
 // 1. settlementEmailLogs/{kickbackId} を docId 固定にして「同一清算書=同一ログ」とする
 // 2. Firestore transaction で create-only の pending を書く → 同時実行で衝突したら片方だけ通る
 // 3. 既存 log が status='sent' なら always reject（二重送信禁止）
 // 4. 既存 log が status='pending' なら reject（送信中衝突）
 // 5. 既存 log が status='failed' の場合のみ上書きで再試行を許可
-// 6. SES 送信後に transaction 外で status を sent / failed に確定する
+// 6. SendGrid 送信後に transaction 外で status を sent / failed に確定する
+//
+// 互換メモ:
+//   settlementEmailLogs.sesMessageId フィールドは SES 時代の名前のまま残している。
+//   SendGrid の messageId（x-message-id ヘッダー）をここに入れる。既存ログとの
+//   互換性のためフィールド名は変えない。
 
 const { onCall, HttpsError } = require('firebase-functions/v2/https')
 const { getFirestore, FieldValue } = require('firebase-admin/firestore')
-const { SESClient, SendRawEmailCommand } = require('@aws-sdk/client-ses')
+const sgMail = require('@sendgrid/mail')
 
 // testDealerCode の優先順位（single source of truth は Firestore）
 //
@@ -207,29 +214,25 @@ const sendSettlementEmail = onCall(
       })
     })
 
-    // --- SES 設定取得 ---
+    // --- SendGrid 設定取得 ---
+    // settings/rt_company.sendgridApiKey を SSoT とする。
+    // 緊急オーバーライドとして env SENDGRID_API_KEY を用意。
     const settingsDoc = await db.collection('settings').doc('rt_company').get()
     const settings = settingsDoc.exists ? settingsDoc.data() : {}
-    const sesRegion = settings.sesRegion || 'ap-northeast-1'
-    const sesAccessKey = settings.sesAccessKeyId
-    const sesSecretKey = settings.sesSecretAccessKey
+    const sgApiKey = process.env.SENDGRID_API_KEY || settings.sendgridApiKey
 
-    if (!sesAccessKey || !sesSecretKey) {
+    if (!sgApiKey) {
       await logRef.update({
         status: 'failed',
-        errorMessage: 'SES設定が未設定です',
+        errorMessage: 'SendGrid API キーが未設定です（settings/rt_company.sendgridApiKey）',
         updatedAt: FieldValue.serverTimestamp(),
       })
-      throw new HttpsError('failed-precondition', 'SES設定が未設定です')
+      throw new HttpsError('failed-precondition', 'SendGrid API キーが未設定です')
     }
-
-    const sesClient = new SESClient({
-      region: sesRegion,
-      credentials: { accessKeyId: sesAccessKey, secretAccessKey: sesSecretKey },
-    })
+    sgMail.setApiKey(sgApiKey)
 
     const senderName = settings.companyName || 'ロイヤルトラスト株式会社'
-    const senderEmail = settings.email || 'info@royaltrust.jp'
+    const senderEmail = settings.sendgridFromEmail || settings.email || 'info@royaltrust.jp'
 
     const [y, m] = String(month || '').split('-')
     const monthLabel = y && m ? `${y}年${parseInt(m, 10)}月` : String(month || '')
@@ -268,58 +271,41 @@ const sendSettlementEmail = onCall(
       '━━━━━━━━━━━━━━━━━━━━',
     ].filter(Boolean).join('\r\n')
 
-    // MIME 構築（本日のスコープ: PDF 添付なし・テキストのみ）
-    const boundary = `alt_${Date.now()}_${Math.random().toString(36).slice(2)}`
-    // MIME ヘッダ: Cc はヘッダに含めて受信者に可視化、BCC はヘッダに含めない
-    // （BCC は SES Destinations にだけ含めることで「見えない配送」になる）
-    const headerLines = [
-      `From: =?UTF-8?B?${Buffer.from(senderName).toString('base64')}?= <${senderEmail}>`,
-      `To: ${toEmail}`,
-    ]
-    if (ccList.length > 0) {
-      headerLines.push(`Cc: ${ccList.join(', ')}`)
+    // --- SendGrid 送信 ---
+    // cc/bcc は SendGrid が MIME ヘッダ生成を担う。BCC は受信側に見えない（MIME の
+    // Bcc ヘッダは SendGrid 側で削除される）。To/Cc/Bcc の重複は呼び出し前に除外済み。
+    const msg = {
+      to: toEmail,
+      from: { email: senderEmail, name: senderName },
+      subject,
+      text: textBody,
     }
-    headerLines.push(
-      `Subject: =?UTF-8?B?${Buffer.from(subject).toString('base64')}?=`,
-      'MIME-Version: 1.0',
-      `Content-Type: multipart/alternative; boundary="${boundary}"`,
-    )
-    const headers = headerLines.join('\r\n')
+    if (ccList.length > 0) msg.cc = ccList
+    if (bccList.length > 0) msg.bcc = bccList
 
-    const textPart = [
-      `--${boundary}`,
-      'Content-Type: text/plain; charset=UTF-8',
-      'Content-Transfer-Encoding: base64',
-      '',
-      Buffer.from(textBody).toString('base64'),
-    ].join('\r\n')
-
-    const rawMessage = [headers, '', textPart, '', `--${boundary}--`].join('\r\n')
-
-    // --- SES 送信 ---
-    // Destinations には To + Cc + Bcc を全て含める（SES は実際の配送先リストを
-    // Destinations から取る。BCC は MIME ヘッダに書かれていないため受信側では見えない）
-    const destinations = [toEmail, ...ccList, ...bccList]
-    let sesMessageId
+    let sesMessageId // 互換フィールド名（SendGrid の x-message-id を入れる）
     try {
-      const result = await sesClient.send(new SendRawEmailCommand({
-        Source: `${senderName} <${senderEmail}>`,
-        Destinations: destinations,
-        RawMessage: { Data: Buffer.from(rawMessage) },
-      }))
-      sesMessageId = result.MessageId || null
+      const [response] = await sgMail.send(msg)
+      // SendGrid の messageId は レスポンスヘッダの x-message-id に入る
+      const headers = response && response.headers ? response.headers : {}
+      sesMessageId = headers['x-message-id'] || null
     } catch (err) {
-      console.error('SES送信エラー:', err)
+      // SendGrid のエラーはレスポンスボディに詳細が入る
+      const detail = err && err.response && err.response.body
+        ? JSON.stringify(err.response.body).slice(0, 800)
+        : ''
+      const errMsg = String(err && err.message ? err.message : err)
+      console.error('SendGrid送信エラー:', errMsg, detail)
       await logRef.update({
         status: 'failed',
-        errorMessage: String(err && err.message ? err.message : err).slice(0, 1000),
+        errorMessage: (errMsg + (detail ? ' / ' + detail : '')).slice(0, 1000),
         updatedAt: FieldValue.serverTimestamp(),
       })
-      throw new HttpsError('internal', 'メール送信に失敗しました: ' + err.message)
+      throw new HttpsError('internal', 'メール送信に失敗しました: ' + errMsg)
     }
 
     // --- 成功確定（リトライ付き） ---
-    // ここまで来たら SES は実送信済み。
+    // ここまで来たら SendGrid は実送信済み。
     // この update が失敗するとログは pending のまま残り、messageId も失われる。
     // そのため: (1) 3回リトライ (2) 最終的に失敗しても messageId をログに残す努力をする
     //         (3) 呼び出し元にも messageId を返す（管理画面から手動復旧可能にする）
@@ -347,12 +333,12 @@ const sendSettlementEmail = onCall(
       // 最終リトライでも失敗。実送信は成功しているので status は pending 残留になる。
       // せめて sesMessageId をサーバーログに残し、呼び出し元にも返す（admin が手動で status=sent に戻せる）。
       console.error(
-        '[CRITICAL] SES送信は成功したが Firestore 更新に失敗',
+        '[CRITICAL] SendGrid送信は成功したが Firestore 更新に失敗',
         { kickbackId, toEmail, sesMessageId, error: updateErr.message },
       )
       return {
         success: true,
-        warning: 'SES送信は完了しましたが、送信ログの status 更新に失敗しました。settlementEmailLogs を手動で sent に更新してください',
+        warning: 'SendGrid送信は完了しましたが、送信ログの status 更新に失敗しました。settlementEmailLogs を手動で sent に更新してください',
         kickbackId,
         toEmail,
         ccCount: ccList.length,
