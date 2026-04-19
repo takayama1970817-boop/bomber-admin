@@ -276,6 +276,7 @@ export default function DealerExecDashboard() {
               </>
             )}
           </p>
+          <p className="mt-1 text-xs text-emerald-600">🔄 Bカート最新（画面表示時点）</p>
         </div>
         <div className="flex items-center gap-2">
           <button

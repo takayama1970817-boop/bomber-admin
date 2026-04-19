@@ -2,52 +2,40 @@
  * 代理店ダッシュボード用 日次スナップショット集計スクリプト
  *   dealerMonthlySnapshots/{dealerCode}_{YYYY-MM} を作成・更新する。
  *
- * 背景:
- *   代理店ポータルのダッシュボード（/dealer）は「5秒で行動判断」が目的。
- *   画面側で重い集計をせず、事前集計済みドキュメントを 1件 getDoc して即表示する設計。
- *   Blaze 未課金のため Cloud Functions ではなく本 Admin SDK スクリプトを cron/Actions 等で
- *   毎日 13:00（受注締め 12:00 の1時間後）に叩く想定。
+ * 設計の柱（/dealer/dashboard-exec との整合 2026-04-19 確定）:
+ *   - 所属サロン: Bカート 会員API (parent_id == dealerCode) を source of truth
+ *   - 月売上 / 前月同日比: Bカート 受注 (customer_parent_id == dealerCode, final_price 税込)
+ *   - 判定カットオフ: snapshotCutoffAt（当日 12:00、または MONTH 指定時は月末）
+ *   - Firestore dealerSalons は meta 情報（type='own'/'sub'、createdAt）としてのみ使用
+ *   - Firestore orders は二次情報で、集計主体には用いない（/dealer/dashboard-exec と齟齬が出るため）
  *
- * 仕様:
- *   - 集計カットオフ: 当日 12:00（`snapshotCutoffAt`）
- *   - 対象代理店   : allowedEmails where role == 'dealer' で dealerCode を持つ全員
- *   - 月          : 当月（YYYY-MM）。MONTH 環境変数で上書き可（過去月の再集計）
- *
- * 書き込むスキーマ（社長確定版）:
+ * 書き込むスキーマ:
  *   dealerMonthlySnapshots/{dealerCode}_{YYYY-MM}
- *   {
  *     dealerCode, month,
- *     monthRevenue,                 // 当月1日〜カットオフ までの税込売上
- *     prevMonthSameDayRevenue,      // 前月1日〜同日 12:00 までの税込売上
- *     activeSalonCount,             // 直近30日以内に発注ありのサロン数
- *     totalSalonCount,              // dealerSalons 基準の総サロン数
- *     operationRate,                // activeSalonCount / totalSalonCount （0〜1）
- *     kickbackEstimate,             // 当月累計 × kbRate /100 （代理店ごと）
- *     salonsStale30, salonsStale14, // 要対応サロン（各最大5件）
- *     salonsNew,
- *     recentOrders,                 // 直近5件 [{ orderId, orderDate, salonName, totalAmount }]
+ *     monthRevenue, prevMonthSameDayRevenue,
+ *     activeSalonCount, totalSalonCount, operationRate,
+ *     kickbackEstimate,
+ *     salonsStale30/14/new, followPriorityTop10,
+ *     recentOrders,
  *     snapshotAt, snapshotCutoffAt, createdAt, updatedAt
- *   }
  *
  * 使用方法:
- *   # ドライラン（書き込まない）
- *   node scripts/aggregate-dealer-monthly.mjs
- *
- *   # 本番実行
+ *   node scripts/aggregate-dealer-monthly.mjs                                    # dry-run 全件
+ *   DEALER_CODE=J0002 node scripts/aggregate-dealer-monthly.mjs                  # 1社 dry-run
  *   DRY_RUN=false OPERATOR="社長 ボンバー" node scripts/aggregate-dealer-monthly.mjs
+ *   MONTH=2026-03 DRY_RUN=false node scripts/aggregate-dealer-monthly.mjs        # 過去月再集計
+ *   VERBOSE=true node scripts/aggregate-dealer-monthly.mjs                       # Top10 を JSON ダンプ
  *
- *   # 特定代理店のみ
- *   DEALER_CODE=12345 DRY_RUN=false node scripts/aggregate-dealer-monthly.mjs
- *
- *   # 過去月の再集計（カットオフは月末 23:59:59 扱い）
- *   MONTH=2026-03 DRY_RUN=false node scripts/aggregate-dealer-monthly.mjs
+ * 必要な環境変数（.env.local）:
+ *   VITE_BCART_API_TOKEN  — Bカート API トークン（_env.mjs 経由）
  *
  * 必要ファイル:
- *   scripts/service-account.json（Firebase Admin SDK 秘密鍵）
+ *   scripts/service-account.json — Firebase Admin SDK 秘密鍵
  */
 import { readFileSync, existsSync } from 'fs'
 import { initializeApp, cert } from 'firebase-admin/app'
 import { getFirestore, FieldValue, Timestamp } from 'firebase-admin/firestore'
+import { BCART_BASE, getBcartToken } from './_env.mjs'
 
 const SERVICE_ACCOUNT_PATH = new URL('./service-account.json', import.meta.url)
 
@@ -60,22 +48,106 @@ const serviceAccount = JSON.parse(readFileSync(SERVICE_ACCOUNT_PATH, 'utf8'))
 initializeApp({ credential: cert(serviceAccount) })
 const db = getFirestore()
 
+const BCART_TOKEN = getBcartToken()
 const DRY_RUN = process.env.DRY_RUN !== 'false'
 const OPERATOR = process.env.OPERATOR || 'unknown'
 const DEALER_CODE_FILTER = process.env.DEALER_CODE || null
 const MONTH_OVERRIDE = process.env.MONTH || null
+const ORDER_WINDOW_MONTHS = Number(process.env.ORDER_WINDOW_MONTHS) || 13
 
 const MAX_LIST = 5
+const BCART_PAGE = 100
 
+// ========================================
+// Bカート API helpers
+// scripts/bcart-sync.mjs と同一のレート制限対応パターン
+// ========================================
+async function bcartFetch(endpoint, params = {}) {
+  const url = new URL(`${BCART_BASE}/${endpoint}`)
+  Object.entries(params).forEach(([k, v]) => {
+    if (v != null && v !== '') url.searchParams.set(k, String(v))
+  })
+  for (let retry = 0; retry < 5; retry++) {
+    const res = await fetch(url.toString(), {
+      headers: { Authorization: `Bearer ${BCART_TOKEN}` },
+    })
+    if (res.status === 429) {
+      const wait = (retry + 1) * 3000
+      console.log(`   ⏳ レート制限 → ${wait / 1000}秒待機...`)
+      await new Promise((r) => setTimeout(r, wait))
+      continue
+    }
+    if (!res.ok) throw new Error(`Bカート API error: ${res.status} ${res.statusText}`)
+    return res.json()
+  }
+  throw new Error('Bカート レート制限が継続中。時間をおいて再実行してください。')
+}
+
+async function fetchAllBcartCustomers() {
+  const all = []
+  let offset = 0
+  while (true) {
+    const data = await bcartFetch('customers', { limit: BCART_PAGE, offset })
+    const items = data.customers || []
+    if (items.length === 0) break
+    all.push(...items)
+    const total = data.meta?.total || all.length
+    process.stdout.write(`\r  Bカート 会員: ${all.length}/${total} 件`)
+    if (all.length >= total) break
+    offset += BCART_PAGE
+  }
+  process.stdout.write('\n')
+  return all
+}
+
+async function fetchBcartOrdersForMonth(ym) {
+  const [yy, mm] = ym.split('-')
+  const lastDay = new Date(Number(yy), Number(mm), 0).getDate()
+  const from = `${yy}-${mm}-01 00:00:00`
+  const to = `${yy}-${mm}-${String(lastDay).padStart(2, '0')} 23:59:59`
+  const all = []
+  let offset = 0
+  while (true) {
+    const data = await bcartFetch('orders', {
+      limit: BCART_PAGE,
+      offset,
+      ordered_at__gte: from,
+      ordered_at__lte: to,
+    })
+    const items = data.orders || []
+    if (items.length === 0) break
+    all.push(...items)
+    const total = data.meta?.total || all.length
+    if (all.length >= total) break
+    offset += BCART_PAGE
+  }
+  return all
+}
+
+function generateMonthList(fromYM, toYM) {
+  const [fy, fm] = fromYM.split('-').map(Number)
+  const [ty, tm] = toYM.split('-').map(Number)
+  const out = []
+  let y = fy
+  let m = fm
+  while (y < ty || (y === ty && m <= tm)) {
+    out.push(`${y}-${String(m).padStart(2, '0')}`)
+    m += 1
+    if (m > 12) {
+      m = 1
+      y += 1
+    }
+  }
+  return out
+}
+
+// ========================================
+// 時間窓
+// ========================================
 function toYearMonth(date) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`
 }
 
-/**
- * 当月カットオフと前月同日カットオフを計算する。
- * - 当月（MONTH_OVERRIDE なし）: 本日 12:00 がカットオフ
- * - 過去月（MONTH_OVERRIDE あり）: その月の最終日 23:59:59 をカットオフ
- */
 function resolveTimeWindows() {
   const now = new Date()
   let month
@@ -86,18 +158,14 @@ function resolveTimeWindows() {
     const y = Number(m[1])
     const mm = Number(m[2])
     month = `${y}-${String(mm).padStart(2, '0')}`
-    // その月の最終日 23:59:59
     cutoff = new Date(y, mm, 0, 23, 59, 59, 999)
   } else {
     month = toYearMonth(now)
-    // 当日 12:00:00
     cutoff = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 12, 0, 0, 0)
   }
 
   const [y, mm] = month.split('-').map(Number)
   const thisMonthStart = new Date(y, mm - 1, 1, 0, 0, 0, 0)
-
-  // 前月同日同時刻
   const prevMonthStart = new Date(y, mm - 2, 1, 0, 0, 0, 0)
   const prevMonthSameDay = new Date(
     cutoff.getFullYear(),
@@ -109,7 +177,20 @@ function resolveTimeWindows() {
     cutoff.getMilliseconds(),
   )
 
-  return { month, cutoff, thisMonthStart, prevMonthStart, prevMonthSameDay }
+  // Bcart 受注取得窓: カットオフから ORDER_WINDOW_MONTHS か月前まで
+  const fetchStart = new Date(cutoff)
+  fetchStart.setMonth(fetchStart.getMonth() - (ORDER_WINDOW_MONTHS - 1))
+  fetchStart.setDate(1)
+
+  return {
+    month,
+    cutoff,
+    thisMonthStart,
+    prevMonthStart,
+    prevMonthSameDay,
+    fetchStartYM: toYearMonth(fetchStart),
+    fetchEndYM: toYearMonth(cutoff),
+  }
 }
 
 function tsToDate(ts) {
@@ -119,6 +200,24 @@ function tsToDate(ts) {
   return new Date(ts)
 }
 
+function parseBcartDate(raw) {
+  if (!raw) return null
+  // 'YYYY-MM-DD HH:MM:SS' → ISO
+  const d = new Date(String(raw).replace(' ', 'T'))
+  return Number.isNaN(d.getTime()) ? null : d
+}
+
+function parentIdOf(rec) {
+  return String(rec?.parent_id ?? rec?.customer_parent_id ?? rec?.parent_member_id ?? '').trim()
+}
+
+function companyNameOf(rec) {
+  return (rec?.comp_name || rec?.customer_comp_name || rec?.name || rec?.customer_name || '').trim()
+}
+
+// ========================================
+// Firestore
+// ========================================
 async function fetchDealers() {
   const snap = await db.collection('allowedEmails').where('role', '==', 'dealer').get()
   const out = []
@@ -136,137 +235,84 @@ async function fetchDealers() {
   return out
 }
 
-async function fetchDealerSalons(dealerCode) {
+async function fetchDealerSalonsMeta(dealerCode) {
   const snap = await db.collection('dealerSalons').where('dealerCode', '==', dealerCode).get()
   return snap.docs.map((d) => ({ id: d.id, ...d.data() }))
 }
 
-async function fetchDealerOrders(dealerCode) {
-  const snap = await db.collection('orders').where('dealerCode', '==', dealerCode).get()
-  return snap.docs.map((d) => {
-    const data = d.data()
-    return {
-      id: d.id,
-      companyName: data.companyName || '',
-      total: Number(data.total) || 0,
-      orderDate: tsToDate(data.orderDate),
-    }
-  })
-}
-
-function aggregateForDealer({ dealer, salons, orders, windows }) {
+// ========================================
+// 集計
+// ========================================
+function aggregateForDealer({ dealer, dealerSalonsMeta, bcartMembers, bcartOrdersRaw, windows }) {
   const { month, cutoff, thisMonthStart, prevMonthStart, prevMonthSameDay } = windows
 
-  // 当月売上（1日〜カットオフ）
+  // Bcart 受注を正規化 + cutoff でフィルタ
+  const orders = bcartOrdersRaw
+    .map((o) => ({
+      id: String(o.id || o.code || ''),
+      companyName: companyNameOf(o) || '（不明）',
+      total: Number(o.final_price ?? o.total_price) || 0,
+      orderDate: parseBcartDate(o.ordered_at),
+      orderNumber: String(o.order_no || o.order_number || o.code || ''),
+    }))
+    .filter((o) => o.orderDate && o.orderDate <= cutoff)
+
+  // 月売上（税込）
   let monthRevenue = 0
   for (const o of orders) {
-    if (!o.orderDate) continue
-    if (o.orderDate >= thisMonthStart && o.orderDate <= cutoff) {
-      monthRevenue += o.total
-    }
+    if (o.orderDate >= thisMonthStart && o.orderDate <= cutoff) monthRevenue += o.total
   }
 
-  // 前月同日比（前月1日〜前月同日同時刻）
+  // 前月同日比
   let prevMonthSameDayRevenue = 0
   for (const o of orders) {
-    if (!o.orderDate) continue
     if (o.orderDate >= prevMonthStart && o.orderDate <= prevMonthSameDay) {
       prevMonthSameDayRevenue += o.total
     }
   }
 
-  // orders から companyName 別の first/last 発注日を算出
-  //   （dealerSalons 未登録でも orders 側で補足する。strict 化された orders.dealerCode が source of truth）
-  const ordersByCompany = new Map() // name -> { first: Date, last: Date }
+  // サロン別 first/last
+  const ordersByCompany = new Map()
   for (const o of orders) {
-    if (!o.companyName || !o.orderDate) continue
+    if (!o.companyName) continue
     const prev = ordersByCompany.get(o.companyName)
-    if (!prev) {
-      ordersByCompany.set(o.companyName, { first: o.orderDate, last: o.orderDate })
-    } else {
+    if (!prev) ordersByCompany.set(o.companyName, { first: o.orderDate, last: o.orderDate })
+    else {
       if (o.orderDate < prev.first) prev.first = o.orderDate
       if (o.orderDate > prev.last) prev.last = o.orderDate
     }
   }
 
-  // dealerSalons を companyName → meta に
+  // Bcart 会員 = 所属サロンの source of truth（/dealer/dashboard-exec と同じ）
+  const memberNames = new Set()
+  for (const c of bcartMembers) {
+    const n = companyNameOf(c)
+    if (n) memberNames.add(n)
+  }
+
+  // dealerSalons (Firestore) はメタ情報として付与
   const dealerSalonByName = new Map()
-  for (const s of salons) {
+  for (const s of dealerSalonsMeta) {
     if (s.companyName) dealerSalonByName.set(s.companyName, s)
   }
 
-  // 所属サロンの union（dealerSalons + orders）
-  //   - dealerSalons: admin が手動で紐付けたサロン（メタ情報あり、type='own'/'sub' 等）
-  //   - orders: strict化された dealerCode 一致で得られたサロン（自動で補足）
-  //   - 両方に同一 companyName がある場合は dealerSalons 側のメタを優先利用
-  const allNames = new Set([...dealerSalonByName.keys(), ...ordersByCompany.keys()])
-  const ordersOnlyCount = [...ordersByCompany.keys()].filter((n) => !dealerSalonByName.has(n)).length
+  // 所属サロン union（Bcart会員 + Bcart受注から検出 + dealerSalons）
+  const allNames = new Set([
+    ...memberNames,
+    ...ordersByCompany.keys(),
+    ...dealerSalonByName.keys(),
+  ])
 
-  const thirtyDaysAgo = new Date(cutoff.getTime() - 30 * 24 * 60 * 60 * 1000)
-  const fourteenDaysAgo = new Date(cutoff.getTime() - 14 * 24 * 60 * 60 * 1000)
+  const dayMs = 24 * 60 * 60 * 1000
+  const thirtyDaysAgo = new Date(cutoff.getTime() - 30 * dayMs)
+  const fourteenDaysAgo = new Date(cutoff.getTime() - 14 * dayMs)
 
   let activeSalonCount = 0
   const salonsStale30 = []
   const salonsStale14 = []
   const salonsNew = []
-
-  for (const name of allNames) {
-    const meta = dealerSalonByName.get(name) || null
-    const ord = ordersByCompany.get(name) || null
-    const salonKey = meta?.id || `auto-${name}`
-    const firstOrder = ord?.first || null
-    const lastOrder = ord?.last || null
-    const createdAt = tsToDate(meta?.createdAt)
-
-    // アクティブ判定（直近30日以内に発注あり）
-    if (lastOrder && lastOrder >= thirtyDaysAgo) activeSalonCount += 1
-
-    // 新規判定:
-    //   - firstOrderDate が 30日以内（orders ベース） — 実際に発注が始まった
-    //   - orders がないが dealerSalons.createdAt が 30日以内 — 紐付けたばかりで未発注
-    const isNewByOrder = firstOrder && firstOrder >= thirtyDaysAgo
-    const isNewByLink = !firstOrder && createdAt && createdAt >= thirtyDaysAgo
-    if (isNewByOrder || isNewByLink) {
-      salonsNew.push({
-        salonKey,
-        name,
-        firstOrderDate: firstOrder ? Timestamp.fromDate(firstOrder) : null,
-        _sortKey: (firstOrder || createdAt).getTime(),
-      })
-      continue // 新規は stale に二重計上しない
-    }
-
-    // 停滞判定（新規でない場合のみ）
-    if (!lastOrder) {
-      // 発注なし & 新規でもない = 長期未発注扱い
-      salonsStale30.push({ salonKey, name, lastOrderDate: null, _sortKey: 0 })
-    } else if (lastOrder < thirtyDaysAgo) {
-      salonsStale30.push({
-        salonKey,
-        name,
-        lastOrderDate: Timestamp.fromDate(lastOrder),
-        _sortKey: lastOrder.getTime(),
-      })
-    } else if (lastOrder < fourteenDaysAgo) {
-      salonsStale14.push({
-        salonKey,
-        name,
-        lastOrderDate: Timestamp.fromDate(lastOrder),
-        _sortKey: lastOrder.getTime(),
-      })
-    }
-  }
-
-  // 総サロン数（dealerSalons + orders から補足した union）
-  const totalSalonCount = allNames.size
-  const operationRate = totalSalonCount > 0 ? activeSalonCount / totalSalonCount : 0
-
-  // フォロー優先Top10（行動用・横断ランキング）
-  //   - スコア高=優先。発注ゼロ(no-order)を最優先、次に stale30（古いほど上位）、stale14、最後に new。
-  //   - active（14日以内発注）はフォロー不要なので除外。
-  //   - nextAction はこの snapshot に同梱して、ダッシュボード側で迷わないようにする。
-  const dayMs = 24 * 60 * 60 * 1000
   const prioritized = []
+
   for (const name of allNames) {
     const meta = dealerSalonByName.get(name) || null
     const ord = ordersByCompany.get(name) || null
@@ -274,6 +320,8 @@ function aggregateForDealer({ dealer, salons, orders, windows }) {
     const firstOrder = ord?.first || null
     const lastOrder = ord?.last || null
     const createdAt = tsToDate(meta?.createdAt)
+
+    if (lastOrder && lastOrder >= thirtyDaysAgo) activeSalonCount += 1
 
     let status
     let nextAction
@@ -285,28 +333,54 @@ function aggregateForDealer({ dealer, salons, orders, windows }) {
         status = 'new'
         nextAction = '紐付け直後 → 初回コール'
         priority = 100
+        salonsNew.push({
+          salonKey,
+          name,
+          firstOrderDate: null,
+          _sortKey: createdAt.getTime(),
+        })
       } else {
         status = 'no-order'
         nextAction = '発注なし → ヒアリング'
         priority = 10000
+        salonsStale30.push({ salonKey, name, lastOrderDate: null, _sortKey: 0 })
       }
     } else {
       daysSinceLast = Math.floor((cutoff.getTime() - lastOrder.getTime()) / dayMs)
-      const isNewByOrder = firstOrder && firstOrder >= thirtyDaysAgo
+      const isNewByOrder = firstOrder >= thirtyDaysAgo
       if (isNewByOrder) {
         status = 'new'
         nextAction = '初回発注 → 御礼＋次回提案'
         priority = 200
+        salonsNew.push({
+          salonKey,
+          name,
+          firstOrderDate: Timestamp.fromDate(firstOrder),
+          _sortKey: firstOrder.getTime(),
+        })
       } else if (lastOrder < thirtyDaysAgo) {
         status = 'stale30'
         nextAction = '30日以上未発注 → 電話フォロー'
         priority = 5000 + daysSinceLast
+        salonsStale30.push({
+          salonKey,
+          name,
+          lastOrderDate: Timestamp.fromDate(lastOrder),
+          _sortKey: lastOrder.getTime(),
+        })
       } else if (lastOrder < fourteenDaysAgo) {
         status = 'stale14'
         nextAction = '14日以上未発注 → リマインド'
         priority = 1000 + daysSinceLast
+        salonsStale14.push({
+          salonKey,
+          name,
+          lastOrderDate: Timestamp.fromDate(lastOrder),
+          _sortKey: lastOrder.getTime(),
+        })
       } else {
-        continue // 直近14日以内に発注あり → フォロー不要
+        // 直近14日以内に発注あり → フォロー不要
+        continue
       }
     }
 
@@ -321,32 +395,33 @@ function aggregateForDealer({ dealer, salons, orders, windows }) {
       _priority: priority,
     })
   }
+
+  const totalSalonCount = allNames.size
+  const operationRate = totalSalonCount > 0 ? activeSalonCount / totalSalonCount : 0
+
   const followPriorityTop10 = prioritized
     .sort((a, b) => b._priority - a._priority)
     .slice(0, 10)
     .map(({ _priority, ...rest }) => rest)
 
-  // ソート（古い方から / 新規は新しい方から）し、各最大5件
   const trimStale = (arr) =>
     arr
-      .sort((a, b) => a._sortKey - b._sortKey) // 古い順 = 放置期間が長い順
+      .sort((a, b) => a._sortKey - b._sortKey)
       .slice(0, MAX_LIST)
       .map(({ _sortKey, ...rest }) => rest)
   const trimNew = (arr) =>
     arr
-      .sort((a, b) => b._sortKey - a._sortKey) // 新しい順
+      .sort((a, b) => b._sortKey - a._sortKey)
       .slice(0, MAX_LIST)
       .map(({ _sortKey, ...rest }) => rest)
 
-  // 最近の注文（直近5件）
   const recentOrders = orders
-    .filter((o) => o.orderDate)
     .sort((a, b) => b.orderDate - a.orderDate)
     .slice(0, MAX_LIST)
     .map((o) => ({
       orderId: o.id,
       orderDate: Timestamp.fromDate(o.orderDate),
-      salonName: o.companyName || '',
+      salonName: o.companyName,
       totalAmount: o.total,
     }))
 
@@ -360,7 +435,7 @@ function aggregateForDealer({ dealer, salons, orders, windows }) {
       prevMonthSameDayRevenue: Math.round(prevMonthSameDayRevenue),
       activeSalonCount,
       totalSalonCount,
-      operationRate: Math.round(operationRate * 1000) / 1000, // 小数3桁
+      operationRate: Math.round(operationRate * 1000) / 1000,
       kickbackEstimate,
       salonsStale30: trimStale(salonsStale30),
       salonsStale14: trimStale(salonsStale14),
@@ -370,24 +445,60 @@ function aggregateForDealer({ dealer, salons, orders, windows }) {
       snapshotCutoffAt: Timestamp.fromDate(cutoff),
     },
     sourceBreakdown: {
-      dealerSalonsCount: dealerSalonByName.size,
-      ordersDerivedCount: ordersOnlyCount,
+      bcartMemberCount: memberNames.size,
+      bcartOrderDerivedCount: [...ordersByCompany.keys()].filter((n) => !memberNames.has(n)).length,
+      dealerSalonsMetaCount: dealerSalonByName.size,
+      bcartOrderTotal: orders.length,
     },
   }
 }
 
+// ========================================
+// main
+// ========================================
 async function main() {
-  console.log('=== dealerMonthlySnapshots 集計 ===')
+  console.log('=== dealerMonthlySnapshots 集計 (Bカート baseline) ===')
   const windows = resolveTimeWindows()
   console.log(`モード       : ${DRY_RUN ? '🟡 DRY RUN' : '🔴 本番実行'}`)
   console.log(`OPERATOR     : ${OPERATOR}`)
   console.log(`集計月       : ${windows.month}`)
   console.log(`カットオフ   : ${windows.cutoff.toISOString()}`)
+  console.log(`Bcart 受注窓 : ${windows.fetchStartYM} 〜 ${windows.fetchEndYM}`)
   if (DEALER_CODE_FILTER) console.log(`対象代理店   : ${DEALER_CODE_FILTER} のみ`)
   console.log('')
 
   const dealers = await fetchDealers()
-  console.log(`代理店 ${dealers.length} 社を処理します`)
+  console.log(`代理店 ${dealers.length} 社`)
+  console.log('')
+
+  console.log('▶ Bカート 会員一覧取得...')
+  const allCustomers = await fetchAllBcartCustomers()
+  console.log(`  総会員数: ${allCustomers.length} 件`)
+  const customersByParent = new Map()
+  for (const c of allCustomers) {
+    const parent = parentIdOf(c)
+    if (!parent) continue
+    if (!customersByParent.has(parent)) customersByParent.set(parent, [])
+    customersByParent.get(parent).push(c)
+  }
+  console.log('')
+
+  console.log(`▶ Bカート 受注取得（${windows.fetchStartYM} 〜 ${windows.fetchEndYM}）...`)
+  const months = generateMonthList(windows.fetchStartYM, windows.fetchEndYM)
+  const allOrdersRaw = []
+  for (const ym of months) {
+    const list = await fetchBcartOrdersForMonth(ym)
+    console.log(`  ${ym}: ${list.length} 件`)
+    allOrdersRaw.push(...list)
+  }
+  const ordersByParent = new Map()
+  for (const o of allOrdersRaw) {
+    const parent = parentIdOf(o)
+    if (!parent) continue
+    if (!ordersByParent.has(parent)) ordersByParent.set(parent, [])
+    ordersByParent.get(parent).push(o)
+  }
+  console.log(`  合計: ${allOrdersRaw.length} 件（parent_id 付き: ${[...ordersByParent.values()].reduce((s, a) => s + a.length, 0)} 件）`)
   console.log('')
 
   const results = []
@@ -395,28 +506,33 @@ async function main() {
 
   for (const dealer of dealers) {
     try {
-      const [salons, orders] = await Promise.all([
-        fetchDealerSalons(dealer.dealerCode),
-        fetchDealerOrders(dealer.dealerCode),
-      ])
-      const { snapshot, sourceBreakdown } = aggregateForDealer({ dealer, salons, orders, windows })
-      results.push({ dealer, snapshot, orderCount: orders.length, salonCount: salons.length })
+      const dealerSalonsMeta = await fetchDealerSalonsMeta(dealer.dealerCode)
+      const bcartMembers = customersByParent.get(dealer.dealerCode) || []
+      const bcartOrdersRaw = ordersByParent.get(dealer.dealerCode) || []
+
+      const { snapshot, sourceBreakdown } = aggregateForDealer({
+        dealer,
+        dealerSalonsMeta,
+        bcartMembers,
+        bcartOrdersRaw,
+        windows,
+      })
+      results.push({ dealer, snapshot })
+
       const kbHint = dealer.kbRate > 0 ? '' : ' ⚠️ kbRate 未設定'
       console.log(
         `  ✅ ${dealer.dealerCode} ${dealer.companyName || ''} ` +
           `月売上 ¥${snapshot.monthRevenue.toLocaleString()} / ` +
           `前月同日 ¥${snapshot.prevMonthSameDayRevenue.toLocaleString()} / ` +
           `稼働 ${snapshot.activeSalonCount}/${snapshot.totalSalonCount} ` +
-          `(dealerSalons ${sourceBreakdown.dealerSalonsCount} + orders由来 ${sourceBreakdown.ordersDerivedCount}) / ` +
+          `(Bcart会員 ${sourceBreakdown.bcartMemberCount} + 受注由来 ${sourceBreakdown.bcartOrderDerivedCount} + dealerSalons ${sourceBreakdown.dealerSalonsMetaCount}) / ` +
           `見込KB ¥${snapshot.kickbackEstimate.toLocaleString()}${kbHint}`,
       )
-      // フォロー優先Top10 の確認ログ（常時出力）
       const top = snapshot.followPriorityTop10 || []
       console.log(`     followPriorityTop10: ${top.length}件`)
       top.slice(0, 3).forEach((s, i) => {
         console.log(`       ${i + 1}. ${s.name || '(名前なし)'} / ${s.status} / ${s.nextAction}`)
       })
-      // VERBOSE=true のとき Top10 全件を JSON で出す（DRY_RUN 時の検証用）
       if (process.env.VERBOSE === 'true' && top.length > 0) {
         const jsonReady = top.map((s) => ({
           ...s,
@@ -458,7 +574,6 @@ async function main() {
   }
   console.log(`  ${written}/${results.length} 件 書き込み完了`)
 
-  // 監査ログ（ordersBackfillLogs / subRoleBackfillLogs と同パターン）
   try {
     const logRef = await db.collection('dealerAggregationLogs').add({
       type: 'dealer-monthly-snapshot',
@@ -471,11 +586,12 @@ async function main() {
       writtenCount: written,
       errorCount: errors.length,
       errors,
-      scriptVersion: '2026-04-19.v1',
+      source: 'bcart',
+      scriptVersion: '2026-04-19.v2',
     })
     console.log(`📝 監査ログ保存: dealerAggregationLogs/${logRef.id}`)
   } catch (e) {
-    console.error('⚠️  監査ログ書き込み失敗（処理自体は完了）:', e.message)
+    console.error('⚠️  監査ログ書き込み失敗:', e.message)
   }
 
   if (errors.length > 0) {

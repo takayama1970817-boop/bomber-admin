@@ -191,6 +191,7 @@ function Header({ companyName, snapshot }) {
       <div className="text-right text-xs text-gray-500">
         <div>最終更新：{fmtTimestamp(lastUpdated)}</div>
         <div className="mt-0.5 text-gray-400">※当日12:00締め分まで反映</div>
+        <div className="mt-0.5 text-indigo-500">🕐 13:00集計済みデータ（Bカート基準）</div>
       </div>
     </div>
   )
