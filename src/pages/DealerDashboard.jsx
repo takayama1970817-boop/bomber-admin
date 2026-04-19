@@ -15,16 +15,25 @@ function fmtYen(n) {
   return '¥' + Math.round(Number(n) || 0).toLocaleString()
 }
 
-function fmtSnapshotAt(ts) {
+function fmtTimestamp(ts) {
   if (!ts) return '—'
-  const d = ts.toDate ? ts.toDate() : new Date(ts)
-  return `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+  const d = typeof ts.toDate === 'function' ? ts.toDate() : new Date(ts)
+  if (Number.isNaN(d.getTime())) return '—'
+  const yyyy = d.getFullYear()
+  const mm = String(d.getMonth() + 1).padStart(2, '0')
+  const dd = String(d.getDate()).padStart(2, '0')
+  const hh = String(d.getHours()).padStart(2, '0')
+  const mi = String(d.getMinutes()).padStart(2, '0')
+  return `${yyyy}/${mm}/${dd} ${hh}:${mi}`
 }
 
-function fmtCutoff(ts) {
-  if (!ts) return null
-  const d = ts.toDate ? ts.toDate() : new Date(ts)
-  return `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+/**
+ * 最終更新時刻の source of truth: snapshotAt → updatedAt フォールバック。
+ * snapshotCutoffAt は補助文言には使ってよいが、主表示には使わない。
+ */
+function resolveLastUpdated(snapshot) {
+  if (!snapshot) return null
+  return snapshot.snapshotAt || snapshot.updatedAt || null
 }
 
 function fmtOrderDate(ts) {
@@ -112,7 +121,7 @@ export default function DealerDashboard() {
   if (!snapshot) {
     return (
       <>
-        <Header />
+        <Header companyName={profile?.companyName} snapshot={null} />
         <div className="rounded-2xl border-2 border-dashed border-gray-300 bg-white p-12 text-center">
           <div className="text-lg font-bold text-gray-700">データがありません</div>
           <p className="mt-2 text-sm text-gray-500">
@@ -130,7 +139,7 @@ export default function DealerDashboard() {
 
   return (
     <>
-      <Header companyName={profile?.companyName} month={snapshot.month} />
+      <Header companyName={profile?.companyName} snapshot={snapshot} />
 
       {/* ① KPI */}
       <section className="mb-8">
@@ -156,28 +165,33 @@ export default function DealerDashboard() {
           </div>
         </div>
       </div>
-
-      {/* フッター: 最終更新 */}
-      <div className="mt-6 border-t border-gray-200 pt-4 text-right text-xs text-gray-500">
-        最終更新：{fmtSnapshotAt(snapshot.snapshotAt)}
-        {snapshot.snapshotCutoffAt && (
-          <span className="ml-2">※当日{fmtCutoff(snapshot.snapshotCutoffAt)?.split(' ')[1] || '12:00'}締め分まで反映</span>
-        )}
-      </div>
     </>
   )
 }
 
-function Header({ companyName, month }) {
+/**
+ * ページタイトル + 最終更新表示。
+ * 最終更新は snapshot 有無に関わらず必ずレンダリングする（値が無ければ「—」）。
+ */
+function Header({ companyName, snapshot }) {
+  const month = snapshot?.month
+  const lastUpdated = resolveLastUpdated(snapshot)
+
   return (
-    <div className="mb-6">
-      <h1 className="text-xl font-bold text-gray-900">
-        ダッシュボード
-        {month && <span className="ml-2 text-sm font-normal text-gray-500">{month}</span>}
-      </h1>
-      {companyName && (
-        <p className="mt-1 text-xs text-gray-500">{companyName} 様の今日の状況</p>
-      )}
+    <div className="mb-6 flex flex-wrap items-start justify-between gap-3">
+      <div>
+        <h1 className="text-xl font-bold text-gray-900">
+          ダッシュボード
+          {month && <span className="ml-2 text-sm font-normal text-gray-500">{month}</span>}
+        </h1>
+        {companyName && (
+          <p className="mt-1 text-xs text-gray-500">{companyName} 様の今日の状況</p>
+        )}
+      </div>
+      <div className="text-right text-xs text-gray-500">
+        <div>最終更新：{fmtTimestamp(lastUpdated)}</div>
+        <div className="mt-0.5 text-gray-400">※当日12:00締め分まで反映</div>
+      </div>
     </div>
   )
 }
