@@ -164,6 +164,10 @@ const DEFAULT_KB_SETTINGS = {
   validSetNames: ['単品販売', 'ミカエル', 'エンジェル'],
 }
 
+// キックバック清算対象の kbGroup。請求書管理（グループC）は別画面で扱うため除外。
+// 将来 kbGroup が増えたらここに追加するだけで拡張可能。
+const KICKBACK_KB_GROUPS = ['A', 'B']
+
 function parseRate(rateStr) {
   if (!rateStr) return 0
   const parts = String(rateStr).split('/')
@@ -325,6 +329,8 @@ export default function KickbackManage() {
         const dealerList = dealerSnap.docs
           .map((d) => ({ id: d.id, ...d.data() }))
           .filter((d) => d.role === 'dealer' && d.dealerCode)
+          // kbGroup 未設定は Dealers.jsx で 'A' にフォールバックされている運用のためここでも同じ扱い
+          .filter((d) => KICKBACK_KB_GROUPS.includes(d.kbGroup || 'A'))
         setDealers(dealerList)
 
         setSalonLinks(linkSnap.docs.map((d) => ({ id: d.id, ...d.data() })))
@@ -885,7 +891,7 @@ export default function KickbackManage() {
 
   const handleBulkCheck = async () => {
     if (!month) { alert('対象月を選択してください'); return }
-    if (dealers.length === 0) { alert('代理店が登録されていません'); return }
+    if (dealers.length === 0) { alert(`キックバック対象代理店（グループ ${KICKBACK_KB_GROUPS.join('/')}）がいません`); return }
     setBulkChecking(true)
     setBulkResults(null)
     try {
@@ -935,9 +941,14 @@ export default function KickbackManage() {
         <select
           value={selectedCode}
           onChange={(e) => setSelectedCode(e.target.value)}
-          className="rounded-lg border border-gray-300 px-4 py-2 text-sm focus:border-indigo-500 focus:outline-none"
+          disabled={dealers.length === 0}
+          className="rounded-lg border border-gray-300 px-4 py-2 text-sm focus:border-indigo-500 focus:outline-none disabled:bg-gray-100 disabled:text-gray-400"
         >
-          <option value="">代理店を選択...</option>
+          <option value="">
+            {dealers.length === 0
+              ? `キックバック対象代理店なし（グループ ${KICKBACK_KB_GROUPS.join('/')}）`
+              : '代理店を選択...'}
+          </option>
           {dealers.map((d) => (
             <option key={d.id} value={d.dealerCode}>
               {d.dealerCode} — {d.companyName}
