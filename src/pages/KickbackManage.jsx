@@ -951,7 +951,15 @@ export default function KickbackManage() {
         kickbackId: stmt.id,
         testEmail: testEmail || undefined,
       })
-      alert(`送信完了: ${res.data.toEmail}\nmessageId: ${res.data.sesMessageId || '-'}`)
+      if (res.data.warning) {
+        alert(
+          `⚠️ SES送信は成功しましたが、ログ更新に失敗しました。\n\n` +
+          `messageId: ${res.data.sesMessageId || '-'}\n宛先: ${res.data.toEmail}\n\n` +
+          `この messageId を控え、「pending解除」から status=sent で手動確定してください。`,
+        )
+      } else {
+        alert(`送信完了: ${res.data.toEmail}\nmessageId: ${res.data.sesMessageId || '-'}`)
+      }
       // ログを再取得
       const logSnap = await getDoc(doc(db, 'settlementEmailLogs', stmt.id))
       if (logSnap.exists()) {
@@ -971,6 +979,56 @@ export default function KickbackManage() {
         const { [stmt.id]: _, ...rest } = prev
         return rest
       })
+    }
+  }
+
+  // pending 残留ログを手動解除（admin 限定）
+  // 用途:
+  //   - 送信処理の途中で Functions が落ちて pending が残ったケース
+  //   - SES 送信は成功したがログ update が最終的に失敗したケース（messageId を入力して sent 確定）
+  const handleResolvePending = async (stmt) => {
+    if (!isAdmin) return
+    const log = emailLogs[stmt.id]
+    if (!log || log.status !== 'pending') {
+      alert('対象は status=pending のログのみです')
+      return
+    }
+    const createdAt = log.createdAt?.toDate?.() || null
+    const mins = createdAt ? Math.floor((Date.now() - createdAt.getTime()) / 60000) : null
+    const choice = prompt(
+      `pending 残留ログを解除します（作成から ${mins != null ? mins + '分' : '不明'}経過）。\n\n` +
+      `- "sent:<messageId>" を入力 → status=sent で確定（SESは実送信済みと判断）\n` +
+      `- "failed" を入力 → status=failed に戻す（再送可能にする）`,
+      'failed',
+    )
+    if (choice === null) return
+    const trimmed = choice.trim()
+    let targetStatus = 'failed'
+    let sesMessageId = null
+    if (trimmed.startsWith('sent:')) {
+      targetStatus = 'sent'
+      sesMessageId = trimmed.slice('sent:'.length).trim()
+      if (!sesMessageId) {
+        alert('messageId を "sent:xxxxx" の形式で入力してください')
+        return
+      }
+    } else if (trimmed !== 'failed') {
+      alert('"sent:<messageId>" または "failed" を入力してください')
+      return
+    }
+    const reason = prompt('解除理由（必須）:', '') || ''
+    if (!reason.trim()) { alert('解除理由は必須です'); return }
+
+    try {
+      const fn = httpsCallable(functions, 'resolveSettlementEmailLog')
+      await fn({ kickbackId: stmt.id, targetStatus, sesMessageId, reason: reason.trim() })
+      alert(`解除完了: status=${targetStatus}`)
+      const logSnap = await getDoc(doc(db, 'settlementEmailLogs', stmt.id))
+      if (logSnap.exists()) {
+        setEmailLogs((prev) => ({ ...prev, [stmt.id]: logSnap.data() }))
+      }
+    } catch (e) {
+      alert('解除失敗: ' + (e.message || e))
     }
   }
 
@@ -1609,26 +1667,37 @@ ${senderEmail}
                           else if (isPending) label = '⏳ 処理中'
                           else if (isFailed) label = '↻ 再送信'
                           return (
-                            <button
-                              onClick={() => handleSesSend(stmt)}
-                              disabled={disabled}
-                              title={
-                                isSent
-                                  ? `送信済み (messageId: ${log.sesMessageId || '-'})`
-                                  : isFailed
-                                    ? `前回失敗: ${log.errorMessage || '不明'}`
-                                    : 'Cloud Functions + SES で本番送信'
-                              }
-                              className={`rounded border px-3 py-1 text-xs font-medium ${
-                                disabled
-                                  ? 'cursor-not-allowed border-gray-300 bg-gray-100 text-gray-500'
-                                  : isFailed
-                                    ? 'border-orange-300 bg-orange-50 text-orange-700 hover:bg-orange-100'
-                                    : 'border-red-300 bg-red-50 text-red-700 hover:bg-red-100'
-                              }`}
-                            >
-                              {label}
-                            </button>
+                            <>
+                              <button
+                                onClick={() => handleSesSend(stmt)}
+                                disabled={disabled}
+                                title={
+                                  isSent
+                                    ? `送信済み (messageId: ${log.sesMessageId || '-'})`
+                                    : isFailed
+                                      ? `前回失敗: ${log.errorMessage || '不明'}`
+                                      : 'Cloud Functions + SES で本番送信'
+                                }
+                                className={`rounded border px-3 py-1 text-xs font-medium ${
+                                  disabled
+                                    ? 'cursor-not-allowed border-gray-300 bg-gray-100 text-gray-500'
+                                    : isFailed
+                                      ? 'border-orange-300 bg-orange-50 text-orange-700 hover:bg-orange-100'
+                                      : 'border-red-300 bg-red-50 text-red-700 hover:bg-red-100'
+                                }`}
+                              >
+                                {label}
+                              </button>
+                              {isPending && (
+                                <button
+                                  onClick={() => handleResolvePending(stmt)}
+                                  title="pending 残留を手動で sent/failed に確定（5分以上経過したもののみ）"
+                                  className="rounded border border-amber-400 bg-amber-50 px-3 py-1 text-xs font-medium text-amber-700 hover:bg-amber-100"
+                                >
+                                  🔧 pending解除
+                                </button>
+                              )}
+                            </>
                           )
                         })()}
                         <button

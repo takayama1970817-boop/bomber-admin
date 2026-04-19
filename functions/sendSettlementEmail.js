@@ -81,6 +81,24 @@ const sendSettlementEmail = onCall(
       throw new HttpsError('failed-precondition', '宛先メールアドレスを決定できません')
     }
 
+    // --- 同月・同代理店で既に sent のログがあれば拒否（kickbacks の addDoc 由来の
+    //     意味的重複をガードする。kickbacks の docId は自動採番のため、
+    //     同じ dealerCode+month で別 ID の清算書が作られるケースに備える） ---
+    if (dealerCode && month) {
+      const dupSnap = await db.collection('settlementEmailLogs')
+        .where('dealerCode', '==', dealerCode)
+        .where('month', '==', month)
+        .where('status', '==', 'sent')
+        .get()
+      const sentOther = dupSnap.docs.find((d) => d.id !== kickbackId)
+      if (sentOther) {
+        throw new HttpsError(
+          'already-exists',
+          `同月・同代理店で別の清算書が既に送信済みです（kickbackId: ${sentOther.id}、messageId: ${sentOther.data().sesMessageId || 'unknown'}）`,
+        )
+      }
+    }
+
     // --- 送信ログ: transaction で create-only pending ---
     // docId を kickbackId に固定することで、同一清算書に対するログは必ず1件
     const logRef = db.collection('settlementEmailLogs').doc(kickbackId)
@@ -207,13 +225,46 @@ const sendSettlementEmail = onCall(
       throw new HttpsError('internal', 'メール送信に失敗しました: ' + err.message)
     }
 
-    // --- 成功確定 ---
-    await logRef.update({
+    // --- 成功確定（リトライ付き） ---
+    // ここまで来たら SES は実送信済み。
+    // この update が失敗するとログは pending のまま残り、messageId も失われる。
+    // そのため: (1) 3回リトライ (2) 最終的に失敗しても messageId をログに残す努力をする
+    //         (3) 呼び出し元にも messageId を返す（管理画面から手動復旧可能にする）
+    const finalUpdate = {
       status: 'sent',
       sesMessageId: sesMessageId,
       sentAt: FieldValue.serverTimestamp(),
       updatedAt: FieldValue.serverTimestamp(),
-    })
+    }
+    let updateErr = null
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        await logRef.update(finalUpdate)
+        updateErr = null
+        break
+      } catch (e) {
+        updateErr = e
+        console.error(`settlementEmailLogs update 失敗 (attempt ${attempt}/3):`, e)
+        if (attempt < 3) {
+          await new Promise((r) => setTimeout(r, 500 * attempt))
+        }
+      }
+    }
+    if (updateErr) {
+      // 最終リトライでも失敗。実送信は成功しているので status は pending 残留になる。
+      // せめて sesMessageId をサーバーログに残し、呼び出し元にも返す（admin が手動で status=sent に戻せる）。
+      console.error(
+        '[CRITICAL] SES送信は成功したが Firestore 更新に失敗',
+        { kickbackId, toEmail, sesMessageId, error: updateErr.message },
+      )
+      return {
+        success: true,
+        warning: 'SES送信は完了しましたが、送信ログの status 更新に失敗しました。settlementEmailLogs を手動で sent に更新してください',
+        kickbackId,
+        toEmail,
+        sesMessageId,
+      }
+    }
 
     return {
       success: true,
@@ -224,4 +275,86 @@ const sendSettlementEmail = onCall(
   },
 )
 
-module.exports = { sendSettlementEmail }
+/**
+ * pending 残留ログの手動解除（admin 限定）
+ *
+ * 用途:
+ *   - transaction は通ったが SES 送信前に Functions が落ちて status='pending' のまま残留
+ *   - SES 送信後の Firestore update が最終的に失敗して pending 残留
+ *
+ * 安全策:
+ *   - admin 限定
+ *   - 対象ログの createdAt から 5分以上経過している場合のみ許可（送信処理中の競合を避ける）
+ *   - sesMessageId を明示指定できる場合は status='sent' で確定、無い場合は status='failed' に戻す
+ *   - すべての解除操作を settlementEmailLogs に履歴として残す（resolvedBy / resolvedAt / resolvedReason）
+ */
+const resolveSettlementEmailLog = onCall(
+  { region: 'asia-northeast1', timeoutSeconds: 30, memory: '256MiB' },
+  async (request) => {
+    if (!request.auth) throw new HttpsError('unauthenticated', 'ログインが必要です')
+
+    const db = getFirestore()
+    const callerDoc = await db.collection('users').doc(request.auth.uid).get()
+    if (!callerDoc.exists || !['admin', 'master'].includes(callerDoc.data().role)) {
+      throw new HttpsError('permission-denied', '管理者権限が必要です')
+    }
+
+    const { kickbackId, targetStatus, sesMessageId, reason } = request.data || {}
+    if (!kickbackId || typeof kickbackId !== 'string') {
+      throw new HttpsError('invalid-argument', 'kickbackId は必須です')
+    }
+    if (!['sent', 'failed'].includes(targetStatus)) {
+      throw new HttpsError('invalid-argument', "targetStatus は 'sent' または 'failed' のみ")
+    }
+    if (!reason || typeof reason !== 'string') {
+      throw new HttpsError('invalid-argument', 'reason（解除理由）は必須です')
+    }
+    if (targetStatus === 'sent' && !sesMessageId) {
+      throw new HttpsError('invalid-argument', "targetStatus='sent' の場合 sesMessageId は必須")
+    }
+
+    const logRef = db.collection('settlementEmailLogs').doc(kickbackId)
+    await db.runTransaction(async (tx) => {
+      const snap = await tx.get(logRef)
+      if (!snap.exists) {
+        throw new HttpsError('not-found', '対象ログが存在しません')
+      }
+      const cur = snap.data() || {}
+      if (cur.status !== 'pending') {
+        throw new HttpsError(
+          'failed-precondition',
+          `status='pending' のログのみ解除可能です（現在: ${cur.status}）`,
+        )
+      }
+      // 5分経過チェック（送信処理中との競合防止）
+      const createdAt = cur.createdAt?.toMillis?.() || 0
+      if (createdAt && Date.now() - createdAt < 5 * 60 * 1000) {
+        throw new HttpsError(
+          'failed-precondition',
+          '作成から5分経過していないため解除できません（送信処理と競合する恐れ）',
+        )
+      }
+
+      const update = {
+        status: targetStatus,
+        updatedAt: FieldValue.serverTimestamp(),
+        resolvedBy: request.auth.uid,
+        resolvedByEmail: callerDoc.data().email || '',
+        resolvedAt: FieldValue.serverTimestamp(),
+        resolvedReason: String(reason).slice(0, 500),
+      }
+      if (targetStatus === 'sent') {
+        update.sesMessageId = String(sesMessageId)
+        update.sentAt = cur.sentAt || FieldValue.serverTimestamp()
+      } else {
+        update.errorMessage =
+          'pending 残留を admin が手動解除: ' + String(reason).slice(0, 400)
+      }
+      tx.update(logRef, update)
+    })
+
+    return { success: true, kickbackId, targetStatus }
+  },
+)
+
+module.exports = { sendSettlementEmail, resolveSettlementEmailLog }
