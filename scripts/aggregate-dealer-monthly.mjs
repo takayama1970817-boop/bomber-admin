@@ -261,6 +261,71 @@ function aggregateForDealer({ dealer, salons, orders, windows }) {
   const totalSalonCount = allNames.size
   const operationRate = totalSalonCount > 0 ? activeSalonCount / totalSalonCount : 0
 
+  // フォロー優先Top10（行動用・横断ランキング）
+  //   - スコア高=優先。発注ゼロ(no-order)を最優先、次に stale30（古いほど上位）、stale14、最後に new。
+  //   - active（14日以内発注）はフォロー不要なので除外。
+  //   - nextAction はこの snapshot に同梱して、ダッシュボード側で迷わないようにする。
+  const dayMs = 24 * 60 * 60 * 1000
+  const prioritized = []
+  for (const name of allNames) {
+    const meta = dealerSalonByName.get(name) || null
+    const ord = ordersByCompany.get(name) || null
+    const salonKey = meta?.id || `auto-${name}`
+    const firstOrder = ord?.first || null
+    const lastOrder = ord?.last || null
+    const createdAt = tsToDate(meta?.createdAt)
+
+    let status
+    let nextAction
+    let priority
+    let daysSinceLast = null
+
+    if (!lastOrder) {
+      if (createdAt && createdAt >= thirtyDaysAgo) {
+        status = 'new'
+        nextAction = '紐付け直後 → 初回コール'
+        priority = 100
+      } else {
+        status = 'no-order'
+        nextAction = '発注なし → ヒアリング'
+        priority = 10000
+      }
+    } else {
+      daysSinceLast = Math.floor((cutoff.getTime() - lastOrder.getTime()) / dayMs)
+      const isNewByOrder = firstOrder && firstOrder >= thirtyDaysAgo
+      if (isNewByOrder) {
+        status = 'new'
+        nextAction = '初回発注 → 御礼＋次回提案'
+        priority = 200
+      } else if (lastOrder < thirtyDaysAgo) {
+        status = 'stale30'
+        nextAction = '30日以上未発注 → 電話フォロー'
+        priority = 5000 + daysSinceLast
+      } else if (lastOrder < fourteenDaysAgo) {
+        status = 'stale14'
+        nextAction = '14日以上未発注 → リマインド'
+        priority = 1000 + daysSinceLast
+      } else {
+        continue // 直近14日以内に発注あり → フォロー不要
+      }
+    }
+
+    prioritized.push({
+      salonKey,
+      name,
+      status,
+      nextAction,
+      lastOrderDate: lastOrder ? Timestamp.fromDate(lastOrder) : null,
+      firstOrderDate: firstOrder ? Timestamp.fromDate(firstOrder) : null,
+      daysSinceLast,
+      _priority: priority,
+    })
+  }
+  const followPriorityTop10 = prioritized
+    .sort((a, b) => b._priority - a._priority)
+    .slice(0, 10)
+    .map(({ _priority, ...rest }) => rest)
+
   // ソート（古い方から / 新規は新しい方から）し、各最大5件
   const trimStale = (arr) =>
     arr
@@ -300,6 +365,7 @@ function aggregateForDealer({ dealer, salons, orders, windows }) {
       salonsStale30: trimStale(salonsStale30),
       salonsStale14: trimStale(salonsStale14),
       salonsNew: trimNew(salonsNew),
+      followPriorityTop10,
       recentOrders,
       snapshotCutoffAt: Timestamp.fromDate(cutoff),
     },

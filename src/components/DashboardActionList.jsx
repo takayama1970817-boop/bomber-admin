@@ -2,93 +2,103 @@ import { Link } from 'react-router-dom'
 
 function fmtDate(ts) {
   if (!ts) return '—'
-  const d = ts.toDate ? ts.toDate() : new Date(ts)
-  return `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, '0')}/${String(
-    d.getDate(),
-  ).padStart(2, '0')}`
+  const d = typeof ts.toDate === 'function' ? ts.toDate() : new Date(ts)
+  if (Number.isNaN(d.getTime())) return '—'
+  return `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')}`
 }
 
-function Bucket({ icon, title, items, emptyLabel, dateLabel, dateField }) {
-  return (
-    <div className="rounded-2xl border border-gray-200 bg-white p-5">
-      <div className="mb-3 flex items-center justify-between">
-        <div className="text-sm font-bold text-gray-900">
-          <span className="mr-2">{icon}</span>
-          {title}
-          <span className="ml-2 rounded-full bg-gray-100 px-2 py-0.5 text-[11px] font-medium text-gray-600">
-            {items.length}件
-          </span>
-        </div>
-      </div>
-      {items.length === 0 ? (
-        <div className="py-6 text-center text-xs text-gray-400">{emptyLabel}</div>
-      ) : (
-        <ul className="space-y-2">
-          {items.map((s) => (
-            <li
-              key={s.salonKey || s.name}
-              className="flex items-center justify-between rounded-lg border border-gray-100 bg-gray-50 px-3 py-2 text-sm"
-            >
-              <span className="truncate font-medium text-gray-900">{s.name || '（名前なし）'}</span>
-              <span className="ml-2 shrink-0 text-xs text-gray-500">
-                {dateLabel}: {fmtDate(s[dateField])}
-              </span>
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
-  )
+const STATUS_META = {
+  'no-order': { label: '発注なし', className: 'bg-red-100 text-red-700' },
+  stale30: { label: '30日以上', className: 'bg-red-100 text-red-700' },
+  stale14: { label: '14日以上', className: 'bg-yellow-100 text-yellow-700' },
+  new: { label: '新規', className: 'bg-green-100 text-green-700' },
 }
 
 /**
- * 要対応サロン表示。分析ではなく「今どこに電話するか」を決めるためのリスト。
- * クリックで /dealer/salons に遷移（個別ディープリンクは現時点で未対応）。
+ * 旧スキーマ（followPriorityTop10 未対応の snapshot）向けの簡易フォールバック。
+ * 既存の salonsStale30 / stale14 / new を 1列に並べて最大10件。
  */
+function fallbackFromBuckets(snapshot) {
+  if (!snapshot) return []
+  const out = []
+  for (const s of snapshot.salonsStale30 || []) {
+    out.push({
+      ...s,
+      status: s.lastOrderDate ? 'stale30' : 'no-order',
+      nextAction: s.lastOrderDate
+        ? '30日以上未発注 → 電話フォロー'
+        : '発注なし → ヒアリング',
+    })
+  }
+  for (const s of snapshot.salonsStale14 || []) {
+    out.push({ ...s, status: 'stale14', nextAction: '14日以上未発注 → リマインド' })
+  }
+  for (const s of snapshot.salonsNew || []) {
+    out.push({ ...s, status: 'new', nextAction: '新規サロン → 初回フォロー' })
+  }
+  return out.slice(0, 10)
+}
+
 export default function DashboardActionList({ snapshot }) {
-  const {
-    salonsStale30 = [],
-    salonsStale14 = [],
-    salonsNew = [],
-  } = snapshot || {}
+  const items =
+    (snapshot && Array.isArray(snapshot.followPriorityTop10) && snapshot.followPriorityTop10.length > 0)
+      ? snapshot.followPriorityTop10
+      : fallbackFromBuckets(snapshot)
 
   return (
     <div>
       <div className="mb-3 flex items-center justify-between">
-        <h2 className="text-sm font-bold text-gray-700">要対応サロン</h2>
+        <div>
+          <h2 className="text-sm font-bold text-gray-700">🎯 フォロー優先Top10</h2>
+          <p className="mt-0.5 text-xs text-gray-500">
+            停滞・発注ゼロ・新規の中から優先度の高い順に最大10件。上から順にアクションしてください。
+          </p>
+        </div>
         <Link
           to="/dealer/salons"
           className="text-xs font-medium text-indigo-600 hover:underline"
         >
-          サロン一覧で見る →
+          サロン一覧 →
         </Link>
       </div>
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-        <Bucket
-          icon="🔴"
-          title="30日以上未発注"
-          items={salonsStale30}
-          emptyLabel="該当サロンはありません"
-          dateLabel="最終発注"
-          dateField="lastOrderDate"
-        />
-        <Bucket
-          icon="🟡"
-          title="14日以上未発注"
-          items={salonsStale14}
-          emptyLabel="該当サロンはありません"
-          dateLabel="最終発注"
-          dateField="lastOrderDate"
-        />
-        <Bucket
-          icon="🟢"
-          title="新規サロン（30日以内）"
-          items={salonsNew}
-          emptyLabel="今月の新規サロンはまだありません"
-          dateLabel="初回"
-          dateField="firstOrderDate"
-        />
-      </div>
+
+      {items.length === 0 ? (
+        <div className="rounded-2xl border border-dashed border-gray-300 bg-white py-10 text-center text-sm text-gray-400">
+          フォローが必要なサロンはありません
+        </div>
+      ) : (
+        <div className="overflow-auto rounded-2xl border border-gray-200 bg-white">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-gray-100 bg-gray-50 text-left text-xs text-gray-500">
+                <th className="w-10 px-3 py-2.5 text-center">#</th>
+                <th className="px-3 py-2.5">サロン名</th>
+                <th className="w-24 px-3 py-2.5">状態</th>
+                <th className="w-28 px-3 py-2.5">最終発注</th>
+                <th className="px-3 py-2.5">次アクション</th>
+              </tr>
+            </thead>
+            <tbody>
+              {items.map((s, i) => {
+                const meta = STATUS_META[s.status] || { label: s.status || '—', className: 'bg-gray-100 text-gray-700' }
+                return (
+                  <tr key={s.salonKey || `${s.name}-${i}`} className="border-b border-gray-50 hover:bg-gray-50">
+                    <td className="px-3 py-2.5 text-center text-xs text-gray-400">{i + 1}</td>
+                    <td className="px-3 py-2.5 font-medium text-gray-900">{s.name || '（名前なし）'}</td>
+                    <td className="px-3 py-2.5">
+                      <span className={`rounded px-2 py-0.5 text-[11px] font-medium ${meta.className}`}>
+                        {meta.label}
+                      </span>
+                    </td>
+                    <td className="px-3 py-2.5 text-xs text-gray-600">{fmtDate(s.lastOrderDate)}</td>
+                    <td className="px-3 py-2.5 text-xs text-gray-700">{s.nextAction || '—'}</td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   )
 }
