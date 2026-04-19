@@ -1,26 +1,65 @@
-import { useEffect, useMemo, useState } from 'react'
-import { collection, getDocs, query, where } from 'firebase/firestore'
-import { db } from '../lib/firebase.js'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useAuth } from '../contexts/AuthContext.jsx'
+import { fetchOrdersByMonth } from '../lib/bcartApi.js'
+
+/**
+ * 代理店向け 注文一覧（Bカート最新）。
+ *
+ * 役割の住み分け（2026-04-19 確定）:
+ *   - /dealer                 : dealerMonthlySnapshots（13:00集計済み）
+ *   - /dealer/dashboard-exec  : Bカート最新（画面表示時点）
+ *   - /dealer/orders          : Bカート最新（画面表示時点）  ← 本ファイル
+ *
+ * 仕様:
+ *   - データソースは Bカート受注API（fetchOrdersByMonth を月単位で集約）
+ *   - customer_parent_id == dealerCode で絞り込み
+ *   - Firestore orders は本画面では一切使わない
+ *   - フィルタ・件数・合計は API取得結果に対してクライアント側で実施
+ *   - localStorage で1日キャッシュ（同日中は即時表示、再取得ボタンで強制更新可）
+ */
+
+const FETCH_MONTHS = Number(import.meta.env?.VITE_DEALER_ORDERS_MONTHS) || 13
+const CACHE_VERSION = 'v1'
+
+const pad = (n) => String(n).padStart(2, '0')
+
+function fmtTimestamp(d) {
+  if (!d) return '—'
+  return `${d.getFullYear()}/${pad(d.getMonth() + 1)}/${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
+function fmtDate(d) {
+  if (!d) return '—'
+  return `${d.getFullYear()}/${pad(d.getMonth() + 1)}/${pad(d.getDate())}`
+}
+
+function toYearMonth(d) {
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}`
+}
 
 function fmtYen(n) {
   return '¥' + Math.round(Number(n) || 0).toLocaleString()
 }
 
-function fmtDate(ts) {
-  if (!ts) return '—'
-  const d = ts.toDate ? ts.toDate() : new Date(ts)
-  return `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')}`
+function generateRecentMonths(months) {
+  const now = new Date()
+  const out = []
+  for (let i = 0; i < months; i += 1) {
+    let y = now.getFullYear()
+    let m = now.getMonth() - i
+    while (m < 0) {
+      m += 12
+      y -= 1
+    }
+    out.push(`${y}-${pad(m + 1)}`)
+  }
+  return out
 }
 
-function toDate(ts) {
-  if (!ts) return null
-  if (ts.toDate) return ts.toDate()
-  return new Date(ts)
-}
-
-function toYearMonth(d) {
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
+function parseBcartDate(raw) {
+  if (!raw) return null
+  const d = new Date(String(raw).replace(' ', 'T'))
+  return Number.isNaN(d.getTime()) ? null : d
 }
 
 export default function DealerOrders() {
@@ -29,47 +68,112 @@ export default function DealerOrders() {
 
   const [orders, setOrders] = useState([])
   const [loading, setLoading] = useState(true)
+  const [progress, setProgress] = useState('')
   const [err, setErr] = useState(null)
+  const [fetchedAt, setFetchedAt] = useState(null)
+  const [now, setNow] = useState(() => new Date())
   const [monthFilter, setMonthFilter] = useState('all')
   const [salonFilter, setSalonFilter] = useState('')
 
+  // 現在時刻（30秒粒度）
+  useEffect(() => {
+    const id = setInterval(() => setNow(new Date()), 30 * 1000)
+    return () => clearInterval(id)
+  }, [])
+
+  const cacheKey = useMemo(
+    () => (dealerCode ? `dealerOrdersBcart:${dealerCode}:${CACHE_VERSION}` : null),
+    [dealerCode],
+  )
+
+  const fetchFromBcart = useCallback(async () => {
+    if (!dealerCode) return
+    setLoading(true)
+    setErr(null)
+    try {
+      const months = generateRecentMonths(FETCH_MONTHS)
+      const all = []
+      for (let i = 0; i < months.length; i += 1) {
+        const ym = months[i]
+        setProgress(`Bカート 取得中: ${ym}（${i + 1}/${months.length}）`)
+        try {
+          const raw = await fetchOrdersByMonth(ym)
+          for (const o of raw) {
+            if (String(o.customer_parent_id ?? '') !== String(dealerCode)) continue
+            all.push({
+              id: String(o.id || o.code || ''),
+              orderDate: parseBcartDate(o.ordered_at),
+              companyName:
+                (o.customer_comp_name || o.comp_name || o.customer_name || '').trim(),
+              total: Number(o.final_price ?? o.total_price) || 0,
+              orderNumber: o.order_no || o.order_number || o.code || '',
+            })
+          }
+        } catch (e) {
+          console.warn('Bカート取得スキップ', ym, e.message)
+        }
+      }
+      all.sort((a, b) => (b.orderDate?.getTime() || 0) - (a.orderDate?.getTime() || 0))
+      const fetchedAtNow = new Date()
+      setOrders(all)
+      setFetchedAt(fetchedAtNow)
+      if (cacheKey) {
+        try {
+          localStorage.setItem(
+            cacheKey,
+            JSON.stringify({
+              date: new Date().toISOString().slice(0, 10),
+              fetchedAt: fetchedAtNow.toISOString(),
+              orders: all.map((o) => ({
+                ...o,
+                orderDate: o.orderDate ? o.orderDate.toISOString() : null,
+              })),
+            }),
+          )
+        } catch (e) { /* ignore quota */ }
+      }
+    } catch (e) {
+      console.error('Bカート受注取得エラー:', e)
+      setErr(e)
+    } finally {
+      setLoading(false)
+      setProgress('')
+    }
+  }, [dealerCode, cacheKey])
+
+  // 初回ロード: 同日キャッシュがあれば即表示、無ければ取得
   useEffect(() => {
     if (!dealerCode) {
       setLoading(false)
       return
     }
-    let cancelled = false
-    ;(async () => {
+    let cached = null
+    if (cacheKey) {
       try {
-        const snap = await getDocs(
-          query(collection(db, 'orders'), where('dealerCode', '==', dealerCode)),
-        )
-        if (cancelled) return
-        const list = snap.docs.map((d) => {
-          const data = d.data()
-          return {
-            id: d.id,
-            companyName: data.companyName || '',
-            total: Number(data.total) || 0,
-            orderDate: toDate(data.orderDate),
-            orderNumber: data.bcartOrderNumber || data.orderNumber || '',
-            source: data.source || '',
+        const raw = localStorage.getItem(cacheKey)
+        if (raw) {
+          const parsed = JSON.parse(raw)
+          const today = new Date().toISOString().slice(0, 10)
+          if (parsed.date === today && Array.isArray(parsed.orders)) {
+            cached = {
+              orders: parsed.orders.map((o) => ({
+                ...o,
+                orderDate: o.orderDate ? new Date(o.orderDate) : null,
+              })),
+              fetchedAt: parsed.fetchedAt ? new Date(parsed.fetchedAt) : null,
+            }
           }
-        })
-        list.sort((a, b) => (b.orderDate?.getTime() || 0) - (a.orderDate?.getTime() || 0))
-        setOrders(list)
-      } catch (e) {
-        if (cancelled) return
-        console.error('orders 取得エラー:', e)
-        setErr(e)
-      } finally {
-        if (!cancelled) setLoading(false)
-      }
-    })()
-    return () => {
-      cancelled = true
+        }
+      } catch (e) { /* ignore */ }
     }
-  }, [dealerCode])
+    if (cached) {
+      setOrders(cached.orders)
+      setFetchedAt(cached.fetchedAt)
+      setLoading(false)
+    } else {
+      fetchFromBcart()
+    }
+  }, [dealerCode, cacheKey, fetchFromBcart])
 
   const months = useMemo(() => {
     const set = new Set()
@@ -89,16 +193,18 @@ export default function DealerOrders() {
     })
   }, [orders, monthFilter, salonFilter])
 
-  const totals = useMemo(() => {
-    return filtered.reduce(
-      (acc, o) => {
-        acc.amount += o.total
-        acc.count += 1
-        return acc
-      },
-      { amount: 0, count: 0 },
-    )
-  }, [filtered])
+  const totals = useMemo(
+    () =>
+      filtered.reduce(
+        (acc, o) => {
+          acc.amount += o.total
+          acc.count += 1
+          return acc
+        },
+        { amount: 0, count: 0 },
+      ),
+    [filtered],
+  )
 
   if (!dealerCode) {
     return (
@@ -109,42 +215,63 @@ export default function DealerOrders() {
     )
   }
 
+  const isInitialLoading = loading && orders.length === 0
+
   return (
     <div>
-      <div className="mb-6 flex flex-wrap items-end justify-between gap-3">
+      <div className="mb-6 flex flex-wrap items-start justify-between gap-3">
         <div>
           <h1 className="text-xl font-bold text-gray-900">注文一覧</h1>
           <p className="mt-1 text-xs text-gray-500">
-            自社（{profile?.companyName || dealerCode}）配下のサロン受注をまとめて確認できます。
+            自社（{profile?.companyName || dealerCode}）配下のサロン受注を Bカート最新で表示します。
           </p>
         </div>
-        <div className="flex flex-wrap items-end gap-2 text-sm">
-          <label className="flex flex-col">
-            <span className="text-[11px] text-gray-500">月で絞り込み</span>
-            <select
-              value={monthFilter}
-              onChange={(e) => setMonthFilter(e.target.value)}
-              className="rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm"
-            >
-              <option value="all">すべて</option>
-              {months.map((m) => (
-                <option key={m} value={m}>
-                  {m}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="flex flex-col">
-            <span className="text-[11px] text-gray-500">サロン名で検索</span>
-            <input
-              type="text"
-              value={salonFilter}
-              onChange={(e) => setSalonFilter(e.target.value)}
-              placeholder="サロン名"
-              className="rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm"
-            />
-          </label>
+        <div className="text-right text-xs text-gray-500">
+          <div className="text-gray-700">現在：{fmtTimestamp(now)}</div>
+          <div className="mt-0.5">最終更新：{fmtTimestamp(fetchedAt)}</div>
+          <div className="mt-0.5 text-emerald-600">🔄 Bカート最新</div>
+          <button
+            onClick={fetchFromBcart}
+            disabled={loading}
+            className="mt-1 rounded border border-gray-300 bg-white px-2 py-0.5 text-[11px] text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {loading ? '取得中...' : '🔄 再取得'}
+          </button>
         </div>
+      </div>
+
+      {loading && orders.length > 0 && progress && (
+        <div className="mb-4 rounded-lg border border-blue-200 bg-blue-50 px-4 py-2 text-xs text-blue-700">
+          {progress}（前回取得結果を表示中）
+        </div>
+      )}
+
+      <div className="mb-4 flex flex-wrap items-end gap-3 text-sm">
+        <label className="flex flex-col">
+          <span className="text-[11px] text-gray-500">月で絞り込み</span>
+          <select
+            value={monthFilter}
+            onChange={(e) => setMonthFilter(e.target.value)}
+            className="rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm"
+          >
+            <option value="all">すべて</option>
+            {months.map((m) => (
+              <option key={m} value={m}>
+                {m}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="flex flex-col">
+          <span className="text-[11px] text-gray-500">サロン名で検索</span>
+          <input
+            type="text"
+            value={salonFilter}
+            onChange={(e) => setSalonFilter(e.target.value)}
+            placeholder="サロン名"
+            className="rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm"
+          />
+        </label>
       </div>
 
       <div className="mb-4 grid grid-cols-2 gap-3 md:grid-cols-3">
@@ -153,16 +280,26 @@ export default function DealerOrders() {
           <div className="mt-1 text-xl font-bold text-gray-900">{totals.count}件</div>
         </div>
         <div className="rounded-xl border border-gray-200 bg-white p-4">
-          <div className="text-xs text-gray-500">表示合計</div>
+          <div className="text-xs text-gray-500">表示合計（税込）</div>
           <div className="mt-1 text-xl font-bold text-gray-900">{fmtYen(totals.amount)}</div>
         </div>
       </div>
 
-      {loading ? (
-        <div className="flex items-center justify-center py-20 text-gray-400">読み込み中...</div>
+      {isInitialLoading ? (
+        <div className="flex items-center justify-center py-20 text-sm text-gray-400">
+          {progress || 'Bカートから受注を取得しています...'}
+        </div>
       ) : err ? (
         <div className="rounded-2xl border-2 border-red-200 bg-red-50 p-6 text-center text-sm text-red-700">
-          注文データの取得に失敗しました：{err.message || String(err)}
+          Bカートからの取得に失敗しました：{err.message || String(err)}
+          <div className="mt-3">
+            <button
+              onClick={fetchFromBcart}
+              className="rounded border border-red-300 bg-white px-3 py-1 text-xs font-medium text-red-700 hover:bg-red-100"
+            >
+              再試行
+            </button>
+          </div>
         </div>
       ) : filtered.length === 0 ? (
         <div className="rounded-xl border border-dashed border-gray-300 bg-white py-12 text-center text-sm text-gray-400">
