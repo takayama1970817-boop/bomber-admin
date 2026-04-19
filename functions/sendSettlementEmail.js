@@ -64,6 +64,9 @@ const sendSettlementEmail = onCall(
     }
     const kickback = kickbackSnap.data()
     const { dealerCode, dealerName, month, grandTotal } = kickback
+    // 検証フェーズ用: kickback.isTest=true の清算書は件名・本文にテスト送信の明記を入れる
+    // 実データの清算書（isTest=false/undefined）はこのフラグが立たないため影響しない
+    const isTestSend = kickback.isTest === true
 
     // --- 今日のスコープ: テスト代理店1件のみ許可 ---
     const allowedDealerCode = await getAllowedTestDealerCode(db)
@@ -144,6 +147,7 @@ const sendSettlementEmail = onCall(
         month: month || '',
         status: 'pending',
         toEmail,
+        isTestSend, // 監査用: この送信がテスト送信扱いだったかどうか
         sentBy: request.auth.uid,
         sentByEmail: callerDoc.data().email || '',
         createdAt: snap.exists ? (snap.data().createdAt || now) : now,
@@ -181,8 +185,21 @@ const sendSettlementEmail = onCall(
     const monthLabel = y && m ? `${y}年${parseInt(m, 10)}月` : String(month || '')
     const amountLabel = grandTotal ? `¥${Number(grandTotal).toLocaleString()}` : ''
 
-    const subject = `【${senderName}】${monthLabel}分 清算書のご案内`
+    const subjectPrefix = isTestSend ? '【テスト送信】' : ''
+    const subject = `${subjectPrefix}【${senderName}】${monthLabel}分 清算書のご案内`
+    const testHeader = isTestSend
+      ? [
+          '━━━━━━━━━━━━━━━━━━━━',
+          '※ これはテスト送信です。',
+          '  本番送信の検証目的で送っています。',
+          '  金額・内容は仮のものです。実際の清算対象ではありません。',
+          '  事前のご連絡の通り、内容の確認のみお願いいたします。',
+          '━━━━━━━━━━━━━━━━━━━━',
+          '',
+        ]
+      : []
     const textBody = [
+      ...testHeader,
       `${dealerName || dealerCode} 様`,
       '',
       'いつもお世話になっております。',

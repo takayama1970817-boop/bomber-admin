@@ -1,28 +1,33 @@
 /**
- * ダミーテスト清算書の作成スクリプト（Admin SDK）
+ * テスト送信用清算書の作成スクリプト（Admin SDK）
+ *
+ * 方針変更（2026-04-19）:
+ *   送信検証は「協力代理店1社（実在）」で実地テストする運用。
+ *   このスクリプトは協力代理店向けに**テスト送信用**の清算書を1件作成する。
+ *   実データと混ざらないよう、memo に必ず 'TEST SEND' を残し、金額は小さく固定する。
  *
  * 目的:
- *   - 送信検証のためのダミー kickback ドキュメントを1件作成する
- *   - 同じ dealerCode + month の組み合わせが既にあればスキップ（冪等）
- *   - 金額は少額のダミー（¥1,000）で、監査上テストと分かるようにする
+ *   - 協力代理店の実 dealerCode で、送信フロー検証用の kickback を1件作る
+ *   - 同じ dealerCode + month + TEST SEND の組み合わせが既にあればスキップ（冪等）
+ *   - 金額は固定の少額（¥1,100 税込）で監査上テストと分かるようにする
  *
  * 設計方針:
  *   1. ドライラン既定   — 実際に書き込むのは DRY_RUN=false を明示した時のみ
- *   2. 再実行安全       — 既に該当 (dealerCode, month) の doc があればスキップ
- *   3. テスト明示       — isTest:true、memo に「TEST」文字列
+ *   2. 再実行安全       — 同 (dealerCode, month, isTest:true) の doc があればスキップ
+ *   3. テスト明示       — isTest:true、source:'test-seed'、memo 冒頭に 'TEST SEND'
  *
  * 前提:
- *   - 先に scripts/seed-test-dealer.mjs を実行してテスト代理店が作成済みであること
+ *   - 協力代理店が既に allowedEmails に登録済み
+ *   - settings/rt_company.testDealerCode が協力代理店コードに設定済み
+ *   - 協力代理店側に「これはテスト送信」である旨を事前共有済み
  *
  * 使用方法:
  *   # ドライラン（既定）
- *   node scripts/seed-test-kickback.mjs
+ *   TEST_DEALER_CODE=<協力代理店の実コード> \
+ *     node scripts/seed-test-kickback.mjs
  *
  *   # 本番実行
- *   DRY_RUN=false node scripts/seed-test-kickback.mjs
- *
- *   # カスタム
- *   TEST_DEALER_CODE=TEST-DEALER-001 \
+ *   TEST_DEALER_CODE=<協力代理店の実コード> \
  *   TEST_MONTH=2026-04 \
  *   DRY_RUN=false node scripts/seed-test-kickback.mjs
  *
@@ -43,8 +48,14 @@ initializeApp({ credential: cert(serviceAccount) })
 const db = getFirestore()
 
 const DRY_RUN = process.env.DRY_RUN !== 'false'
-const TEST_DEALER_CODE = process.env.TEST_DEALER_CODE || 'TEST-DEALER-001'
+const TEST_DEALER_CODE = process.env.TEST_DEALER_CODE || ''
 const TEST_MONTH = process.env.TEST_MONTH || defaultMonth()
+
+if (!TEST_DEALER_CODE) {
+  console.error('❌ TEST_DEALER_CODE（協力代理店の実 dealerCode）を指定してください')
+  console.error('   例: TEST_DEALER_CODE=DLR001 DRY_RUN=false node scripts/seed-test-kickback.mjs')
+  process.exit(1)
+}
 
 function defaultMonth() {
   const d = new Date()
@@ -52,48 +63,51 @@ function defaultMonth() {
 }
 
 async function run() {
-  console.log('=== ダミーテスト清算書 作成スクリプト ===')
+  console.log('=== テスト送信用 清算書 作成スクリプト ===')
   console.log(`  DRY_RUN: ${DRY_RUN}`)
   console.log(`  dealerCode: ${TEST_DEALER_CODE}`)
   console.log(`  month: ${TEST_MONTH}`)
   console.log()
 
-  // 代理店の存在確認
+  // 代理店の存在確認（協力代理店は既に allowedEmails に登録済みの前提）
   const dealerSnap = await db.collection('allowedEmails')
     .where('dealerCode', '==', TEST_DEALER_CODE)
     .where('role', '==', 'dealer')
     .get()
   if (dealerSnap.empty) {
     console.error(`❌ 代理店が見つかりません: ${TEST_DEALER_CODE}`)
-    console.error('   先に scripts/seed-test-dealer.mjs を実行してください')
+    console.error('   協力代理店の dealerCode が正しいか、allowedEmails に登録済みか確認してください')
     process.exit(1)
   }
   const dealer = dealerSnap.docs[0].data()
   console.log(`  → 代理店: ${dealer.companyName || dealer.name}`)
 
-  // 既存チェック（同 dealerCode + month の kickback が1件でもあればスキップ）
+  // 既存チェック（同 dealerCode + month + isTest:true の kickback が1件でもあればスキップ）
+  // 実データの清算書（isTest=false/undefined）は別物なのでスキップ判定に含めない
   const existing = await db.collection('kickbacks')
     .where('dealerCode', '==', TEST_DEALER_CODE)
     .where('month', '==', TEST_MONTH)
+    .where('isTest', '==', true)
     .get()
   if (!existing.empty) {
-    console.log(`✓ 既に kickback が存在（スキップ）: ${existing.size}件`)
+    console.log(`✓ 既にテスト送信用 kickback が存在（スキップ）: ${existing.size}件`)
     for (const d of existing.docs) {
-      console.log(`  - kickbacks/${d.id}  (${d.data().source || 'unknown'})`)
+      console.log(`  - kickbacks/${d.id}  (${d.data().source || 'unknown'}, memo: ${d.data().memo || ''})`)
     }
     console.log()
-    console.log('  → このうち1件を KickbackManage 画面で「📮 SES送信」してください')
+    console.log('  → この kickback を KickbackManage 画面で「📮 SES送信」してください')
     process.exit(0)
   }
 
-  // ダミー清算書の構造（KickbackManage.jsx の addDoc ペイロードに合わせた最小セット）
+  // テスト送信用清算書（KickbackManage.jsx の addDoc ペイロードに合わせた最小セット）
+  // 協力代理店の実データと誤認しないよう、isTest:true + memo 冒頭 'TEST SEND' で識別
   const payload = {
     dealerCode: TEST_DEALER_CODE,
     dealerName: dealer.companyName || dealer.name || TEST_DEALER_CODE,
     month: TEST_MONTH,
     entries: [
       {
-        salonName: '【テスト】ダミーサロン',
+        salonName: '【TEST SEND】検証用ダミーサロン',
         type: 'sub',
         orderCount: 1,
         orderTotal: 1000,
@@ -124,7 +138,8 @@ async function run() {
     bankInfo: dealer.bankInfo || null,
     source: 'test-seed',
     isTest: true,
-    memo: 'TEST: ダミー清算書（seed-test-kickback.mjs により作成）',
+    memo: `TEST SEND: 協力代理店 ${TEST_DEALER_CODE} 向け検証用清算書（${TEST_MONTH}、固定 ¥1,100、seed-test-kickback.mjs 生成）`,
+    note: 'TEST SEND',
     createdAt: FieldValue.serverTimestamp(),
   }
 

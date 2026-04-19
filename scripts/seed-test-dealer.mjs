@@ -1,4 +1,21 @@
 /**
+ * ⚠️  非推奨: このスクリプトは現在使用しません  ⚠️
+ *
+ * 方針変更（2026-04-19）:
+ *   送信検証はダミー代理店ではなく「協力代理店1社（実在）」で実地テストする
+ *   運用に切り替えた。このスクリプトは削除しないが、今回は実行しないこと。
+ *
+ *   協力代理店で検証する場合:
+ *     - このスクリプトは使わず、既存の allowedEmails をそのまま使う
+ *     - settings/rt_company.testDealerCode を協力代理店の実コードに設定する
+ *       （Firestore Console から手動で設定、または別の専用スクリプトを用意）
+ *     - seed-test-kickback.mjs は協力代理店向けに実行可能（TEST SEND 識別必須）
+ *
+ *   再利用するケース（参考）:
+ *     - 協力代理店が見つからない環境で再度ダミー検証に戻す必要が生じた場合
+ *
+ * ---（以下、元のダミー代理店作成スクリプトの説明）---
+ *
  * ダミーテスト代理店の作成スクリプト（Admin SDK）
  *
  * 目的:
@@ -57,6 +74,14 @@ if (!TEST_DEALER_EMAIL) {
 }
 
 async function run() {
+  console.log('⚠️  このスクリプトは現在「非推奨」です（2026-04-19 方針変更）')
+  console.log('   送信検証は協力代理店1社の実コードで実地テストする運用です。')
+  console.log('   続行する場合は ACKNOWLEDGE_DEPRECATED=yes を指定してください。')
+  console.log()
+  if (process.env.ACKNOWLEDGE_DEPRECATED !== 'yes') {
+    console.error('❌ ACKNOWLEDGE_DEPRECATED=yes が指定されていないため中断します')
+    process.exit(1)
+  }
   console.log('=== ダミーテスト代理店 作成スクリプト ===')
   console.log(`  DRY_RUN: ${DRY_RUN}`)
   console.log(`  dealerCode: ${TEST_DEALER_CODE}`)
