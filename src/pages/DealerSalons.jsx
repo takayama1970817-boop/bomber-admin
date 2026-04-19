@@ -202,7 +202,7 @@ export default function DealerSalons() {
       <div>
         <button
           onClick={() => setSelected(null)}
-          className="mb-4 text-sm text-indigo-600 hover:underline"
+          className="mb-4 text-sm text-violet-500 hover:underline"
         >
           ← サロン一覧に戻る
         </button>
@@ -219,7 +219,7 @@ export default function DealerSalons() {
         <div className="mb-6 flex gap-6 text-sm text-gray-500">
           <span>注文数：<strong className="text-gray-900">{salon.totalOrders}件</strong></span>
           <span>累計売上：<strong className="text-gray-900">{fmtYen(salon.totalSales)}</strong></span>
-          <span>今月：<strong className="text-indigo-600">{fmtYen(salon.thisMonthSales)}</strong></span>
+          <span>今月：<strong className="text-violet-500">{fmtYen(salon.thisMonthSales)}</strong></span>
         </div>
 
         {/* 月別売上 */}
@@ -329,9 +329,9 @@ export default function DealerSalons() {
                   <div className="text-[10px] text-gray-400">{salon.totalOrders}件</div>
                 </div>
                 <div>
-                  <div className="text-[10px] text-indigo-500">今月</div>
-                  <div className="text-sm font-bold text-indigo-600">{fmtYen(salon.thisMonthSales)}</div>
-                  <div className="text-[10px] text-indigo-300">{salon.thisMonthOrders}件</div>
+                  <div className="text-[10px] text-violet-500">今月</div>
+                  <div className="text-sm font-bold text-violet-500">{fmtYen(salon.thisMonthSales)}</div>
+                  <div className="text-[10px] text-violet-300">{salon.thisMonthOrders}件</div>
                 </div>
                 <div>
                   <div className="text-[10px] text-gray-500">最終注文</div>

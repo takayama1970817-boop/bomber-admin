@@ -221,19 +221,23 @@ export default function DealerOrders() {
     <div>
       <div className="mb-6 flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h1 className="text-xl font-bold text-gray-900">注文一覧</h1>
-          <p className="mt-1 text-xs text-gray-500">
+          <h1 className="text-xl font-bold tracking-wide text-gray-900">注文一覧</h1>
+          <p className="mt-1 text-xs leading-relaxed text-gray-500">
             自社（{profile?.companyName || dealerCode}）配下のサロン受注を Bカート最新で表示します。
           </p>
         </div>
-        <div className="text-right text-xs text-gray-500">
-          <div className="text-gray-700">現在：{fmtTimestamp(now)}</div>
-          <div className="mt-0.5">最終更新：{fmtTimestamp(fetchedAt)}</div>
-          <div className="mt-0.5 text-emerald-600">🔄 Bカート最新</div>
+        <div className="rounded-2xl border border-gray-100 bg-white px-4 py-2.5 text-right text-sm leading-relaxed text-gray-500 shadow-[0_1px_3px_rgba(17,24,39,0.04)]">
+          <div className="text-gray-800">
+            現在：<span className="font-medium tracking-wide">{fmtTimestamp(now)}</span>
+          </div>
+          <div className="mt-0.5 text-gray-600">
+            最終更新：<span className="font-medium tracking-wide">{fmtTimestamp(fetchedAt)}</span>
+          </div>
+          <div className="mt-0.5 text-xs text-emerald-600">🔄 Bカート最新</div>
           <button
             onClick={fetchFromBcart}
             disabled={loading}
-            className="mt-1 rounded border border-gray-300 bg-white px-2 py-0.5 text-[11px] text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+            className="mt-1.5 rounded-full border border-violet-200 bg-white px-3 py-0.5 text-[11px] font-medium text-violet-600 transition-colors hover:bg-violet-50 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {loading ? '取得中...' : '🔄 再取得'}
           </button>
@@ -275,13 +279,16 @@ export default function DealerOrders() {
       </div>
 
       <div className="mb-4 grid grid-cols-2 gap-3 md:grid-cols-3">
-        <div className="rounded-xl border border-gray-200 bg-white p-4">
-          <div className="text-xs text-gray-500">表示件数</div>
-          <div className="mt-1 text-xl font-bold text-gray-900">{totals.count}件</div>
+        <div className="rounded-2xl border border-gray-100 bg-white p-4 shadow-[0_1px_3px_rgba(17,24,39,0.04)]">
+          <div className="text-xs font-medium tracking-wide text-gray-500">表示件数</div>
+          <div className="mt-2 text-2xl font-bold tracking-tight text-gray-900">
+            {totals.count.toLocaleString()}
+            <span className="ml-1 text-sm font-medium text-gray-400">件</span>
+          </div>
         </div>
-        <div className="rounded-xl border border-gray-200 bg-white p-4">
-          <div className="text-xs text-gray-500">表示合計（税込）</div>
-          <div className="mt-1 text-xl font-bold text-gray-900">{fmtYen(totals.amount)}</div>
+        <div className="rounded-2xl border border-gray-100 bg-white p-4 shadow-[0_1px_3px_rgba(17,24,39,0.04)]">
+          <div className="text-xs font-medium tracking-wide text-gray-500">表示合計（税込）</div>
+          <div className="mt-2 text-2xl font-bold tracking-tight text-gray-900">{fmtYen(totals.amount)}</div>
         </div>
       </div>
 
@@ -306,19 +313,22 @@ export default function DealerOrders() {
           条件に一致する注文がありません
         </div>
       ) : (
-        <div className="overflow-auto rounded-xl border border-gray-200 bg-white">
+        <div className="overflow-auto rounded-2xl border border-gray-100 bg-white shadow-[0_1px_3px_rgba(17,24,39,0.04)]">
           <table className="w-full text-sm">
             <thead>
-              <tr className="border-b border-gray-100 bg-gray-50 text-left text-xs text-gray-500">
-                <th className="px-4 py-3">注文日</th>
-                <th className="px-4 py-3">サロン名</th>
-                <th className="px-4 py-3">注文番号</th>
-                <th className="px-4 py-3 text-right">合計（税込）</th>
+              <tr className="border-b border-gray-100 bg-violet-50/40 text-left text-xs tracking-wide text-gray-500">
+                <th className="px-4 py-3 font-semibold">注文日</th>
+                <th className="px-4 py-3 font-semibold">サロン名</th>
+                <th className="px-4 py-3 font-semibold">注文番号</th>
+                <th className="px-4 py-3 text-right font-semibold">合計（税込）</th>
               </tr>
             </thead>
             <tbody>
               {filtered.map((o) => (
-                <tr key={o.id} className="border-b border-gray-50 hover:bg-gray-50">
+                <tr
+                  key={o.id}
+                  className="border-b border-gray-50 transition-colors hover:bg-violet-50/50"
+                >
                   <td className="px-4 py-3 text-gray-700">{fmtDate(o.orderDate)}</td>
                   <td className="px-4 py-3 font-medium text-gray-900">{o.companyName || '—'}</td>
                   <td className="px-4 py-3 font-mono text-xs text-gray-500">{o.orderNumber || '—'}</td>

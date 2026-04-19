@@ -99,7 +99,7 @@ export default function DealerLogin() {
             onChange={(e) => setEmail(e.target.value)}
             placeholder="dealer@example.com"
             autoComplete="email"
-            className="mb-3 w-full rounded-lg border border-gray-300 px-4 py-3 text-sm focus:border-indigo-500 focus:outline-none"
+            className="mb-3 w-full rounded-lg border border-gray-300 px-4 py-3 text-sm focus:border-violet-400 focus:outline-none"
           />
 
           <label className="mb-1 block text-xs text-gray-500">パスワード</label>
@@ -109,7 +109,7 @@ export default function DealerLogin() {
             onChange={(e) => setPassword(e.target.value)}
             placeholder="パスワード"
             autoComplete="current-password"
-            className="mb-5 w-full rounded-lg border border-gray-300 px-4 py-3 text-sm focus:border-indigo-500 focus:outline-none"
+            className="mb-5 w-full rounded-lg border border-gray-300 px-4 py-3 text-sm focus:border-violet-400 focus:outline-none"
           />
 
           {(error || authError) && (
@@ -127,7 +127,7 @@ export default function DealerLogin() {
           <button
             type="submit"
             disabled={loading}
-            className="w-full rounded-lg bg-indigo-600 py-3 text-sm font-bold text-white hover:bg-indigo-700 disabled:opacity-40"
+            className="w-full rounded-lg bg-violet-500 py-3 text-sm font-bold text-white hover:bg-violet-600 disabled:opacity-40"
           >
             {loading ? 'ログイン中...' : 'メールアドレスでログイン'}
           </button>
@@ -137,7 +137,7 @@ export default function DealerLogin() {
           <button
             onClick={handleResetPassword}
             disabled={resetLoading}
-            className="text-xs text-gray-400 hover:text-indigo-600 disabled:opacity-40"
+            className="text-xs text-gray-400 hover:text-violet-500 disabled:opacity-40"
           >
             {resetLoading ? '送信中...' : 'パスワードを忘れた場合'}
           </button>

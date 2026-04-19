@@ -2,9 +2,9 @@ import { useState, useEffect } from 'react'
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
 import { useAuth } from '../contexts/AuthContext.jsx'
 
-const baseLink = 'block rounded-lg px-3 py-2.5 text-sm font-medium transition-colors'
-const activeLink = 'bg-indigo-600 text-white'
-const inactiveLink = 'text-gray-700 hover:bg-gray-100'
+const baseLink = 'block rounded-xl px-3 py-2.5 text-sm font-medium tracking-wide transition-colors'
+const activeLink = 'bg-violet-500 text-white shadow-[0_4px_12px_rgba(139,92,246,0.25)]'
+const inactiveLink = 'text-gray-700 hover:bg-violet-50 hover:text-violet-700'
 
 function Item({ to, label, onClick, end }) {
   return (
@@ -71,7 +71,7 @@ export default function DealerLayout() {
           <div className="text-lg font-bold text-gray-900">VAVITTE</div>
           <div className="text-xs text-gray-500">代理店ポータル</div>
           {companyName && (
-            <div className="mt-1 text-xs font-medium text-indigo-600">{companyName} 様</div>
+            <div className="mt-1 text-xs font-medium tracking-wide text-violet-500">{companyName} 様</div>
           )}
         </div>
 

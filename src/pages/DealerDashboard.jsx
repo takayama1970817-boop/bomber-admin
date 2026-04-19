@@ -47,25 +47,25 @@ function QuickLink({ to, label, hint }) {
   return (
     <Link
       to={to}
-      className="flex items-center justify-between rounded-2xl border border-gray-200 bg-white px-5 py-4 transition-colors hover:border-indigo-300 hover:bg-indigo-50"
+      className="flex items-center justify-between rounded-2xl border border-gray-100 bg-white px-5 py-4 shadow-[0_1px_3px_rgba(17,24,39,0.04)] transition hover:-translate-y-0.5 hover:border-violet-200 hover:shadow-[0_8px_24px_rgba(139,92,246,0.10)]"
     >
       <div>
-        <div className="text-sm font-bold text-gray-900">{label}</div>
-        {hint && <div className="mt-0.5 text-xs text-gray-500">{hint}</div>}
+        <div className="text-sm font-bold tracking-wide text-gray-900">{label}</div>
+        {hint && <div className="mt-0.5 text-xs leading-relaxed text-gray-500">{hint}</div>}
       </div>
-      <span className="text-indigo-500">→</span>
+      <span className="text-violet-400">→</span>
     </Link>
   )
 }
 
 function RecentOrders({ orders }) {
   return (
-    <div className="rounded-2xl border border-gray-200 bg-white p-5">
+    <div className="rounded-2xl border border-gray-100 bg-white p-5 shadow-[0_1px_3px_rgba(17,24,39,0.04)]">
       <div className="mb-3 flex items-center justify-between">
-        <h2 className="text-sm font-bold text-gray-700">最近の注文</h2>
+        <h2 className="text-sm font-bold tracking-wide text-gray-800">最近の注文</h2>
         <Link
           to="/dealer/orders"
-          className="text-xs font-medium text-indigo-600 hover:underline"
+          className="text-xs font-medium text-violet-500 hover:text-violet-600 hover:underline"
         >
           注文一覧 →
         </Link>
@@ -75,7 +75,10 @@ function RecentOrders({ orders }) {
       ) : (
         <ul className="divide-y divide-gray-100">
           {orders.map((o) => (
-            <li key={o.orderId} className="flex items-center justify-between py-2.5 text-sm">
+            <li
+              key={o.orderId}
+              className="-mx-2 flex items-center justify-between rounded-lg px-2 py-2.5 text-sm transition-colors hover:bg-violet-50/50"
+            >
               <span className="w-12 shrink-0 text-xs text-gray-500">{fmtOrderDate(o.orderDate)}</span>
               <span className="flex-1 truncate font-medium text-gray-900">{o.salonName || '—'}</span>
               <span className="ml-2 shrink-0 font-bold text-gray-900">{fmtYen(o.totalAmount)}</span>
@@ -192,19 +195,25 @@ function Header({ companyName, snapshot }) {
   return (
     <div className="mb-6 flex flex-wrap items-start justify-between gap-3">
       <div>
-        <h1 className="text-xl font-bold text-gray-900">
+        <h1 className="text-xl font-bold tracking-wide text-gray-900">
           ダッシュボード
           {month && <span className="ml-2 text-sm font-normal text-gray-500">{month}</span>}
         </h1>
         {companyName && (
-          <p className="mt-1 text-xs text-gray-500">{companyName} 様の今日の状況</p>
+          <p className="mt-1 text-xs leading-relaxed text-gray-500">
+            {companyName} 様の今日の状況
+          </p>
         )}
       </div>
-      <div className="text-right text-xs text-gray-500">
-        <div className="text-gray-700">現在：{fmtTimestamp(now)}</div>
-        <div className="mt-0.5">最終更新：{fmtTimestamp(lastUpdated)}</div>
-        <div className="mt-0.5 text-gray-400">※当日12:00締め分まで反映</div>
-        <div className="mt-0.5 text-indigo-500">🕐 13:00集計済みデータ（Bカート基準）</div>
+      <div className="rounded-2xl border border-gray-100 bg-white px-4 py-2.5 text-right text-sm leading-relaxed text-gray-500 shadow-[0_1px_3px_rgba(17,24,39,0.04)]">
+        <div className="text-gray-800">
+          現在：<span className="font-medium tracking-wide">{fmtTimestamp(now)}</span>
+        </div>
+        <div className="mt-0.5 text-gray-600">
+          最終更新：<span className="font-medium tracking-wide">{fmtTimestamp(lastUpdated)}</span>
+        </div>
+        <div className="mt-0.5 text-xs text-gray-400">※当日12:00締め分まで反映</div>
+        <div className="mt-0.5 text-xs text-violet-500">🕐 13:00集計済みデータ（Bカート基準）</div>
       </div>
     </div>
   )

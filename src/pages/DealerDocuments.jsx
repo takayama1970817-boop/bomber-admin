@@ -61,7 +61,7 @@ export default function DealerDocuments() {
             onClick={() => setFilter('all')}
             className={`rounded-lg px-4 py-1.5 text-sm font-medium transition-colors ${
               filter === 'all'
-                ? 'bg-indigo-600 text-white'
+                ? 'bg-violet-500 text-white'
                 : 'border border-gray-300 bg-white text-gray-600 hover:bg-gray-50'
             }`}
           >
@@ -73,7 +73,7 @@ export default function DealerDocuments() {
               onClick={() => setFilter(cat)}
               className={`rounded-lg px-4 py-1.5 text-sm font-medium transition-colors ${
                 filter === cat
-                  ? 'bg-indigo-600 text-white'
+                  ? 'bg-violet-500 text-white'
                   : 'border border-gray-300 bg-white text-gray-600 hover:bg-gray-50'
               }`}
             >
@@ -98,7 +98,7 @@ export default function DealerDocuments() {
                   </span>
                 )}
                 {d.category && (
-                  <span className="rounded bg-indigo-100 px-2 py-0.5 text-[10px] font-medium text-indigo-700">
+                  <span className="rounded bg-violet-100 px-2 py-0.5 text-[10px] font-medium text-violet-600">
                     {CATEGORY_LABELS[d.category] || d.category}
                   </span>
                 )}
@@ -117,7 +117,7 @@ export default function DealerDocuments() {
                 href={d.url}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="inline-block rounded-lg bg-indigo-600 px-4 py-2 text-xs font-medium text-white hover:bg-indigo-700"
+                className="inline-block rounded-lg bg-violet-500 px-4 py-2 text-xs font-medium text-white hover:bg-violet-600"
               >
                 {d.source === 'upload' ? 'PDFをダウンロード' : 'ダウンロード / 開く'}
               </a>

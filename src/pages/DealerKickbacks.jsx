@@ -93,7 +93,7 @@ function KbEntryRow({ entry, index }) {
   return (
     <>
       <tr
-        className="cursor-pointer border-b border-gray-50 hover:bg-gray-50"
+        className="cursor-pointer border-b border-gray-50 hover:bg-violet-50/50"
         onClick={() => setOpen(!open)}
       >
         <td className="px-4 py-2 text-xs text-gray-400">
@@ -103,13 +103,13 @@ function KbEntryRow({ entry, index }) {
         <td className="px-4 py-2 font-medium text-gray-900">{entry.salonName}</td>
         <td className="px-4 py-2 text-right">{entry.orderCount}回</td>
         <td className="px-4 py-2 text-right">{fmtYen(entry.orderTotal)}</td>
-        <td className="px-4 py-2 text-right font-bold text-indigo-600">{fmtYen(entry.kickbackAmount)}</td>
+        <td className="px-4 py-2 text-right font-bold text-violet-500">{fmtYen(entry.kickbackAmount)}</td>
       </tr>
       {open &&
         entry.orders &&
         entry.orders.map((ord, oi) => (
           <React.Fragment key={oi}>
-            <tr className="border-b border-gray-100 bg-indigo-50/40">
+            <tr className="border-b border-gray-100 bg-violet-50/40">
               <td className="px-4 py-1.5"></td>
               <td className="px-4 py-1.5 text-xs font-bold text-gray-700">
                 {ord.date}
@@ -117,7 +117,7 @@ function KbEntryRow({ entry, index }) {
               </td>
               <td className="px-4 py-1.5 text-right text-xs text-gray-500">{ord.items?.length || 0}品</td>
               <td className="px-4 py-1.5 text-right text-xs font-medium text-gray-700">{fmtYen(ord.total)}</td>
-              <td className="px-4 py-1.5 text-right text-xs font-medium text-indigo-600">{fmtYen(ord.kb)}</td>
+              <td className="px-4 py-1.5 text-right text-xs font-medium text-violet-500">{fmtYen(ord.kb)}</td>
             </tr>
             {ord.items?.map((item, j) => (
               <tr key={j} className="border-b border-gray-50 bg-gray-50/30">
@@ -130,7 +130,7 @@ function KbEntryRow({ entry, index }) {
                   {item.quantity}個 × {fmtYen(item.unitPrice)}
                 </td>
                 <td className="px-4 py-1 text-right text-xs text-gray-500">{fmtYen(item.subtotal)}</td>
-                <td className="px-4 py-1 text-right text-xs text-indigo-400">{fmtYen(item.kb)}</td>
+                <td className="px-4 py-1 text-right text-xs text-violet-300">{fmtYen(item.kb)}</td>
               </tr>
             ))}
           </React.Fragment>
@@ -193,12 +193,12 @@ export default function DealerKickbacks() {
       </div>
 
       {kickbacks.length === 0 ? (
-        <div className="rounded-xl border border-dashed border-gray-300 bg-white py-12 text-center text-sm text-gray-400">
+        <div className="rounded-2xl border border-dashed border-gray-200 bg-white py-12 text-center text-sm text-gray-400 shadow-[0_1px_3px_rgba(17,24,39,0.04)]">
           キックバック清算書はまだありません
         </div>
       ) : (
         kickbacks.map((stmt) => (
-          <div key={stmt.id} className="mb-8 rounded-xl border border-gray-200 bg-white">
+          <div key={stmt.id} className="mb-8 rounded-2xl border border-gray-100 bg-white shadow-[0_1px_3px_rgba(17,24,39,0.04)]">
             <div className="border-b border-gray-100 px-6 py-4">
               <div className="flex items-center justify-between">
                 <div>
@@ -214,7 +214,7 @@ export default function DealerKickbacks() {
                         alert('PDF生成に失敗しました: ' + e.message)
                       }
                     }}
-                    className="rounded-lg border border-indigo-300 bg-indigo-50 px-4 py-2 text-sm font-medium text-indigo-700 hover:bg-indigo-100"
+                    className="rounded-lg border border-violet-200 bg-violet-50 px-4 py-2 text-sm font-medium text-violet-600 hover:bg-violet-100"
                   >
                     PDFダウンロード
                   </button>
@@ -229,7 +229,7 @@ export default function DealerKickbacks() {
             </div>
 
             <div className="px-6 py-4">
-              <div className="mb-6 rounded-xl bg-indigo-600 px-6 py-4 text-white">
+              <div className="mb-6 rounded-2xl bg-gradient-to-br from-violet-500 to-violet-600 px-6 py-4 text-white shadow-[0_6px_20px_rgba(139,92,246,0.20)]">
                 <div className="mb-3 flex items-center justify-between">
                   <div>
                     <div className="text-xs opacity-80">
@@ -243,7 +243,7 @@ export default function DealerKickbacks() {
                   </div>
                 </div>
                 {stmt.grandTotal && (
-                  <div className="border-t border-indigo-400 pt-3 text-sm">
+                  <div className="border-t border-violet-300 pt-3 text-sm">
                     <div className="grid grid-cols-2 gap-1">
                       <div className="opacity-80">KB金額合計</div>
                       <div className="text-right">{fmtYen(stmt.totalKickback)}</div>
@@ -259,20 +259,20 @@ export default function DealerKickbacks() {
                           <div className="text-right">-{fmtYen(stmt.paymentFee)}</div>
                         </>
                       )}
-                      <div className="mt-1 border-t border-indigo-400 pt-1 font-bold opacity-90">小計</div>
-                      <div className="mt-1 border-t border-indigo-400 pt-1 text-right font-bold">
+                      <div className="mt-1 border-t border-violet-300 pt-1 font-bold opacity-90">小計</div>
+                      <div className="mt-1 border-t border-violet-300 pt-1 text-right font-bold">
                         {fmtYen(stmt.subtotalAfterDeductions)}
                       </div>
                       <div className="opacity-80">+ 消費税 10%</div>
                       <div className="text-right">{fmtYen(stmt.tax)}</div>
-                      <div className="mt-1 border-t border-indigo-400 pt-1 font-bold">KB清算額（税込）</div>
-                      <div className="mt-1 border-t border-indigo-400 pt-1 text-right font-bold">
+                      <div className="mt-1 border-t border-violet-300 pt-1 font-bold">KB清算額（税込）</div>
+                      <div className="mt-1 border-t border-violet-300 pt-1 text-right font-bold">
                         {fmtYen(stmt.grandTotal)}
                       </div>
                       {stmt.dealerOrderTotal > 0 && (
                         <>
-                          <div className="mt-2 border-t border-indigo-300 pt-2 opacity-80">- 代理店注文額（税込）</div>
-                          <div className="mt-2 border-t border-indigo-300 pt-2 text-right">
+                          <div className="mt-2 border-t border-violet-200 pt-2 opacity-80">- 代理店注文額（税込）</div>
+                          <div className="mt-2 border-t border-violet-200 pt-2 text-right">
                             -{fmtYen(stmt.dealerOrderTotal)}
                           </div>
                           <div className="mt-1 border-t-2 border-white pt-1 text-lg font-bold">最終精算額</div>
@@ -303,12 +303,12 @@ export default function DealerKickbacks() {
                     ))}
                   </tbody>
                   <tfoot>
-                    <tr className="border-t-2 border-indigo-200 bg-indigo-50">
+                    <tr className="border-t-2 border-violet-200 bg-violet-50">
                       <td className="px-4 py-3 font-bold" colSpan={3}>
                         合計（{stmt.entries?.length || 0}サロン）
                       </td>
                       <td className="px-4 py-3 text-right font-bold">{fmtYen(stmt.totalSales)}</td>
-                      <td className="px-4 py-3 text-right text-lg font-bold text-indigo-600">
+                      <td className="px-4 py-3 text-right text-lg font-bold text-violet-500">
                         {fmtYen(stmt.totalKickback)}
                       </td>
                     </tr>

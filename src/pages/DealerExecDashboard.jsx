@@ -269,7 +269,7 @@ export default function DealerExecDashboard() {
             {companyNames && (
               <>
                 　／
-                <span className="font-bold text-indigo-700">
+                <span className="font-bold text-violet-600">
                   所属サロン {(companyNames.rawCount || companyNames.size).toLocaleString()} 社
                 </span>
                 <span className="ml-1 text-gray-400">（現時点最新）</span>
@@ -285,7 +285,7 @@ export default function DealerExecDashboard() {
           >
             ← 前月
           </button>
-          <div className="rounded-lg bg-indigo-600 px-4 py-1.5 text-xs font-bold text-white">
+          <div className="rounded-lg bg-violet-500 px-4 py-1.5 text-xs font-bold text-white">
             {year}/{String(month + 1).padStart(2, '0')}
           </div>
           <button
@@ -296,7 +296,7 @@ export default function DealerExecDashboard() {
           </button>
           <button
             onClick={goThisMonth}
-            className="rounded-lg border border-indigo-300 bg-white px-3 py-1.5 text-xs font-medium text-indigo-700 hover:bg-indigo-50"
+            className="rounded-lg border border-violet-200 bg-white px-3 py-1.5 text-xs font-medium text-violet-600 hover:bg-violet-50"
           >
             今月
           </button>
@@ -448,7 +448,7 @@ export default function DealerExecDashboard() {
               followNeededSorted.length > 5 && (
                 <button
                   onClick={() => setShowAllFollow((v) => !v)}
-                  className="rounded-lg border border-indigo-300 bg-white px-3 py-1.5 text-xs font-medium text-indigo-700 hover:bg-indigo-50"
+                  className="rounded-lg border border-violet-200 bg-white px-3 py-1.5 text-xs font-medium text-violet-600 hover:bg-violet-50"
                 >
                   {showAllFollow ? '▲ Top 5 に戻す' : `全 ${followNeededSorted.length} サロン表示 →`}
                 </button>
@@ -465,10 +465,10 @@ export default function DealerExecDashboard() {
               <div className="space-y-2">
                 <button
                   onClick={() => setShowAllFollow((v) => !v)}
-                  className="mb-2 block w-full rounded-lg border border-dashed border-gray-300 bg-gray-50 px-3 py-2 text-left text-xs text-gray-600 hover:border-indigo-300 hover:bg-indigo-50/50"
+                  className="mb-2 block w-full rounded-lg border border-dashed border-gray-300 bg-gray-50 px-3 py-2 text-left text-xs text-gray-600 hover:border-violet-200 hover:bg-violet-50/50"
                 >
                   <span>要注意 <span className="font-bold text-yellow-700">{analyticsSummary.counts.watch}</span> ／ 警告 <span className="font-bold text-orange-700">{analyticsSummary.counts.warn}</span> ／ 離脱 <span className="font-bold text-red-700">{analyticsSummary.counts.lost}</span>（合計 {analyticsSummary.followNeededCount} サロン）</span>
-                  <span className="ml-2 text-indigo-600">
+                  <span className="ml-2 text-violet-500">
                     {showAllFollow ? '▲ Top 5 に戻す' : '→ 全件表示'}
                   </span>
                 </button>
@@ -483,12 +483,12 @@ export default function DealerExecDashboard() {
                     <Link
                       key={s.id}
                       to={`/dealer/salons?salon=${encodeURIComponent(s.name)}`}
-                      className="flex flex-wrap items-center gap-3 rounded-lg border border-gray-200 px-3 py-2 transition-colors hover:border-indigo-300 hover:bg-indigo-50/50"
+                      className="flex flex-wrap items-center gap-3 rounded-lg border border-gray-200 px-3 py-2 transition-colors hover:border-violet-200 hover:bg-violet-50/50"
                     >
                       <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${riskColor}`}>
                         {riskLabel}
                       </span>
-                      <div className="flex-1 min-w-[140px] text-sm font-medium text-indigo-700">
+                      <div className="flex-1 min-w-[140px] text-sm font-medium text-violet-600">
                         {s.name}
                       </div>
                       <div className="text-xs text-gray-600">
@@ -525,7 +525,7 @@ export default function DealerExecDashboard() {
                     <div className="w-40">
                       <div className="h-5 overflow-hidden rounded-md bg-gray-100">
                         <div
-                          className="h-full bg-indigo-500"
+                          className="h-full bg-violet-500"
                           style={{ width: `${maxProduct > 0 ? (p.amount / maxProduct) * 100 : 0}%` }}
                         />
                       </div>
@@ -550,7 +550,7 @@ export default function DealerExecDashboard() {
             right={
               <button
                 onClick={() => setShowAllSalons((v) => !v)}
-                className="rounded-lg border border-indigo-300 bg-white px-3 py-1.5 text-xs font-medium text-indigo-700 hover:bg-indigo-50"
+                className="rounded-lg border border-violet-200 bg-white px-3 py-1.5 text-xs font-medium text-violet-600 hover:bg-violet-50"
               >
                 {showAllSalons
                   ? '▲ Top 10 に戻す'
@@ -603,7 +603,7 @@ export default function DealerExecDashboard() {
                     </div>
                     <div className="flex h-32 w-full items-end">
                       <div
-                        className="w-full rounded-t bg-indigo-500"
+                        className="w-full rounded-t bg-violet-500"
                         style={{ height: `${h}%` }}
                       />
                     </div>
@@ -615,7 +615,7 @@ export default function DealerExecDashboard() {
             </div>
           </SectionCard>
 
-          <div className="rounded-xl border border-indigo-200 bg-indigo-50 p-4 text-xs text-indigo-900">
+          <div className="rounded-xl border border-violet-200 bg-violet-50 p-4 text-xs text-violet-900">
             <strong>表示範囲：</strong> {dealerCompanyName} 様の所属サロン（{companyNames?.size ?? 0} 社）の受注データのみを集計しています。
           </div>
         </>

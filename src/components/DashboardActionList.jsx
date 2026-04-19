@@ -38,10 +38,10 @@ function LastOrderCell({ lastOrderDate, daysSinceLast }) {
 }
 
 const STATUS_META = {
-  'no-order': { label: '発注なし', className: 'bg-red-100 text-red-700' },
-  stale30: { label: '30日以上', className: 'bg-red-100 text-red-700' },
-  stale14: { label: '14日以上', className: 'bg-yellow-100 text-yellow-700' },
-  new: { label: '新規', className: 'bg-green-100 text-green-700' },
+  'no-order': { label: '発注なし', className: 'bg-[#FFECEC] text-[#D35A5A]' },
+  stale30: { label: '30日以上', className: 'bg-[#FFECEC] text-[#D35A5A]' },
+  stale14: { label: '14日以上', className: 'bg-[#FFF7E6] text-[#C68A3C]' },
+  new: { label: '新規', className: 'bg-[#EAF7EE] text-[#3B8C56]' },
 }
 
 /**
@@ -79,51 +79,54 @@ export default function DashboardActionList({ snapshot }) {
     <div>
       <div className="mb-3 flex items-center justify-between">
         <div>
-          <h2 className="text-sm font-bold text-gray-700">🎯 フォロー優先Top10</h2>
-          <p className="mt-0.5 text-xs text-gray-500">
+          <h2 className="text-sm font-bold tracking-wide text-gray-800">🎯 フォロー優先Top10</h2>
+          <p className="mt-0.5 text-xs leading-relaxed text-gray-500">
             停滞・発注ゼロ・新規の中から優先度の高い順に最大10件。上から順にアクションしてください。
           </p>
         </div>
         <Link
           to="/dealer/salons"
-          className="text-xs font-medium text-indigo-600 hover:underline"
+          className="text-xs font-medium text-violet-500 hover:text-violet-600 hover:underline"
         >
           サロン一覧 →
         </Link>
       </div>
 
       {items.length === 0 ? (
-        <div className="rounded-2xl border border-dashed border-gray-300 bg-white py-10 text-center text-sm text-gray-400">
+        <div className="rounded-2xl border border-dashed border-gray-200 bg-white py-10 text-center text-sm text-gray-400 shadow-[0_1px_3px_rgba(17,24,39,0.04)]">
           フォローが必要なサロンはありません
         </div>
       ) : (
-        <div className="overflow-auto rounded-2xl border border-gray-200 bg-white">
+        <div className="overflow-auto rounded-2xl border border-gray-100 bg-white shadow-[0_1px_3px_rgba(17,24,39,0.04)]">
           <table className="w-full text-sm">
             <thead>
-              <tr className="border-b border-gray-100 bg-gray-50 text-left text-xs text-gray-500">
-                <th className="w-10 px-3 py-2.5 text-center">#</th>
-                <th className="px-3 py-2.5">サロン名</th>
-                <th className="w-24 px-3 py-2.5">状態</th>
-                <th className="w-40 px-3 py-2.5">最終発注</th>
-                <th className="px-3 py-2.5">次アクション</th>
+              <tr className="border-b border-gray-100 bg-violet-50/40 text-left text-xs tracking-wide text-gray-500">
+                <th className="w-10 px-3 py-3 text-center font-semibold">#</th>
+                <th className="px-3 py-3 font-semibold">サロン名</th>
+                <th className="w-24 px-3 py-3 font-semibold">状態</th>
+                <th className="w-40 px-3 py-3 font-semibold">最終発注</th>
+                <th className="px-3 py-3 font-semibold">次アクション</th>
               </tr>
             </thead>
             <tbody>
               {items.map((s, i) => {
                 const meta = STATUS_META[s.status] || { label: s.status || '—', className: 'bg-gray-100 text-gray-700' }
                 return (
-                  <tr key={s.salonKey || `${s.name}-${i}`} className="border-b border-gray-50 hover:bg-gray-50">
-                    <td className="px-3 py-2.5 text-center text-xs text-gray-400">{i + 1}</td>
-                    <td className="px-3 py-2.5 font-medium text-gray-900">{s.name || '（名前なし）'}</td>
-                    <td className="px-3 py-2.5">
-                      <span className={`rounded px-2 py-0.5 text-[11px] font-medium ${meta.className}`}>
+                  <tr
+                    key={s.salonKey || `${s.name}-${i}`}
+                    className="border-b border-gray-50 transition-colors hover:bg-violet-50/50"
+                  >
+                    <td className="px-3 py-3 text-center text-xs text-gray-400">{i + 1}</td>
+                    <td className="px-3 py-3 font-medium text-gray-900">{s.name || '（名前なし）'}</td>
+                    <td className="px-3 py-3">
+                      <span className={`rounded-full px-2.5 py-0.5 text-[11px] font-medium ${meta.className}`}>
                         {meta.label}
                       </span>
                     </td>
-                    <td className="px-3 py-2.5 text-xs text-gray-600">
+                    <td className="px-3 py-3 text-xs text-gray-600">
                       <LastOrderCell lastOrderDate={s.lastOrderDate} daysSinceLast={s.daysSinceLast} />
                     </td>
-                    <td className="px-3 py-2.5 text-xs text-gray-700">{s.nextAction || '—'}</td>
+                    <td className="px-3 py-3 text-xs text-gray-700">{s.nextAction || '—'}</td>
                   </tr>
                 )
               })}
