@@ -304,6 +304,9 @@ export default function KickbackManage() {
   // testDealerCode: env > Firestore の優先順位で解決（SSoT は Firestore）
   const [firestoreTestDealerCode, setFirestoreTestDealerCode] = useState('')
   const TEST_DEALER_CODE = ENV_TEST_DEALER_CODE || firestoreTestDealerCode
+  // テスト送信時の BCC/CC 設定（送信確認ダイアログでの可視化用）
+  const [settlementTestBcc, setSettlementTestBcc] = useState('')
+  const [settlementTestCc, setSettlementTestCc] = useState('')
 
   // サロン紐付け
   const [salonLinks, setSalonLinks] = useState([])
@@ -385,12 +388,20 @@ export default function KickbackManage() {
               setKbSettings({ ...DEFAULT_KB_SETTINGS, ...kbData })
             }
           }
-          // SSoT の testDealerCode を Firestore から取得（env があれば env が優先）
+          // SSoT の testDealerCode / BCC / CC を Firestore から取得（env があれば env が優先）
           if (rtCompanyDoc.exists()) {
-            const v = rtCompanyDoc.data().testDealerCode
-            if (typeof v === 'string' && v.trim()) {
-              setFirestoreTestDealerCode(v.trim())
+            const rt = rtCompanyDoc.data()
+            if (typeof rt.testDealerCode === 'string' && rt.testDealerCode.trim()) {
+              setFirestoreTestDealerCode(rt.testDealerCode.trim())
             }
+            // BCC/CC は配列または単一文字列のいずれでも受け付ける
+            const joinList = (v) => {
+              if (!v) return ''
+              if (Array.isArray(v)) return v.filter(Boolean).join(', ')
+              return String(v).trim()
+            }
+            setSettlementTestBcc(joinList(rt.settlementTestBcc))
+            setSettlementTestCc(joinList(rt.settlementTestCc))
           }
         } catch (e) {
           console.warn('設定の読み込みスキップ:', e.message)
@@ -962,8 +973,18 @@ export default function KickbackManage() {
       'takayama1970817@gmail.com',
     )
     if (testEmail === null) return // キャンセル
+
+    // テスト送信時は Firestore 設定の BCC/CC が自動付与される（sendSettlementEmail 側で付与）
+    // 確認ダイアログには BCC/CC の有無を明示し、代理店に見える範囲を可視化する
+    const willUseTestExtras = stmt.isTest === true
+    const bccDisplay = willUseTestExtras && settlementTestBcc ? `\nBCC（非表示）: ${settlementTestBcc}` : ''
+    const ccDisplay = willUseTestExtras && settlementTestCc ? `\nCC（代理店にも見える）: ${settlementTestCc}` : ''
     const confirmed = confirm(
-      `【本番SES送信】\n対象: ${stmt.dealerCode} / ${stmt.month}\n宛先: ${testEmail || '(代理店登録メール)'}\n\n送信してよろしいですか？`,
+      `【本番SES送信】\n` +
+      `対象: ${stmt.dealerCode} / ${stmt.month}${stmt.isTest ? '（🧪 TEST SEND）' : ''}\n` +
+      `宛先: ${testEmail || '(代理店登録メール)'}` +
+      bccDisplay + ccDisplay +
+      `\n\n送信してよろしいですか？`,
     )
     if (!confirmed) return
 
@@ -981,7 +1002,13 @@ export default function KickbackManage() {
           `この messageId を控え、「pending解除」から status=sent で手動確定してください。`,
         )
       } else {
-        alert(`送信完了: ${res.data.toEmail}\nmessageId: ${res.data.sesMessageId || '-'}`)
+        const ccInfo = res.data.ccCount > 0 ? `\nCC件数: ${res.data.ccCount}` : ''
+        const bccInfo = res.data.bccCount > 0 ? `\nBCC件数: ${res.data.bccCount}（代理店には非表示）` : ''
+        alert(
+          `送信完了: ${res.data.toEmail}` +
+          ccInfo + bccInfo +
+          `\nmessageId: ${res.data.sesMessageId || '-'}`,
+        )
       }
       // ログを再取得
       const logSnap = await getDoc(doc(db, 'settlementEmailLogs', stmt.id))

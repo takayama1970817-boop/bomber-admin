@@ -51,7 +51,7 @@ const sendSettlementEmail = onCall(
     }
 
     // --- 入力 ---
-    const { kickbackId, testEmail } = request.data || {}
+    const { kickbackId, testEmail, cc: ccOverride, bcc: bccOverride } = request.data || {}
     if (!kickbackId || typeof kickbackId !== 'string') {
       throw new HttpsError('invalid-argument', 'kickbackId は必須です')
     }
@@ -99,6 +99,45 @@ const sendSettlementEmail = onCall(
       throw new HttpsError('failed-precondition', '宛先メールアドレスを決定できません')
     }
 
+    // --- CC/BCC の決定 ---
+    // 方針:
+    //   - テスト送信（isTestSend=true）のとき:
+    //       明示された request.cc / request.bcc を優先、
+    //       無ければ settings/rt_company.settlementTestCc / settlementTestBcc をフォールバック
+    //       基本は BCC（代理店に社内アドレスを見せない）
+    //   - 実データ送信（isTestSend=false）のとき:
+    //       request 明示のみ尊重し、settings からの自動付与は行わない
+    //       （不意の社内アドレス混入を防ぐため）
+    const normalizeEmails = (input) => {
+      if (!input) return []
+      const arr = Array.isArray(input) ? input : String(input).split(/[,;]+/)
+      return arr
+        .map((s) => String(s || '').trim())
+        .filter((s) => s && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s))
+    }
+    const rtSettingsDoc = await db.collection('settings').doc('rt_company').get()
+    const rtSettings = rtSettingsDoc.exists ? rtSettingsDoc.data() : {}
+
+    let ccList = normalizeEmails(ccOverride)
+    let bccList = normalizeEmails(bccOverride)
+    let ccSource = ccList.length > 0 ? 'request' : null
+    let bccSource = bccList.length > 0 ? 'request' : null
+
+    if (isTestSend) {
+      if (ccList.length === 0 && rtSettings.settlementTestCc) {
+        ccList = normalizeEmails(rtSettings.settlementTestCc)
+        if (ccList.length > 0) ccSource = 'settings'
+      }
+      if (bccList.length === 0 && rtSettings.settlementTestBcc) {
+        bccList = normalizeEmails(rtSettings.settlementTestBcc)
+        if (bccList.length > 0) bccSource = 'settings'
+      }
+    }
+
+    // To が CC/BCC に重複して入らないよう除外（二重送信を避ける）
+    ccList = ccList.filter((e) => e !== toEmail)
+    bccList = bccList.filter((e) => e !== toEmail && !ccList.includes(e))
+
     // --- 同月・同代理店で既に sent のログがあれば拒否（kickbacks の addDoc 由来の
     //     意味的重複をガードする。kickbacks の docId は自動採番のため、
     //     同じ dealerCode+month で別 ID の清算書が作られるケースに備える） ---
@@ -140,6 +179,11 @@ const sendSettlementEmail = onCall(
         }
         // status === 'failed' のみ再試行許可（pending で上書き）
       }
+      // 監査用: CC/BCC は件数とドメインのみ残す（完全アドレスは残さない）
+      const domainOf = (email) => {
+        const at = String(email).indexOf('@')
+        return at > 0 ? String(email).slice(at).toLowerCase() : ''
+      }
       tx.set(logRef, {
         kickbackId,
         dealerCode: dealerCode || '',
@@ -147,6 +191,12 @@ const sendSettlementEmail = onCall(
         month: month || '',
         status: 'pending',
         toEmail,
+        ccCount: ccList.length,
+        ccDomains: [...new Set(ccList.map(domainOf).filter(Boolean))],
+        ccSource: ccSource || null, // 'request' | 'settings' | null
+        bccCount: bccList.length,
+        bccDomains: [...new Set(bccList.map(domainOf).filter(Boolean))],
+        bccSource: bccSource || null,
         isTestSend, // 監査用: この送信がテスト送信扱いだったかどうか
         sentBy: request.auth.uid,
         sentByEmail: callerDoc.data().email || '',
@@ -220,13 +270,21 @@ const sendSettlementEmail = onCall(
 
     // MIME 構築（本日のスコープ: PDF 添付なし・テキストのみ）
     const boundary = `alt_${Date.now()}_${Math.random().toString(36).slice(2)}`
-    const headers = [
+    // MIME ヘッダ: Cc はヘッダに含めて受信者に可視化、BCC はヘッダに含めない
+    // （BCC は SES Destinations にだけ含めることで「見えない配送」になる）
+    const headerLines = [
       `From: =?UTF-8?B?${Buffer.from(senderName).toString('base64')}?= <${senderEmail}>`,
       `To: ${toEmail}`,
+    ]
+    if (ccList.length > 0) {
+      headerLines.push(`Cc: ${ccList.join(', ')}`)
+    }
+    headerLines.push(
       `Subject: =?UTF-8?B?${Buffer.from(subject).toString('base64')}?=`,
       'MIME-Version: 1.0',
       `Content-Type: multipart/alternative; boundary="${boundary}"`,
-    ].join('\r\n')
+    )
+    const headers = headerLines.join('\r\n')
 
     const textPart = [
       `--${boundary}`,
@@ -239,11 +297,14 @@ const sendSettlementEmail = onCall(
     const rawMessage = [headers, '', textPart, '', `--${boundary}--`].join('\r\n')
 
     // --- SES 送信 ---
+    // Destinations には To + Cc + Bcc を全て含める（SES は実際の配送先リストを
+    // Destinations から取る。BCC は MIME ヘッダに書かれていないため受信側では見えない）
+    const destinations = [toEmail, ...ccList, ...bccList]
     let sesMessageId
     try {
       const result = await sesClient.send(new SendRawEmailCommand({
         Source: `${senderName} <${senderEmail}>`,
-        Destinations: [toEmail],
+        Destinations: destinations,
         RawMessage: { Data: Buffer.from(rawMessage) },
       }))
       sesMessageId = result.MessageId || null
@@ -294,6 +355,8 @@ const sendSettlementEmail = onCall(
         warning: 'SES送信は完了しましたが、送信ログの status 更新に失敗しました。settlementEmailLogs を手動で sent に更新してください',
         kickbackId,
         toEmail,
+        ccCount: ccList.length,
+        bccCount: bccList.length,
         sesMessageId,
       }
     }
@@ -302,6 +365,8 @@ const sendSettlementEmail = onCall(
       success: true,
       kickbackId,
       toEmail,
+      ccCount: ccList.length,
+      bccCount: bccList.length,
       sesMessageId,
     }
   },
