@@ -303,8 +303,9 @@ export default function KickbackManage() {
   const [sendingIds, setSendingIds] = useState({})
 
   // testDealerCode: env > Firestore の優先順位で解決（SSoT は Firestore）
+  // 運用実績として値に前後空白が混入するケースが出たので必ず trim する
   const [firestoreTestDealerCode, setFirestoreTestDealerCode] = useState('')
-  const TEST_DEALER_CODE = ENV_TEST_DEALER_CODE || firestoreTestDealerCode
+  const TEST_DEALER_CODE = String(ENV_TEST_DEALER_CODE || firestoreTestDealerCode || '').trim()
   // テスト送信時の BCC/CC 設定（送信確認ダイアログでの可視化用）
   const [settlementTestBcc, setSettlementTestBcc] = useState('')
   const [settlementTestCc, setSettlementTestCc] = useState('')
@@ -824,39 +825,13 @@ export default function KickbackManage() {
       setCalcResult(null)
       setCalcSource(null)
 
-      // パスワード付きPDF生成 → メール添付で自動送信
-      try {
-        const stmtForPdf = {
-          ...calcResult,
-          dealerCode: code,
-          dealerName: selectedDealer?.companyName || code,
-          month,
-          companyInfo: companyInfo || null,
-          stampDataUrl: stampDataUrl || null,
-          bankInfo: selectedDealer?.bankInfo || null,
-          adjustments: adjustments.filter((a) => a.label && a.amount !== 0),
-          adjustmentTotal: adjustments.reduce((s, a) => s + (a.amount || 0), 0),
-          finalSettlement: (calcResult.dealerOrderTotal > 0 ? calcResult.netSettlement : calcResult.grandTotal) + adjustments.reduce((s, a) => s + (a.amount || 0), 0),
-        }
-        const { base64, fileName, password } = await generateKickbackPdfBase64(stmtForPdf)
-
-        const ccAddr = prompt('CC（自分で確認用、空欄可）:', '')
-        const notifyFn = httpsCallable(functions, 'notifyKickback')
-        const payload = {
-          dealerCode: code,
-          dealerName: selectedDealer?.companyName || code,
-          month,
-          grandTotal: calcResult.grandTotal || calcResult.totalKickback,
-          pdfBase64: base64,
-          pdfFileName: fileName,
-        }
-        if (ccAddr) payload.ccEmail = ccAddr
-        const result = await notifyFn(payload)
-        alert(`保存＆メール送信完了（${result.data.email}${ccAddr ? ` / CC: ${ccAddr}` : ''}）\nPDFパスワード: ${password}`)
-      } catch (emailErr) {
-        console.error('通知メール送信エラー:', emailErr)
-        alert('保存しました（メール送信に失敗: ' + emailErr.message + '）')
-      }
+      // 保存時の自動送信（notifyKickback / SES）は 2026-04-19 以降停止中。
+      // 送信は「保存済み清算書」カードの「📮 送信」ボタン（sendSettlementEmail / SendGrid）に一本化。
+      // 理由:
+      //   1. SES 設定は廃止予定で、毎回「SES設定が未設定です」エラーが出ていた
+      //   2. 二重送信防止・ログ・BCC を持つ sendSettlementEmail に送信経路を統一する
+      //   3. 自動送信は明示承認があるまで有効化しない
+      alert('保存しました。\n送信は「保存済み清算書」の「📮 送信」ボタンから行ってください。')
     } catch (e) {
       alert('保存に失敗しました: ' + e.message)
     }
@@ -916,7 +891,7 @@ export default function KickbackManage() {
   // 清算書の送信ログを取得（admin 限定・テスト代理店対象のみ）
   // 二重送信防止の状態表示に使うため、清算書ごとに1件だけ（docId=kickbackId）
   useEffect(() => {
-    if (!isAdmin || !selectedCode || selectedCode !== TEST_DEALER_CODE) {
+    if (!isAdmin || !selectedCode || String(selectedCode).trim() !== TEST_DEALER_CODE) {
       setEmailLogs({})
       return
     }
@@ -955,8 +930,8 @@ export default function KickbackManage() {
   // transaction + status で弾く（サーバー側が最終防衛線）
   const handleSesSend = async (stmt) => {
     if (!isAdmin) return
-    if (stmt.dealerCode !== TEST_DEALER_CODE) {
-      alert(`手動送信はテスト代理店（${TEST_DEALER_CODE || '未設定'}）のみ許可されています`)
+    if (String(stmt.dealerCode || '').trim() !== TEST_DEALER_CODE) {
+      alert(`手動送信はテスト代理店（${TEST_DEALER_CODE || '未設定'}）のみ許可されています（対象: ${stmt.dealerCode || '空'}）`)
       return
     }
     if (sendingIds[stmt.id]) return // 送信中クリック無効化
@@ -1713,7 +1688,25 @@ ${senderEmail}
                         >
                           🧪テスト
                         </button>
-                        {isAdmin && TEST_DEALER_CODE && stmt.dealerCode === TEST_DEALER_CODE && (() => {
+                        {isAdmin && (() => {
+                          // 判定を関数化。トリム後の完全一致で比較。
+                          const expected = String(TEST_DEALER_CODE || '').trim()
+                          const actual = String(stmt.dealerCode || '').trim()
+                          const codeMatches = expected !== '' && expected === actual
+
+                          if (!codeMatches) {
+                            // admin には「なぜボタンが出ないか」を常時可視化（権限UPしない範囲で）
+                            // 表示されない原因: TEST_DEALER_CODE 未設定 / 不一致 / dealerCode にゴミ
+                            return (
+                              <span
+                                className="rounded border border-dashed border-gray-300 bg-gray-50 px-2 py-1 text-[10px] text-gray-500"
+                                title={`送信ボタン非表示: TEST_DEALER_CODE="${expected || '(未設定)'}" vs stmt.dealerCode="${actual || '(空)'}"`}
+                              >
+                                ❓ 送信条件外（{expected ? `期待:${expected}` : 'testDealerCode未設定'} ≠ {actual || '空'}）
+                              </span>
+                            )
+                          }
+
                           const log = emailLogs[stmt.id]
                           const sending = !!sendingIds[stmt.id]
                           const isSent = log?.status === 'sent'
