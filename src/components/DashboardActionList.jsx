@@ -1,10 +1,40 @@
 import { Link } from 'react-router-dom'
 
-function fmtDate(ts) {
-  if (!ts) return '—'
+function toDate(ts) {
+  if (!ts) return null
   const d = typeof ts.toDate === 'function' ? ts.toDate() : new Date(ts)
-  if (Number.isNaN(d.getTime())) return '—'
+  return Number.isNaN(d.getTime()) ? null : d
+}
+
+function fmtYmd(d) {
   return `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')}`
+}
+
+function computeDaysAgo(d) {
+  if (!d) return null
+  const diffMs = Date.now() - d.getTime()
+  if (diffMs < 0) return 0
+  return Math.floor(diffMs / (24 * 60 * 60 * 1000))
+}
+
+/**
+ * 最終発注日セル。
+ * - 発注履歴あり: YYYY/MM/DD （N日前）
+ * - 発注履歴なし: —
+ * N日前は snapshot の daysSinceLast を優先、無ければ lastOrderDate から計算。
+ */
+function LastOrderCell({ lastOrderDate, daysSinceLast }) {
+  const d = toDate(lastOrderDate)
+  if (!d) return <span className="text-gray-400">—</span>
+  const days = daysSinceLast != null && daysSinceLast >= 0 ? daysSinceLast : computeDaysAgo(d)
+  return (
+    <span className="whitespace-nowrap">
+      {fmtYmd(d)}
+      {days != null && (
+        <span className="ml-1 text-gray-400">（{days}日前）</span>
+      )}
+    </span>
+  )
 }
 
 const STATUS_META = {
@@ -74,7 +104,7 @@ export default function DashboardActionList({ snapshot }) {
                 <th className="w-10 px-3 py-2.5 text-center">#</th>
                 <th className="px-3 py-2.5">サロン名</th>
                 <th className="w-24 px-3 py-2.5">状態</th>
-                <th className="w-28 px-3 py-2.5">最終発注</th>
+                <th className="w-40 px-3 py-2.5">最終発注</th>
                 <th className="px-3 py-2.5">次アクション</th>
               </tr>
             </thead>
@@ -90,7 +120,9 @@ export default function DashboardActionList({ snapshot }) {
                         {meta.label}
                       </span>
                     </td>
-                    <td className="px-3 py-2.5 text-xs text-gray-600">{fmtDate(s.lastOrderDate)}</td>
+                    <td className="px-3 py-2.5 text-xs text-gray-600">
+                      <LastOrderCell lastOrderDate={s.lastOrderDate} daysSinceLast={s.daysSinceLast} />
+                    </td>
                     <td className="px-3 py-2.5 text-xs text-gray-700">{s.nextAction || '—'}</td>
                   </tr>
                 )
