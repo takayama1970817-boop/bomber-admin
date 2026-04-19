@@ -13,9 +13,56 @@ export const CATEGORIES = [
   { key: 'lotion',      label: '化粧水' },
   { key: 'cleansing',   label: 'クレンジング' },
   { key: 'essence',     label: '美容液' },
+  { key: 'other',       label: 'その他' },
 ]
 
-export const products = [
+// Bカート「カテゴリ名」→ 内部 categoryKey の辞書（CSV取込時に使用）
+// 未マッチは 'other'
+export const CATEGORY_KEY_MAP = {
+  'エイジングケア': 'aging',
+  'エイジング': 'aging',
+  'エイジングケア・業務用': 'aging',
+  '保湿': 'moisture',
+  '高保湿': 'moisture',
+  '保湿・業務用': 'moisture',
+  '高保湿・業務用': 'moisture',
+  '化粧水': 'lotion',
+  '化粧水・業務用': 'lotion',
+  'ローション': 'lotion',
+  'クレンジング': 'cleansing',
+  '美容液': 'essence',
+  'エッセンス': 'essence',
+}
+
+// categoryKey → 画像未設定時のビジュアル代替グラデーション
+export const CATEGORY_GRADIENT_MAP = {
+  aging:     'from-indigo-600 to-purple-700',
+  moisture:  'from-emerald-600 to-teal-700',
+  lotion:    'from-amber-500 to-orange-600',
+  cleansing: 'from-rose-500 to-pink-700',
+  essence:   'from-yellow-500 to-amber-700',
+  other:     'from-slate-500 to-slate-700',
+}
+
+export function toCategoryKey(categoryName) {
+  if (!categoryName) return 'other'
+  return CATEGORY_KEY_MAP[categoryName.trim()] || 'other'
+}
+
+export function toSlug(code) {
+  if (!code) return ''
+  return String(code).trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
+}
+
+export function gradientFor(categoryKey) {
+  return CATEGORY_GRADIENT_MAP[categoryKey] || CATEGORY_GRADIENT_MAP.other
+}
+
+// CSV 取込で自動生成されるデータ（scripts/import-products-csv.mjs）
+// 生成ファイルが存在しない/空の場合は以下の staticProducts をフォールバックとして使用。
+import { generatedProducts } from './productsGenerated.js'
+
+const staticProducts = [
   {
     slug: 'bomber-cream',
     code: 'VA-BC-001',
@@ -138,6 +185,16 @@ export const products = [
   },
 ]
 
+// 実際に公開ページから参照されるデータ。
+// - CSV から生成した productsGenerated に 1 件以上あればそれを採用（Phase 2 の本流）
+// - 生成が空なら staticProducts にフォールバック（Phase 1 初期データ）
+export const products =
+  Array.isArray(generatedProducts) && generatedProducts.length > 0
+    ? generatedProducts
+    : staticProducts
+
 export function getProductBySlug(slug) {
   return products.find((p) => p.slug === slug) || null
 }
+
+export { staticProducts }

@@ -34,9 +34,9 @@ const markets = [
     flag: '🇮🇩',
     country: 'Indonesia',
     brand: 'VAVITTE',
-    status: '展開準備中',
-    statusTone: 'prep',
-    desc: 'インドネシア市場への展開を準備中。東南アジアのプロフェッショナルサロン向けに、新たな価値をお届けします。',
+    status: '1 Salon',
+    statusTone: 'boutique',
+    desc: '東南アジア展開の第一歩として、現地のプロフェッショナルサロンで VAVITTE を厳選取扱。信頼あるパートナーと共に、慎重に市場を広げています。',
   },
 ]
 
@@ -216,6 +216,8 @@ export default function HomePage() {
                     className={`text-[10px] font-bold tracking-wider px-2.5 py-1 rounded-full ${
                       m.statusTone === 'active'
                         ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                        : m.statusTone === 'boutique'
+                        ? 'bg-gradient-to-r from-amber-50 to-yellow-50 text-amber-800 border border-amber-300'
                         : 'bg-amber-50 text-amber-700 border border-amber-200'
                     }`}
                   >
