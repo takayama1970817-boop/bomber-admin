@@ -328,11 +328,15 @@ function aggregateForDealer({ dealer, dealerSalonsMeta, bcartMembers, bcartOrder
     let priority
     let daysSinceLast = null
 
+    // 優先度設計（行動優先度、高いほど Top10 の上位に表示）
+    //   stale30 > stale14 > new(first order) > new(just linked) > no-order(長期眠り)
+    //   no-order を最下位に置くことで、実際にフォローすべき既存顧客を前面に出す。
+    //   （no-order が大量にあっても、stale30/14/new がある分はそちらを優先表示）
     if (!lastOrder) {
       if (createdAt && createdAt >= thirtyDaysAgo) {
         status = 'new'
         nextAction = '紐付け直後 → 初回コール'
-        priority = 100
+        priority = 5000 // new-just-linked: 新規リードとして中位
         salonsNew.push({
           salonKey,
           name,
@@ -342,7 +346,7 @@ function aggregateForDealer({ dealer, dealerSalonsMeta, bcartMembers, bcartOrder
       } else {
         status = 'no-order'
         nextAction = '発注なし → ヒアリング'
-        priority = 10000
+        priority = 100 // 長期眠り: バックログ扱い（最下位）
         salonsStale30.push({ salonKey, name, lastOrderDate: null, _sortKey: 0 })
       }
     } else {
@@ -351,7 +355,7 @@ function aggregateForDealer({ dealer, dealerSalonsMeta, bcartMembers, bcartOrder
       if (isNewByOrder) {
         status = 'new'
         nextAction = '初回発注 → 御礼＋次回提案'
-        priority = 200
+        priority = 10000 // momentum 醸成のため中〜上位
         salonsNew.push({
           salonKey,
           name,
@@ -361,7 +365,7 @@ function aggregateForDealer({ dealer, dealerSalonsMeta, bcartMembers, bcartOrder
       } else if (lastOrder < thirtyDaysAgo) {
         status = 'stale30'
         nextAction = '30日以上未発注 → 電話フォロー'
-        priority = 5000 + daysSinceLast
+        priority = 50000 + daysSinceLast // 最優先: 失注しかけの既知客
         salonsStale30.push({
           salonKey,
           name,
@@ -371,7 +375,7 @@ function aggregateForDealer({ dealer, dealerSalonsMeta, bcartMembers, bcartOrder
       } else if (lastOrder < fourteenDaysAgo) {
         status = 'stale14'
         nextAction = '14日以上未発注 → リマインド'
-        priority = 1000 + daysSinceLast
+        priority = 20000 + daysSinceLast // 早期アラート
         salonsStale14.push({
           salonKey,
           name,
