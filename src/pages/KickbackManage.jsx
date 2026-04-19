@@ -21,7 +21,18 @@ import { downloadEml } from '../lib/generateEml.js'
 import { fetchOrdersByMonth, fetchOrderProductsBatch } from '../lib/bcartApi.js'
 
 // 手動SES送信を許可するテスト代理店コード（今日のスコープ: 1件のみ）
-const TEST_DEALER_CODE = import.meta.env.VITE_TEST_DEALER_CODE || ''
+//
+// Single Source of Truth: Firestore `settings/rt_company.testDealerCode`
+//   （seed-test-dealer.mjs が更新する。通常運用ではここだけを見る）
+//
+// 優先順位（フロント）:
+//   1. import.meta.env.VITE_TEST_DEALER_CODE … デバッグ/緊急オーバーライド
+//   2. Firestore settings/rt_company.testDealerCode … SSoT
+//
+// Functions 側 (functions/sendSettlementEmail.js) も同じ優先順位で判定するため、
+// 食い違いは env の上書きが同時に漏れた時のみ発生する。運用では env を
+// 基本使わず、seed-test-dealer.mjs で Firestore を更新する運用を推奨。
+const ENV_TEST_DEALER_CODE = import.meta.env.VITE_TEST_DEALER_CODE || ''
 
 function fmtYen(n) {
   if (n == null) return '—'
@@ -290,6 +301,10 @@ export default function KickbackManage() {
   const [emailLogs, setEmailLogs] = useState({})
   const [sendingIds, setSendingIds] = useState({})
 
+  // testDealerCode: env > Firestore の優先順位で解決（SSoT は Firestore）
+  const [firestoreTestDealerCode, setFirestoreTestDealerCode] = useState('')
+  const TEST_DEALER_CODE = ENV_TEST_DEALER_CODE || firestoreTestDealerCode
+
   // サロン紐付け
   const [salonLinks, setSalonLinks] = useState([])
   const [allCompanies, setAllCompanies] = useState([])
@@ -346,10 +361,11 @@ export default function KickbackManage() {
 
         // 設定を読み込み（失敗しても他の処理に影響させない）
         try {
-          const [stampDoc, companyDoc, kbDoc] = await Promise.all([
+          const [stampDoc, companyDoc, kbDoc, rtCompanyDoc] = await Promise.all([
             getDoc(doc(db, 'settings', 'companyStamp')),
             getDoc(doc(db, 'settings', 'company')),
             getDoc(doc(db, 'settings', 'kickback')),
+            getDoc(doc(db, 'settings', 'rt_company')),
           ])
           if (stampDoc.exists() && stampDoc.data().dataUrl) {
             setStampDataUrl(stampDoc.data().dataUrl)
@@ -367,6 +383,13 @@ export default function KickbackManage() {
             } else {
               // 旧形式（グループなし）
               setKbSettings({ ...DEFAULT_KB_SETTINGS, ...kbData })
+            }
+          }
+          // SSoT の testDealerCode を Firestore から取得（env があれば env が優先）
+          if (rtCompanyDoc.exists()) {
+            const v = rtCompanyDoc.data().testDealerCode
+            if (typeof v === 'string' && v.trim()) {
+              setFirestoreTestDealerCode(v.trim())
             }
           }
         } catch (e) {
@@ -1103,7 +1126,7 @@ export default function KickbackManage() {
           <option value="">代理店を選択...</option>
           {dealers.map((d) => (
             <option key={d.id} value={d.dealerCode}>
-              {d.dealerCode} — {d.companyName}
+              {d.isTest ? '🧪 [TEST] ' : ''}{d.dealerCode} — {d.companyName}
             </option>
           ))}
         </select>
@@ -1513,6 +1536,14 @@ export default function KickbackManage() {
                               : 'bg-green-100 text-green-700'
                           }`}>
                             {stmt.source === 'bcart-api' ? 'API' : 'CSV'}
+                          </span>
+                        )}
+                        {stmt.isTest && (
+                          <span
+                            className="ml-2 rounded border border-amber-400 bg-amber-50 px-1.5 py-0.5 text-[10px] font-bold text-amber-800"
+                            title="テストデータ（seed-test-kickback.mjs 由来、本番処理しないこと）"
+                          >
+                            🧪 TEST
                           </span>
                         )}
                       </div>

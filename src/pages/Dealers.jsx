@@ -699,8 +699,18 @@ export default function Dealers() {
             </thead>
             <tbody>
               {dealerAccounts.map((d) => (
-                <tr key={d.id} className="border-t border-gray-50 hover:bg-gray-50">
-                  <td className="px-4 py-2 font-mono font-bold text-indigo-600">{d.dealerCode}</td>
+                <tr key={d.id} className={`border-t border-gray-50 hover:bg-gray-50 ${d.isTest ? 'bg-amber-50/40' : ''}`}>
+                  <td className="px-4 py-2 font-mono font-bold text-indigo-600">
+                    {d.isTest && (
+                      <span
+                        className="mr-1 rounded border border-amber-400 bg-amber-50 px-1.5 py-0.5 text-[10px] font-bold text-amber-800"
+                        title="テスト代理店（seed-test-dealer.mjs 由来、本番処理しないこと）"
+                      >
+                        🧪 TEST
+                      </span>
+                    )}
+                    {d.dealerCode}
+                  </td>
                   <td className="px-4 py-2 font-medium text-gray-900">{d.companyName}</td>
                   <td className="px-4 py-2 text-xs text-gray-500">
                     {d.bankInfo

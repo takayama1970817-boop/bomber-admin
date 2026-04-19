@@ -13,8 +13,23 @@ const { onCall, HttpsError } = require('firebase-functions/v2/https')
 const { getFirestore, FieldValue } = require('firebase-admin/firestore')
 const { SESClient, SendRawEmailCommand } = require('@aws-sdk/client-ses')
 
-// 環境変数 or Firestore settings から「送信許可された代理店コード」を取得
-// 今日のスコープではテスト代理店1件のみに絞る
+// testDealerCode の優先順位（single source of truth は Firestore）
+//
+//   Single Source of Truth:
+//     Firestore `settings/rt_company.testDealerCode`
+//     → seed-test-dealer.mjs がここを更新する。通常運用ではこれだけを見る。
+//
+//   優先順位（Functions 側）:
+//     1. process.env.TEST_DEALER_CODE   … デバッグ/緊急オーバーライド用
+//     2. Firestore settings/rt_company.testDealerCode   … SSoT（通常はこちら）
+//
+//   env を 1 番優先にしている理由:
+//     - Firestore 障害時に env で暫定稼働できる
+//     - env が未設定なら確実に SSoT の Firestore 値を使うので二重管理は起きない
+//     - env と Firestore が食い違った場合は env が勝つ（明示的な意思表示として扱う）
+//
+//   フロント側 (src/pages/KickbackManage.jsx):
+//     同じ優先順位で VITE_TEST_DEALER_CODE → Firestore の順に参照する。
 async function getAllowedTestDealerCode(db) {
   const fromEnv = process.env.TEST_DEALER_CODE
   if (fromEnv) return String(fromEnv).trim()
