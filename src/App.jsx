@@ -18,6 +18,8 @@ import Dealers from './pages/Dealers.jsx'
 import DealerLogin from './pages/DealerLogin.jsx'
 import DealerLayout from './pages/DealerLayout.jsx'
 import DealerDashboard from './pages/DealerDashboard.jsx'
+import DealerOrders from './pages/DealerOrders.jsx'
+import DealerKickbacks from './pages/DealerKickbacks.jsx'
 import DealerSalons from './pages/DealerSalons.jsx'
 import DealerChat from './pages/DealerChat.jsx'
 import DealerDocuments from './pages/DealerDocuments.jsx'
@@ -129,7 +131,9 @@ export default function App() {
       >
         <Route index element={<DealerDashboard />} />
         <Route path="dashboard-exec" element={<DealerExecDashboard />} />
+        <Route path="orders" element={<DealerOrders />} />
         <Route path="salons" element={<DealerSalons />} />
+        <Route path="kickbacks" element={<DealerKickbacks />} />
         <Route path="chat" element={<DealerChat />} />
         <Route path="documents" element={<DealerDocuments />} />
       </Route>

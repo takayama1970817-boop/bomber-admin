@@ -35,7 +35,9 @@ export default function DealerLayout() {
     <>
       <Item to="/dealer" label="ダッシュボード" onClick={closeMenu} end />
       <Item to="/dealer/dashboard-exec" label="経営ダッシュボード" onClick={closeMenu} />
+      <Item to="/dealer/orders" label="注文一覧" onClick={closeMenu} />
       <Item to="/dealer/salons" label="所属サロン管理" onClick={closeMenu} />
+      <Item to="/dealer/kickbacks" label="キックバック" onClick={closeMenu} />
       <Item to="/dealer/chat" label="チャット" onClick={closeMenu} />
       <Item to="/dealer/documents" label="資料ダウンロード" onClick={closeMenu} />
     </>
