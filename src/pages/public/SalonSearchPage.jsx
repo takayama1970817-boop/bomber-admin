@@ -1,82 +1,6 @@
-import { useState, useEffect } from 'react'
-import { collection, getDocs, query, where } from 'firebase/firestore'
-import { db } from '../../lib/firebase'
 import { Link } from 'react-router-dom'
 
-const PREFECTURES = [
-  '北海道',
-  '青森県','岩手県','宮城県','秋田県','山形県','福島県',
-  '茨城県','栃木県','群馬県','埼玉県','千葉県','東京都','神奈川県',
-  '新潟県','富山県','石川県','福井県','山梨県','長野県',
-  '岐阜県','静岡県','愛知県','三重県',
-  '滋賀県','京都府','大阪府','兵庫県','奈良県','和歌山県',
-  '鳥取県','島根県','岡山県','広島県','山口県',
-  '徳島県','香川県','愛媛県','高知県',
-  '福岡県','佐賀県','長崎県','熊本県','大分県','宮崎県','鹿児島県','沖縄県',
-]
-
 export default function SalonSearchPage() {
-  const [salons, setSalons] = useState([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState(null)
-  const [prefFilter, setPrefFilter] = useState('')
-
-  useEffect(() => {
-    async function fetchSalons() {
-      try {
-        // dealerSalons から own 以外を取得
-        const salonsRef = collection(db, 'dealerSalons')
-        const q = query(salonsRef, where('type', '!=', 'own'))
-        const snap = await getDocs(q)
-        const list = snap.docs.map((d) => ({ id: d.id, ...d.data() }))
-
-        // allowedEmails からサロンロールも取得して補完
-        try {
-          const emailsRef = collection(db, 'allowedEmails')
-          const eq = query(emailsRef, where('role', '==', 'salon'))
-          const emailSnap = await getDocs(eq)
-          const emailSalons = emailSnap.docs.map((d) => ({
-            id: d.id,
-            ...d.data(),
-          }))
-
-          // 重複しないサロン名を追加
-          const existingNames = new Set(list.map((s) => s.salonName || s.name))
-          emailSalons.forEach((es) => {
-            const name = es.salonName || es.name
-            if (name && !existingNames.has(name)) {
-              list.push({
-                id: es.id,
-                name: name,
-                area: es.area || es.prefecture || '',
-                address: es.address || '',
-              })
-              existingNames.add(name)
-            }
-          })
-        } catch {
-          // allowedEmails の読み取りに失敗しても続行
-        }
-
-        setSalons(list)
-      } catch (err) {
-        console.error('サロン情報の取得に失敗:', err)
-        setError('サロン情報を準備中です。しばらくお待ちください。')
-      } finally {
-        setLoading(false)
-      }
-    }
-
-    fetchSalons()
-  }, [])
-
-  const displaySalons = prefFilter
-    ? salons.filter((s) => {
-        const area = s.area || s.prefecture || s.address || ''
-        return area.includes(prefFilter)
-      })
-    : salons
-
   return (
     <>
       {/* ヘッダー */}
@@ -94,114 +18,60 @@ export default function SalonSearchPage() {
         </div>
       </section>
 
-      {/* 検索・一覧 */}
-      <section className="py-16 sm:py-24 bg-slate-50 min-h-[50vh]">
-        <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8">
-          {/* フィルター */}
-          <div className="mb-10 flex flex-col sm:flex-row items-start sm:items-center gap-4">
-            <label className="text-sm font-semibold text-slate-700">
-              都道府県で絞り込み
-            </label>
-            <select
-              value={prefFilter}
-              onChange={(e) => setPrefFilter(e.target.value)}
-              className="rounded-lg border border-slate-300 bg-white px-4 py-2.5 text-sm text-slate-700 shadow-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+      {/* Coming Soon */}
+      <section className="py-24 sm:py-32 bg-slate-50 min-h-[60vh] flex items-center">
+        <div className="max-w-2xl mx-auto px-4 sm:px-6 lg:px-8 text-center">
+          <div className="inline-flex items-center justify-center w-20 h-20 rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 mb-8 shadow-lg">
+            <svg
+              className="w-10 h-10 text-white"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+              strokeWidth={1.5}
             >
-              <option value="">すべて表示</option>
-              {PREFECTURES.map((p) => (
-                <option key={p} value={p}>
-                  {p}
-                </option>
-              ))}
-            </select>
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M15 10.5a3 3 0 11-6 0 3 3 0 016 0z"
+              />
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M19.5 10.5c0 7.142-7.5 11.25-7.5 11.25S4.5 17.642 4.5 10.5a7.5 7.5 0 1115 0z"
+              />
+            </svg>
           </div>
 
-          {/* 読み込み中 */}
-          {loading && (
-            <div className="text-center py-20">
-              <div className="inline-block w-8 h-8 border-4 border-indigo-200 border-t-indigo-600 rounded-full animate-spin" />
-              <p className="mt-4 text-sm text-slate-500">サロン情報を読み込んでいます...</p>
-            </div>
-          )}
-
-          {/* エラー */}
-          {error && !loading && (
-            <div className="text-center py-20">
-              <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-amber-50 mb-4">
-                <svg className="w-8 h-8 text-amber-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" />
-                </svg>
-              </div>
-              <p className="text-slate-600 text-sm">{error}</p>
-              <p className="text-slate-400 text-xs mt-2">
-                お急ぎの場合は
-                <Link to="/partner" className="text-indigo-600 hover:underline ml-1">
-                  お問い合わせ
-                </Link>
-                よりご連絡ください。
-              </p>
-            </div>
-          )}
-
-          {/* サロン一覧 */}
-          {!loading && !error && (
-            <>
-              {displaySalons.length === 0 ? (
-                <div className="text-center py-20">
-                  <p className="text-slate-500 text-sm">
-                    {prefFilter
-                      ? `${prefFilter}に該当するサロンが見つかりませんでした`
-                      : '現在サロン情報を準備中です'}
-                  </p>
-                </div>
-              ) : (
-                <>
-                  <p className="text-xs text-slate-400 mb-4">
-                    {displaySalons.length} 件のサロンが見つかりました
-                  </p>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                    {displaySalons.map((s) => (
-                      <div
-                        key={s.id}
-                        className="bg-white rounded-xl p-5 shadow-sm hover:shadow-md transition-shadow border border-slate-100"
-                      >
-                        <h3 className="text-base font-bold text-slate-900 mb-1">
-                          {s.salonName || s.name || '（サロン名未設定）'}
-                        </h3>
-                        {(s.area || s.prefecture || s.address) && (
-                          <p className="text-xs text-slate-500">
-                            {s.area || s.prefecture}
-                            {s.address ? ` ${s.address}` : ''}
-                          </p>
-                        )}
-                        <span className="inline-block mt-3 text-[10px] font-bold tracking-wider text-indigo-600 bg-indigo-50 rounded px-2 py-0.5">
-                          VAVITTE取扱店
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                </>
-              )}
-            </>
-          )}
-        </div>
-      </section>
-
-      {/* CTA */}
-      <section className="py-16 bg-white">
-        <div className="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8 text-center">
-          <h2 className="text-xl sm:text-2xl font-bold text-slate-900 mb-4">
-            サロンでVAVITTEの導入をご検討中の方へ
-          </h2>
-          <p className="text-slate-600 text-sm mb-6">
-            導入に関するご相談や資料請求を承っています。
+          <p className="text-amber-600 text-xs tracking-[0.3em] font-semibold mb-4">
+            COMING SOON
           </p>
-          <Link
-            to="/partner"
-            className="inline-flex items-center justify-center px-8 py-3 rounded-full bg-indigo-700 text-white font-semibold text-sm hover:bg-indigo-800 transition-colors shadow-lg"
-          >
-            サロン導入のご相談
-          </Link>
+
+          <h2 className="text-2xl sm:text-3xl font-bold text-slate-900 mb-6">
+            サロン検索機能は準備中です
+          </h2>
+
+          <p className="text-slate-600 text-sm sm:text-base leading-relaxed mb-10">
+            現在、全国のVAVITTE製品取扱サロンを
+            <br className="hidden sm:block" />
+            より使いやすく検索いただけるよう、新しい検索機能を開発中です。
+            <br className="hidden sm:block" />
+            公開までいましばらくお待ちください。
+          </p>
+
+          <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
+            <Link
+              to="/products"
+              className="inline-flex items-center justify-center px-8 py-3 rounded-full bg-indigo-700 text-white font-semibold text-sm hover:bg-indigo-800 transition-colors shadow-lg"
+            >
+              商品を見る
+            </Link>
+            <Link
+              to="/"
+              className="inline-flex items-center justify-center px-8 py-3 rounded-full border border-slate-300 text-slate-700 font-semibold text-sm hover:border-indigo-300 hover:text-indigo-700 transition-colors"
+            >
+              ホームへ戻る
+            </Link>
+          </div>
         </div>
       </section>
     </>

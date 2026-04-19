@@ -4,7 +4,6 @@ import { Link, Outlet, useLocation } from 'react-router-dom'
 const navLinks = [
   { to: '/products', label: '商品紹介' },
   { to: '/salon-search', label: 'サロン検索' },
-  { to: '/partner', label: '代理店募集' },
   { to: '/login', label: 'ログイン' },
 ]
 
@@ -110,7 +109,7 @@ export default function PublicLayout() {
       {/* ── フッター ── */}
       <footer className="bg-slate-900 text-slate-300">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-8">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-8">
             {/* ブランド */}
             <div>
               <p className="text-white font-bold tracking-widest text-lg mb-2">
@@ -143,23 +142,6 @@ export default function PublicLayout() {
               </ul>
             </div>
 
-            {/* パートナー */}
-            <div>
-              <p className="text-white text-sm font-semibold mb-3">パートナー</p>
-              <ul className="space-y-2 text-sm">
-                <li>
-                  <Link to="/partner" className="hover:text-white transition-colors">
-                    代理店募集
-                  </Link>
-                </li>
-                <li>
-                  <Link to="/partner" className="hover:text-white transition-colors">
-                    サロン導入
-                  </Link>
-                </li>
-              </ul>
-            </div>
-
             {/* 会社情報 */}
             <div>
               <p className="text-white text-sm font-semibold mb-3">運営会社</p>
@@ -174,9 +156,6 @@ export default function PublicLayout() {
           <div className="mt-10 pt-6 border-t border-slate-700 flex flex-col sm:flex-row items-center justify-between gap-4 text-xs text-slate-500">
             <p>&copy; {new Date().getFullYear()} ロイヤルトラスト株式会社 All rights reserved.</p>
             <div className="flex gap-4">
-              <Link to="/partner" className="hover:text-slate-300 transition-colors">
-                お問い合わせ
-              </Link>
               <Link to="/login" className="hover:text-slate-300 transition-colors">
                 管理者ログイン
               </Link>

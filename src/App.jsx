@@ -56,8 +56,8 @@ import { CompanyProvider } from './contexts/CompanyContext.jsx'
 import PublicLayout from './components/PublicLayout.jsx'
 import HomePage from './pages/public/HomePage.jsx'
 import ProductsPage from './pages/public/ProductsPage.jsx'
+import ProductDetailPage from './pages/public/ProductDetailPage.jsx'
 import SalonSearchPage from './pages/public/SalonSearchPage.jsx'
-import PartnerPage from './pages/public/PartnerPage.jsx'
 import NewsletterSubscribe from './pages/public/NewsletterSubscribe.jsx'
 import NewsletterUnsubscribe from './pages/public/NewsletterUnsubscribe.jsx'
 
@@ -82,8 +82,8 @@ export default function App() {
       <Route element={<PublicLayout />}>
         <Route path="/" element={<HomePage />} />
         <Route path="/products" element={<ProductsPage />} />
+        <Route path="/products/:slug" element={<ProductDetailPage />} />
         <Route path="/salon-search" element={<SalonSearchPage />} />
-        <Route path="/partner" element={<PartnerPage />} />
         <Route path="/newsletter/subscribe" element={<NewsletterSubscribe />} />
         <Route path="/newsletter/unsubscribe" element={<NewsletterUnsubscribe />} />
       </Route>
