@@ -410,6 +410,22 @@ async function main() {
           `(dealerSalons ${sourceBreakdown.dealerSalonsCount} + orders由来 ${sourceBreakdown.ordersDerivedCount}) / ` +
           `見込KB ¥${snapshot.kickbackEstimate.toLocaleString()}${kbHint}`,
       )
+      // フォロー優先Top10 の確認ログ（常時出力）
+      const top = snapshot.followPriorityTop10 || []
+      console.log(`     followPriorityTop10: ${top.length}件`)
+      top.slice(0, 3).forEach((s, i) => {
+        console.log(`       ${i + 1}. ${s.name || '(名前なし)'} / ${s.status} / ${s.nextAction}`)
+      })
+      // VERBOSE=true のとき Top10 全件を JSON で出す（DRY_RUN 時の検証用）
+      if (process.env.VERBOSE === 'true' && top.length > 0) {
+        const jsonReady = top.map((s) => ({
+          ...s,
+          lastOrderDate: s.lastOrderDate?.toDate?.().toISOString() || null,
+          firstOrderDate: s.firstOrderDate?.toDate?.().toISOString() || null,
+        }))
+        console.log('     followPriorityTop10 (full JSON):')
+        console.log(JSON.stringify(jsonReady, null, 2).replace(/^/gm, '     '))
+      }
     } catch (e) {
       errors.push({ dealerCode: dealer.dealerCode, message: e.message })
       console.error(`  ❌ ${dealer.dealerCode}: ${e.message}`)
