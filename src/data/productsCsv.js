@@ -101,6 +101,10 @@ function toNumberOrNull(v) {
  * @param {string} csvText
  * @param {{ includeUnpublished?: boolean }} options
  * @returns {{ products: Array, skipped: Array, errors: Array }}
+ *
+ * 失敗条件（errors 非空 → products は空配列で返す）:
+ *   - 必須列の欠落
+ *   - slug の重複（code 衝突または正規化後の衝突）
  */
 export function parseProductsCsv(csvText, options = {}) {
   const { includeUnpublished = false } = options
@@ -153,6 +157,9 @@ export function parseProductsCsv(csvText, options = {}) {
     const slugRaw = String(get('slug') || '').trim()
     const slug = slugRaw ? toSlug(slugRaw) : toSlug(code)
 
+    // price は Bカート側の卸価格のため公開出力には含めない（方針: 公開用項目のみ）。
+    // 将来、小売価格を公開する場合は別カラムを追加する。
+
     products.push({
       slug,
       code,
@@ -161,7 +168,6 @@ export function parseProductsCsv(csvText, options = {}) {
       categoryKey,
       badge: String(get('badge') || '').trim() || null,
       unit: String(get('unit') || '').trim() || null,
-      price: toNumberOrNull(get('price')),
       tagline: String(get('tagline') || '').trim() || null,
       shortDesc: String(get('short_desc') || '').trim(),
       description: String(get('description') || '').trim(),
@@ -171,13 +177,40 @@ export function parseProductsCsv(csvText, options = {}) {
       gradient: gradientFor(categoryKey),
       displayOrder: toNumberOrNull(get('display_order')) ?? 9999,
       isPublic: pub,
+      _sourceLine: r + 1,
     })
   }
 
-  // 表示順でソート
-  products.sort((a, b) => a.displayOrder - b.displayOrder)
+  // --- slug 一意性検証 ---
+  const slugOwner = new Map()
+  const slugConflicts = []
+  for (const p of products) {
+    const prev = slugOwner.get(p.slug)
+    if (prev) {
+      slugConflicts.push({ slug: p.slug, codes: [prev.code, p.code], lines: [prev._sourceLine, p._sourceLine] })
+    } else {
+      slugOwner.set(p.slug, p)
+    }
+  }
+  if (slugConflicts.length > 0) {
+    slugConflicts.forEach((c) => {
+      errors.push(
+        `slug 重複: "${c.slug}" が code=${c.codes.join(' / ')} で衝突 (行 ${c.lines.join(', ')})`,
+      )
+    })
+    return { products: [], skipped, errors }
+  }
 
-  return { products, skipped, errors: [] }
+  // --- 安定ソート: displayOrder asc → code asc ---
+  products.sort((a, b) => {
+    if (a.displayOrder !== b.displayOrder) return a.displayOrder - b.displayOrder
+    return a.code.localeCompare(b.code)
+  })
+
+  // 取込完了後、内部用 _sourceLine を剥がす
+  const cleaned = products.map(({ _sourceLine, ...rest }) => rest)
+
+  return { products: cleaned, skipped, errors: [] }
 }
 
 // 単体テスト用エクスポート

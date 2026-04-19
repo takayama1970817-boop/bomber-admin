@@ -51,6 +51,7 @@ const yearArg = args.find((a) => a.startsWith('--year='))
 const syncAll = args.includes('--all')
 const skipProducts = args.includes('--skip-products')
 const productsMasterOnly = args.includes('--products-master')
+const dryRun = args.includes('--dry-run')
 const TARGET_YEAR = yearArg ? parseInt(yearArg.split('=')[1]) : 2026
 
 // === レート制限対応 fetch ===
@@ -153,6 +154,8 @@ function transformBcartProduct(raw) {
     String(raw.image_url ?? raw.image1 ?? raw.main_image ?? raw.thumbnail ?? '').trim() ||
     null
 
+  // price は Bカート側の卸価格のため Firestore 公開コレクションに保存しない
+  // （方針: 公開用項目のみ保存する）
   return {
     slug,
     code,
@@ -161,7 +164,6 @@ function transformBcartProduct(raw) {
     categoryKey,
     badge: String(raw.badge ?? '').trim() || null,
     unit: String(raw.unit ?? raw.capacity ?? '').trim() || null,
-    price: toNum(raw.price ?? raw.selling_price),
     tagline: String(raw.tagline ?? raw.catchphrase ?? '').trim() || null,
     shortDesc,
     description,
@@ -175,8 +177,16 @@ function transformBcartProduct(raw) {
 }
 
 // === 商品マスタのみ同期 ===
+// 方針:
+//  - 検証を全件完了させてから Firestore 書き込みへ進む（途中失敗で既存公開データを壊さない）
+//  - slug 一意性を担保（衝突があれば書き込み前に中止）
+//  - 公開項目のみ保存（price などは除外済み）
+//  - --dry-run: Firestore 書き込みと生成ファイル出力を行わず計画だけ表示
+//  - 既存 publicProducts にあって今回取得に無い / 非公開化された商品は isPublic=false に降格
 async function syncProductsMaster() {
-  console.log('=== Bカート商品マスタ → Firestore publicProducts 同期 ===\n')
+  console.log('=== Bカート商品マスタ → Firestore publicProducts 同期 ===')
+  if (dryRun) console.log('*** DRY-RUN モード: 書き込み・生成ファイル更新は行いません ***')
+  console.log('')
 
   // 0. Firebase認証
   console.log('0. Firebase認証中...')
@@ -185,75 +195,119 @@ async function syncProductsMaster() {
 
   // 1. Bカートから全商品取得
   console.log('1. 商品データ取得中...')
-  const products = []
+  const rawProducts = []
   let offset = 0
   while (true) {
     const data = await bcartFetch('products', { limit: PAGE_SIZE, offset })
     const key = Object.keys(data).find((k) => Array.isArray(data[k])) || 'products'
     const items = data[key]
     if (!items || items.length === 0) break
-    products.push(...items)
+    rawProducts.push(...items)
     const total = data.meta?.total || '?'
-    console.log(`   offset=${offset}: 累計${products.length}件 (全${total}件中)`)
+    console.log(`   offset=${offset}: 累計${rawProducts.length}件 (全${total}件中)`)
     if (items.length < PAGE_SIZE) break
     offset += PAGE_SIZE
   }
-  console.log(`   → 商品: ${products.length}件\n`)
+  console.log(`   → 商品: ${rawProducts.length}件\n`)
+
+  if (rawProducts.length === 0) {
+    console.error('  Bカートから商品を1件も取得できませんでした。既存 publicProducts は保護のため触りません。')
+    process.exit(2)
+  }
 
   // 2. shape 変換 + フィルタ
   console.log('2. 変換中...')
   const transformed = []
   const skipped = []
-  for (const raw of products) {
+  for (const raw of rawProducts) {
     const item = transformBcartProduct(raw)
     if (!item) { skipped.push({ reason: 'code/name 欠落', raw }); continue }
     if (!item.isPublic) { skipped.push({ reason: '非公開', code: item.code }); continue }
     transformed.push(item)
   }
-  transformed.sort((a, b) => a.displayOrder - b.displayOrder)
-  console.log(`   取込対象: ${transformed.length}件 / スキップ: ${skipped.length}件\n`)
+  // 安定ソート: displayOrder asc → code asc
+  transformed.sort((a, b) => {
+    if (a.displayOrder !== b.displayOrder) return a.displayOrder - b.displayOrder
+    return a.code.localeCompare(b.code)
+  })
+  console.log(`   取込候補: ${transformed.length}件 / スキップ: ${skipped.length}件\n`)
 
-  // 3. Firestore publicProducts に書き込み（docId = code）
-  console.log('3. Firestore publicProducts 書き込み中...')
-  let batch = writeBatch(db)
-  let batchCount = 0
+  // 3. 事前検証: slug 一意性（衝突があれば一切書き込まずに中止）
+  console.log('3. 検証中（slug一意性）...')
+  const slugOwner = new Map()
+  const slugConflicts = []
   for (const p of transformed) {
-    const ref = doc(db, 'publicProducts', p.code)
-    batch.set(ref, {
-      ...p,
-      syncedAt: serverTimestamp(),
-    })
-    batchCount++
-    if (batchCount >= 450) {
-      await batch.commit()
-      batch = writeBatch(db)
-      batchCount = 0
-    }
+    const prev = slugOwner.get(p.slug)
+    if (prev) slugConflicts.push({ slug: p.slug, codes: [prev.code, p.code] })
+    else slugOwner.set(p.slug, p)
   }
-  if (batchCount > 0) await batch.commit()
-  console.log(`   → ${transformed.length}件書き込み完了\n`)
+  if (slugConflicts.length > 0) {
+    console.error('   ❌ slug 衝突を検出しました。同期を中止します（既存公開データは保護）:')
+    slugConflicts.forEach((c) =>
+      console.error(`     - slug="${c.slug}" が code=${c.codes.join(' / ')} で衝突`),
+    )
+    process.exit(3)
+  }
+  console.log(`   OK（${transformed.length}件すべて一意）\n`)
 
-  // 4. src/data/productsGenerated.js を再生成（ビルド時フォールバック）
-  const outPath = resolve(__dirname, '..', 'src', 'data', 'productsGenerated.js')
-  const header = `// ⚠️ 自動生成ファイル — scripts/bcart-sync.mjs --products-master で上書きされます
+  // 4. 既存 publicProducts との差分算出（stale = 今回無い / 非公開化）
+  console.log('4. 既存 publicProducts との差分計算中...')
+  const existingSnap = await getDocs(collection(db, 'publicProducts'))
+  const newCodeSet = new Set(transformed.map((p) => p.code))
+  const staleCodes = []
+  existingSnap.docs.forEach((d) => {
+    if (!newCodeSet.has(d.id)) {
+      const data = d.data()
+      // 既に isPublic=false なら再降格不要
+      if (data?.isPublic !== false) staleCodes.push(d.id)
+    }
+  })
+  console.log(`   既存: ${existingSnap.size}件 / 新規または更新: ${transformed.length}件 / 非公開化: ${staleCodes.length}件\n`)
+
+  // 5. 書き込み（dry-run 時はスキップ）
+  if (dryRun) {
+    console.log('5. DRY-RUN: Firestore 書き込みと静的ファイル生成をスキップ\n')
+  } else {
+    console.log('5. Firestore publicProducts 書き込み中...')
+    let batch = writeBatch(db)
+    let batchCount = 0
+    // 公開対象
+    for (const p of transformed) {
+      const ref = doc(db, 'publicProducts', p.code)
+      batch.set(ref, { ...p, syncedAt: serverTimestamp() })
+      batchCount++
+      if (batchCount >= 450) { await batch.commit(); batch = writeBatch(db); batchCount = 0 }
+    }
+    // 非公開化（soft delete）
+    for (const code of staleCodes) {
+      const ref = doc(db, 'publicProducts', code)
+      batch.set(ref, { isPublic: false, syncedAt: serverTimestamp() }, { merge: true })
+      batchCount++
+      if (batchCount >= 450) { await batch.commit(); batch = writeBatch(db); batchCount = 0 }
+    }
+    if (batchCount > 0) await batch.commit()
+    console.log(`   → 公開: ${transformed.length}件 / 非公開化: ${staleCodes.length}件\n`)
+
+    // 6. src/data/productsGenerated.js を再生成（ビルド時フォールバック）
+    const outPath = resolve(__dirname, '..', 'src', 'data', 'productsGenerated.js')
+    const header = `// ⚠️ 自動生成ファイル — scripts/bcart-sync.mjs --products-master で上書きされます
 // 手動編集しないでください（カテゴリ辞書の拡張は src/data/products.js を編集）
 
 `
-  const body = `export const generatedProducts = ${JSON.stringify(transformed, null, 2)}\n\nexport const generatedAt = ${JSON.stringify(new Date().toISOString())}\n`
-  writeFileSync(outPath, header + body, 'utf-8')
-  console.log(`4. 静的フォールバック更新: ${outPath}\n`)
+    const body = `export const generatedProducts = ${JSON.stringify(transformed, null, 2)}\n\nexport const generatedAt = ${JSON.stringify(new Date().toISOString())}\n`
+    writeFileSync(outPath, header + body, 'utf-8')
+    console.log(`6. 静的フォールバック更新: ${outPath}\n`)
+  }
 
   console.log('========================================')
-  console.log('  商品マスタ同期 完了')
+  console.log(`  商品マスタ同期 ${dryRun ? 'DRY-RUN' : '完了'}`)
   console.log('========================================')
-  console.log(`  取得:     ${products.length}件`)
-  console.log(`  取込:     ${transformed.length}件`)
-  console.log(`  スキップ: ${skipped.length}件`)
+  console.log(`  取得:       ${rawProducts.length}件`)
+  console.log(`  公開対象:   ${transformed.length}件`)
+  console.log(`  非公開化:   ${staleCodes.length}件`)
+  console.log(`  スキップ:   ${skipped.length}件`)
   if (skipped.length > 0) {
-    const reasons = skipped.reduce((acc, s) => {
-      acc[s.reason] = (acc[s.reason] || 0) + 1
-      return acc
-    }, {})
+    const reasons = skipped.reduce((acc, s) => { acc[s.reason] = (acc[s.reason] || 0) + 1; return acc }, {})
     Object.entries(reasons).forEach(([r, c]) => console.log(`    - ${r}: ${c}件`))
   }
   console.log('')

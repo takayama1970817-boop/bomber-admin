@@ -23,6 +23,7 @@ export function usePublicProducts() {
 
     async function load() {
       try {
+        // displayOrder で orderBy。同値の安定性は client 側で code をタイブレーカに。
         const q = query(collection(db, 'publicProducts'), orderBy('displayOrder', 'asc'))
         const snap = await getDocs(q)
         if (cancelled) return
@@ -35,6 +36,18 @@ export function usePublicProducts() {
         const list = snap.docs
           .map((d) => ({ id: d.id, ...d.data() }))
           .filter((p) => p.isPublic !== false)
+          .sort((a, b) => {
+            const ao = a.displayOrder ?? 9999
+            const bo = b.displayOrder ?? 9999
+            if (ao !== bo) return ao - bo
+            return String(a.code || '').localeCompare(String(b.code || ''))
+          })
+        if (list.length === 0) {
+          // 全件 非公開 → フォールバック
+          setSource('static')
+          setLoading(false)
+          return
+        }
         setProducts(list)
         setSource('firestore')
       } catch (err) {
