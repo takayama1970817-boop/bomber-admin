@@ -22,6 +22,10 @@ exports.nlTrack = nlTrack
 const { notifyKickback } = require('./notifyKickback')
 exports.notifyKickback = notifyKickback
 
+// 清算書メール 手動送信（admin限定・二重送信防止ログ付き）
+const { sendSettlementEmail } = require('./sendSettlementEmail')
+exports.sendSettlementEmail = sendSettlementEmail
+
 // Telnyx FAX送信
 const { sendFax, telnyxWebhook } = require('./sendFax')
 exports.sendFax = sendFax

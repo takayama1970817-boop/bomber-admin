@@ -14,10 +14,14 @@ import {
 } from 'firebase/firestore'
 import { httpsCallable } from 'firebase/functions'
 import { db, functions } from '../lib/firebase.js'
+import { useAuth } from '../contexts/AuthContext.jsx'
 import { generateKickbackPdfBase64 } from '../lib/generateKickbackPdf.js'
 import { generateKickbackPdf } from '../lib/generateKickbackPdf.js'
 import { downloadEml } from '../lib/generateEml.js'
 import { fetchOrdersByMonth, fetchOrderProductsBatch } from '../lib/bcartApi.js'
+
+// 手動SES送信を許可するテスト代理店コード（今日のスコープ: 1件のみ）
+const TEST_DEALER_CODE = import.meta.env.VITE_TEST_DEALER_CODE || ''
 
 function fmtYen(n) {
   if (n == null) return '—'
@@ -275,11 +279,16 @@ function parseCsvText(text) {
 export default function KickbackManage() {
   const [searchParams] = useSearchParams()
   const initialDealer = searchParams.get('dealer') || ''
+  const { isAdmin } = useAuth()
 
   const [dealers, setDealers] = useState([])
   const [selectedCode, setSelectedCode] = useState(initialDealer)
   const [month, setMonth] = useState(currentMonth())
   const [loading, setLoading] = useState(true)
+
+  // SES 送信ログ（kickbackId -> log doc）と送信中フラグ（二重クリック防止）
+  const [emailLogs, setEmailLogs] = useState({})
+  const [sendingIds, setSendingIds] = useState({})
 
   // サロン紐付け
   const [salonLinks, setSalonLinks] = useState([])
@@ -868,6 +877,102 @@ export default function KickbackManage() {
       }
     })()
   }, [selectedCode])
+
+  // 清算書の送信ログを取得（admin 限定・テスト代理店対象のみ）
+  // 二重送信防止の状態表示に使うため、清算書ごとに1件だけ（docId=kickbackId）
+  useEffect(() => {
+    if (!isAdmin || !selectedCode || selectedCode !== TEST_DEALER_CODE) {
+      setEmailLogs({})
+      return
+    }
+    if (statements.length === 0) {
+      setEmailLogs({})
+      return
+    }
+    let cancelled = false
+    ;(async () => {
+      try {
+        const results = await Promise.all(
+          statements.map(async (stmt) => {
+            try {
+              const logSnap = await getDoc(doc(db, 'settlementEmailLogs', stmt.id))
+              return logSnap.exists() ? [stmt.id, logSnap.data()] : null
+            } catch (e) {
+              return null
+            }
+          }),
+        )
+        if (cancelled) return
+        const map = {}
+        for (const r of results) {
+          if (r) map[r[0]] = r[1]
+        }
+        setEmailLogs(map)
+      } catch (e) {
+        console.error('送信ログ取得失敗:', e)
+      }
+    })()
+    return () => { cancelled = true }
+  }, [isAdmin, selectedCode, statements])
+
+  // 清算書を SES で手動送信（admin限定・テスト代理店のみ）
+  // 二重クリックは sendingIds で抑止、二重送信そのものは Cloud Functions 側の
+  // transaction + status で弾く（サーバー側が最終防衛線）
+  const handleSesSend = async (stmt) => {
+    if (!isAdmin) return
+    if (stmt.dealerCode !== TEST_DEALER_CODE) {
+      alert(`手動送信はテスト代理店（${TEST_DEALER_CODE || '未設定'}）のみ許可されています`)
+      return
+    }
+    if (sendingIds[stmt.id]) return // 送信中クリック無効化
+    const existing = emailLogs[stmt.id]
+    if (existing?.status === 'sent') {
+      alert('この清算書は既に送信済みです')
+      return
+    }
+    if (existing?.status === 'pending') {
+      alert('送信処理中です。完了までお待ちください')
+      return
+    }
+    const testEmail = prompt(
+      '送信先メールアドレスを入力してください（空欄なら allowedEmails の代理店メール）:',
+      'takayama1970817@gmail.com',
+    )
+    if (testEmail === null) return // キャンセル
+    const confirmed = confirm(
+      `【本番SES送信】\n対象: ${stmt.dealerCode} / ${stmt.month}\n宛先: ${testEmail || '(代理店登録メール)'}\n\n送信してよろしいですか？`,
+    )
+    if (!confirmed) return
+
+    setSendingIds((prev) => ({ ...prev, [stmt.id]: true }))
+    try {
+      const fn = httpsCallable(functions, 'sendSettlementEmail')
+      const res = await fn({
+        kickbackId: stmt.id,
+        testEmail: testEmail || undefined,
+      })
+      alert(`送信完了: ${res.data.toEmail}\nmessageId: ${res.data.sesMessageId || '-'}`)
+      // ログを再取得
+      const logSnap = await getDoc(doc(db, 'settlementEmailLogs', stmt.id))
+      if (logSnap.exists()) {
+        setEmailLogs((prev) => ({ ...prev, [stmt.id]: logSnap.data() }))
+      }
+    } catch (e) {
+      // サーバー側で既に sent/pending だった場合は already-exists で返る
+      alert('送信失敗: ' + (e.message || e))
+      try {
+        const logSnap = await getDoc(doc(db, 'settlementEmailLogs', stmt.id))
+        if (logSnap.exists()) {
+          setEmailLogs((prev) => ({ ...prev, [stmt.id]: logSnap.data() }))
+        }
+      } catch (_) { /* noop */ }
+    } finally {
+      setSendingIds((prev) => {
+        const { [stmt.id]: _, ...rest } = prev
+        return rest
+      })
+    }
+  }
 
   const handleDeleteStmt = async (id) => {
     if (!confirm('この清算書を削除しますか？')) return
@@ -1491,6 +1596,41 @@ ${senderEmail}
                         >
                           🧪テスト
                         </button>
+                        {isAdmin && TEST_DEALER_CODE && stmt.dealerCode === TEST_DEALER_CODE && (() => {
+                          const log = emailLogs[stmt.id]
+                          const sending = !!sendingIds[stmt.id]
+                          const isSent = log?.status === 'sent'
+                          const isPending = log?.status === 'pending'
+                          const isFailed = log?.status === 'failed'
+                          const disabled = sending || isSent || isPending
+                          let label = '📮 SES送信'
+                          if (sending) label = '送信中...'
+                          else if (isSent) label = '✅ 送信済'
+                          else if (isPending) label = '⏳ 処理中'
+                          else if (isFailed) label = '↻ 再送信'
+                          return (
+                            <button
+                              onClick={() => handleSesSend(stmt)}
+                              disabled={disabled}
+                              title={
+                                isSent
+                                  ? `送信済み (messageId: ${log.sesMessageId || '-'})`
+                                  : isFailed
+                                    ? `前回失敗: ${log.errorMessage || '不明'}`
+                                    : 'Cloud Functions + SES で本番送信'
+                              }
+                              className={`rounded border px-3 py-1 text-xs font-medium ${
+                                disabled
+                                  ? 'cursor-not-allowed border-gray-300 bg-gray-100 text-gray-500'
+                                  : isFailed
+                                    ? 'border-orange-300 bg-orange-50 text-orange-700 hover:bg-orange-100'
+                                    : 'border-red-300 bg-red-50 text-red-700 hover:bg-red-100'
+                              }`}
+                            >
+                              {label}
+                            </button>
+                          )
+                        })()}
                         <button
                           onClick={() => handleDeleteStmt(stmt.id)}
                           className="text-xs text-red-500 hover:underline"

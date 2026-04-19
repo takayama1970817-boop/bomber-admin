@@ -208,6 +208,16 @@ service cloud.firestore {
     }
 
     // ========================================
+    // settlementEmailLogs コレクション（清算書メール送信ログ）
+    // docId = kickbackId（1清算書=1ログで二重送信防止）
+    // 読取は admin のみ、書き込みは Cloud Functions からのみ（クライアント不可）
+    // ========================================
+    match /settlementEmailLogs/{docId} {
+      allow read:  if isAdmin();
+      allow write: if false;
+    }
+
+    // ========================================
     // chatRooms コレクション（社内チャット）
     // ログイン済みスタッフ全員が読み書き可
     // ========================================
