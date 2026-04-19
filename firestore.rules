@@ -581,15 +581,14 @@ service cloud.firestore {
     // docId = {dealerCode}_{YYYY-MM}
     // - write: 完全禁止（scripts/aggregate-dealer-monthly.mjs が Admin SDK で直接書き込む）
     // - read: admin/staff は全件、dealer は自社 dealerCode のみ
+    //         （docId ベース判定。resource.data ベースだと評価タイミング差で
+    //          PERMISSION_DENIED が出るケースがあるため避ける）
     // ========================================
     match /dealerMonthlySnapshots/{docId} {
-      allow read:  if isSignedIn()
-                    && (
-                      isAdmin() || isStaff()
-                      || (isDealer()
-                          && userDoc().get('dealerCode', '') != ''
-                          && resource.data.dealerCode == userDoc().dealerCode)
-                    );
+      allow read:  if isAdmin() || isStaff()
+                    || (isDealer()
+                        && userDoc().get('dealerCode', '') != ''
+                        && docId.matches('^' + userDoc().dealerCode + '_.*$'));
       allow write: if false;
     }
 
