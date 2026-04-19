@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useAuth } from '../contexts/AuthContext.jsx'
-import { fetchOrdersByMonth } from '../lib/bcartApi.js'
+import { fetchOrdersByMonth, fetchOrderProducts } from '../lib/bcartApi.js'
 import DateTimeWithDow from '../components/DateTimeWithDow.jsx'
 
 /**
@@ -63,6 +63,177 @@ function parseBcartDate(raw) {
   return Number.isNaN(d.getTime()) ? null : d
 }
 
+function fmtDateTime(d) {
+  if (!d) return '—'
+  return `${d.getFullYear()}/${pad(d.getMonth() + 1)}/${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
+function OrderRow({ order, isOpen, items, isLoadingItems, itemsError, onToggle, onRetry }) {
+  return (
+    <>
+      <tr
+        onClick={onToggle}
+        className={`cursor-pointer border-b border-gray-50 transition-colors ${
+          isOpen ? 'bg-violet-50/40' : 'hover:bg-violet-50/50'
+        }`}
+      >
+        <td className="w-8 px-3 py-3 text-center text-violet-400">
+          <span
+            className={`inline-block transition-transform ${isOpen ? 'rotate-90' : ''}`}
+            aria-hidden="true"
+          >
+            ▶
+          </span>
+        </td>
+        <td className="px-4 py-3 text-gray-700">{fmtDate(order.orderDate)}</td>
+        <td className="px-4 py-3 font-medium text-gray-900">{order.companyName || '—'}</td>
+        <td className="px-4 py-3 font-mono text-xs text-gray-500">{order.orderNumber || '—'}</td>
+        <td className="px-4 py-3 text-right font-bold text-gray-900">{fmtYen(order.total)}</td>
+      </tr>
+      {isOpen && (
+        <tr className="border-b border-violet-100 bg-violet-50/20">
+          <td colSpan={5} className="px-6 py-5">
+            <OrderDetail
+              order={order}
+              items={items}
+              isLoadingItems={isLoadingItems}
+              itemsError={itemsError}
+              onRetry={onRetry}
+            />
+          </td>
+        </tr>
+      )}
+    </>
+  )
+}
+
+function OrderDetail({ order, items, isLoadingItems, itemsError, onRetry }) {
+  // 紙袋・送料等は明細から除外
+  const displayItems = Array.isArray(items)
+    ? items.filter((p) => !/紙袋|送料|手数料/.test(p.product_name || ''))
+    : null
+
+  const subtotalFromItems = Array.isArray(displayItems)
+    ? displayItems.reduce(
+        (s, p) => s + (Number(p.unit_price) || 0) * (Number(p.order_pro_count) || 0),
+        0,
+      )
+    : 0
+
+  const hasTax = order.total > order.subtotal
+  const tax = hasTax ? order.total - order.subtotal : Math.round(order.subtotal * 0.1)
+
+  return (
+    <div className="grid grid-cols-1 gap-5 md:grid-cols-[1fr_auto]">
+      {/* 明細 */}
+      <div>
+        <div className="mb-2 text-xs font-semibold tracking-wide text-gray-500">商品明細</div>
+        {isLoadingItems ? (
+          <div className="py-4 text-xs text-gray-400">Bカートから明細を取得中...</div>
+        ) : itemsError ? (
+          <div className="flex items-center gap-2 text-xs text-[#D35A5A]">
+            <span>明細取得失敗: {itemsError}</span>
+            <button
+              onClick={onRetry}
+              className="rounded border border-violet-200 bg-white px-2 py-0.5 font-medium text-violet-600 hover:bg-violet-50"
+            >
+              再試行
+            </button>
+          </div>
+        ) : !displayItems || displayItems.length === 0 ? (
+          <div className="py-2 text-xs text-gray-400">明細なし</div>
+        ) : (
+          <div className="overflow-hidden rounded-xl border border-gray-100 bg-white">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="border-b border-gray-100 bg-violet-50/30 text-left text-[11px] text-gray-500">
+                  <th className="px-3 py-2 font-semibold">商品名</th>
+                  <th className="w-16 px-3 py-2 text-right font-semibold">数量</th>
+                  <th className="w-24 px-3 py-2 text-right font-semibold">単価</th>
+                  <th className="w-28 px-3 py-2 text-right font-semibold">小計</th>
+                </tr>
+              </thead>
+              <tbody>
+                {displayItems.map((p, i) => {
+                  const qty = Number(p.order_pro_count) || 0
+                  const unit = Number(p.unit_price) || 0
+                  return (
+                    <tr key={i} className="border-b border-gray-50 last:border-0">
+                      <td className="px-3 py-2 text-gray-700">
+                        {p.product_name || '（不明）'}
+                      </td>
+                      <td className="px-3 py-2 text-right text-gray-700">{qty}</td>
+                      <td className="px-3 py-2 text-right text-gray-700">{fmtYen(unit)}</td>
+                      <td className="px-3 py-2 text-right font-medium text-gray-900">
+                        {fmtYen(unit * qty)}
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+              <tfoot>
+                <tr className="bg-violet-50/40">
+                  <td className="px-3 py-2 text-right text-gray-500" colSpan={3}>
+                    明細小計
+                  </td>
+                  <td className="px-3 py-2 text-right font-semibold text-gray-800">
+                    {fmtYen(subtotalFromItems)}
+                  </td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {/* サマリ */}
+      <div className="min-w-[220px] rounded-xl border border-gray-100 bg-white p-4">
+        <dl className="space-y-2 text-xs">
+          <div className="flex items-baseline justify-between gap-4">
+            <dt className="text-gray-500">注文日時</dt>
+            <dd className="text-right text-gray-800">{fmtDateTime(order.orderDate)}</dd>
+          </div>
+          <div className="flex items-baseline justify-between gap-4">
+            <dt className="text-gray-500">注文番号</dt>
+            <dd className="text-right font-mono text-gray-800">{order.orderNumber || '—'}</dd>
+          </div>
+          {order.customerName && (
+            <div className="flex items-baseline justify-between gap-4">
+              <dt className="text-gray-500">担当者</dt>
+              <dd className="text-right text-gray-800">{order.customerName}</dd>
+            </div>
+          )}
+          {order.setName && (
+            <div className="flex items-baseline justify-between gap-4">
+              <dt className="text-gray-500">セット</dt>
+              <dd className="text-right text-gray-800">{order.setName}</dd>
+            </div>
+          )}
+          {order.paymentMethod && (
+            <div className="flex items-baseline justify-between gap-4">
+              <dt className="text-gray-500">支払方法</dt>
+              <dd className="text-right text-gray-800">{order.paymentMethod}</dd>
+            </div>
+          )}
+          <div className="my-2 border-t border-gray-100" />
+          <div className="flex items-baseline justify-between gap-4">
+            <dt className="text-gray-500">小計（税抜）</dt>
+            <dd className="text-right text-gray-800">{fmtYen(order.subtotal || order.total)}</dd>
+          </div>
+          <div className="flex items-baseline justify-between gap-4">
+            <dt className="text-gray-500">消費税</dt>
+            <dd className="text-right text-gray-800">{fmtYen(tax)}</dd>
+          </div>
+          <div className="flex items-baseline justify-between gap-4 pt-1">
+            <dt className="font-semibold text-gray-700">合計（税込）</dt>
+            <dd className="text-right text-base font-bold text-gray-900">{fmtYen(order.total)}</dd>
+          </div>
+        </dl>
+      </div>
+    </div>
+  )
+}
+
 export default function DealerOrders() {
   const { profile } = useAuth()
   const dealerCode = profile?.dealerCode || ''
@@ -75,6 +246,58 @@ export default function DealerOrders() {
   const [now, setNow] = useState(() => new Date())
   const [monthFilter, setMonthFilter] = useState('all')
   const [salonFilter, setSalonFilter] = useState('')
+
+  // 詳細展開状態
+  const [expandedId, setExpandedId] = useState(null)
+  const [productsById, setProductsById] = useState({})       // { [orderId]: [items] }
+  const [productsLoadingById, setProductsLoadingById] = useState({}) // { [orderId]: bool }
+  const [productsErrorById, setProductsErrorById] = useState({})     // { [orderId]: string }
+
+  const toggleExpand = useCallback(
+    (orderId) => {
+      setExpandedId((prev) => {
+        if (prev === orderId) return null
+        return orderId
+      })
+      // 初回のみ Bカートから明細取得
+      setProductsById((prev) => {
+        if (prev[orderId] !== undefined) return prev
+        setProductsLoadingById((m) => ({ ...m, [orderId]: true }))
+        fetchOrderProducts(orderId)
+          .then((items) => {
+            setProductsById((m) => ({ ...m, [orderId]: items || [] }))
+            setProductsErrorById((m) => ({ ...m, [orderId]: null }))
+          })
+          .catch((e) => {
+            console.warn('order_products 取得失敗', orderId, e)
+            setProductsErrorById((m) => ({ ...m, [orderId]: e.message || '取得失敗' }))
+          })
+          .finally(() => {
+            setProductsLoadingById((m) => ({ ...m, [orderId]: false }))
+          })
+        return prev
+      })
+    },
+    [],
+  )
+
+  const retryProducts = useCallback(
+    (orderId) => {
+      setProductsErrorById((m) => ({ ...m, [orderId]: null }))
+      setProductsLoadingById((m) => ({ ...m, [orderId]: true }))
+      fetchOrderProducts(orderId)
+        .then((items) => {
+          setProductsById((m) => ({ ...m, [orderId]: items || [] }))
+        })
+        .catch((e) => {
+          setProductsErrorById((m) => ({ ...m, [orderId]: e.message || '取得失敗' }))
+        })
+        .finally(() => {
+          setProductsLoadingById((m) => ({ ...m, [orderId]: false }))
+        })
+    },
+    [],
+  )
 
   // 現在時刻（30秒粒度）
   useEffect(() => {
@@ -107,7 +330,11 @@ export default function DealerOrders() {
               companyName:
                 (o.customer_comp_name || o.comp_name || o.customer_name || '').trim(),
               total: Number(o.final_price ?? o.total_price) || 0,
+              subtotal: Number(o.total_price ?? o.final_price) || 0,
               orderNumber: o.order_no || o.order_number || o.code || '',
+              paymentMethod: o.payment || o.payment_method || o.payment_name || '',
+              setName: o.set_name || o.campaign || '',
+              customerName: (o.customer_name || '').trim(),
             })
           }
         } catch (e) {
@@ -324,6 +551,7 @@ export default function DealerOrders() {
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-gray-100 bg-violet-50/40 text-left text-xs tracking-wide text-gray-500">
+                <th className="w-8 px-3 py-3"></th>
                 <th className="px-4 py-3 font-semibold">注文日</th>
                 <th className="px-4 py-3 font-semibold">サロン名</th>
                 <th className="px-4 py-3 font-semibold">注文番号</th>
@@ -331,17 +559,24 @@ export default function DealerOrders() {
               </tr>
             </thead>
             <tbody>
-              {filtered.map((o) => (
-                <tr
-                  key={o.id}
-                  className="border-b border-gray-50 transition-colors hover:bg-violet-50/50"
-                >
-                  <td className="px-4 py-3 text-gray-700">{fmtDate(o.orderDate)}</td>
-                  <td className="px-4 py-3 font-medium text-gray-900">{o.companyName || '—'}</td>
-                  <td className="px-4 py-3 font-mono text-xs text-gray-500">{o.orderNumber || '—'}</td>
-                  <td className="px-4 py-3 text-right font-bold text-gray-900">{fmtYen(o.total)}</td>
-                </tr>
-              ))}
+              {filtered.map((o) => {
+                const isOpen = expandedId === o.id
+                const items = productsById[o.id]
+                const isLoadingItems = productsLoadingById[o.id]
+                const itemsError = productsErrorById[o.id]
+                return (
+                  <OrderRow
+                    key={o.id}
+                    order={o}
+                    isOpen={isOpen}
+                    items={items}
+                    isLoadingItems={isLoadingItems}
+                    itemsError={itemsError}
+                    onToggle={() => toggleExpand(o.id)}
+                    onRetry={() => retryProducts(o.id)}
+                  />
+                )
+              })}
             </tbody>
           </table>
         </div>
