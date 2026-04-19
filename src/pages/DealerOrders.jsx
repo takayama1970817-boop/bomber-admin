@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useAuth } from '../contexts/AuthContext.jsx'
 import { fetchOrdersByMonth } from '../lib/bcartApi.js'
+import DateTimeWithDow from '../components/DateTimeWithDow.jsx'
 
 /**
  * 代理店向け 注文一覧（Bカート最新）。
@@ -229,14 +230,14 @@ export default function DealerOrders() {
         <div className="rounded-2xl border border-gray-100 bg-white px-5 py-3 text-right text-gray-500 shadow-[0_1px_3px_rgba(17,24,39,0.04)]">
           <div className="flex items-baseline justify-end gap-2">
             <span className="text-[11px] font-medium tracking-wider text-gray-400">現在</span>
-            <span className="text-xl font-bold tracking-wide tabular-nums text-gray-900">
-              {fmtTimestamp(now)}
+            <span className="text-xl font-bold tracking-wide text-gray-900">
+              <DateTimeWithDow value={now} />
             </span>
           </div>
           <div className="mt-1 flex items-baseline justify-end gap-2">
             <span className="text-[11px] font-medium tracking-wider text-gray-400">最終更新</span>
-            <span className="text-lg font-semibold tracking-wide tabular-nums text-gray-700">
-              {fmtTimestamp(fetchedAt)}
+            <span className="text-lg font-semibold tracking-wide text-gray-700">
+              <DateTimeWithDow value={fetchedAt} />
             </span>
           </div>
           <div className="mt-1 text-xs text-emerald-600">🔄 Bカート最新</div>
