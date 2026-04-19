@@ -226,14 +226,20 @@ export default function DealerOrders() {
             自社（{profile?.companyName || dealerCode}）配下のサロン受注を Bカート最新で表示します。
           </p>
         </div>
-        <div className="rounded-2xl border border-gray-100 bg-white px-4 py-2.5 text-right text-sm leading-relaxed text-gray-500 shadow-[0_1px_3px_rgba(17,24,39,0.04)]">
-          <div className="text-gray-800">
-            現在：<span className="font-medium tracking-wide">{fmtTimestamp(now)}</span>
+        <div className="rounded-2xl border border-gray-100 bg-white px-5 py-3 text-right text-gray-500 shadow-[0_1px_3px_rgba(17,24,39,0.04)]">
+          <div className="flex items-baseline justify-end gap-2">
+            <span className="text-[11px] font-medium tracking-wider text-gray-400">現在</span>
+            <span className="text-xl font-bold tracking-wide tabular-nums text-gray-900">
+              {fmtTimestamp(now)}
+            </span>
           </div>
-          <div className="mt-0.5 text-gray-600">
-            最終更新：<span className="font-medium tracking-wide">{fmtTimestamp(fetchedAt)}</span>
+          <div className="mt-1 flex items-baseline justify-end gap-2">
+            <span className="text-[11px] font-medium tracking-wider text-gray-400">最終更新</span>
+            <span className="text-lg font-semibold tracking-wide tabular-nums text-gray-700">
+              {fmtTimestamp(fetchedAt)}
+            </span>
           </div>
-          <div className="mt-0.5 text-xs text-emerald-600">🔄 Bカート最新</div>
+          <div className="mt-1 text-xs text-emerald-600">🔄 Bカート最新</div>
           <button
             onClick={fetchFromBcart}
             disabled={loading}
