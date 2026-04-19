@@ -1,0 +1,62 @@
+name: Backup Drill Log Check
+
+# 目的:
+#   復旧訓練ログの前月分記載を必須化する。
+#   未記入ならデプロイワークフローをブロックし、Issue を自動作成。
+
+on:
+  # 毎月 1日 09:00 JST (=0:00 UTC) に自動実行
+  schedule:
+    - cron: '0 0 1 * *'
+
+  # デプロイ前にも必ず実行されるよう、main への PR で起動
+  pull_request:
+    branches: [main]
+    paths:
+      - 'functions/**'
+      - 'firestore.rules'
+      - 'firebase.json'
+      - '.github/workflows/deploy.yml'
+
+  # 手動実行も可能
+  workflow_dispatch:
+
+jobs:
+  check-drill-log:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 訓練ログをチェック
+        id: check
+        run: node scripts/backup/check-drill-log.mjs
+
+      - name: 未記入の場合は Issue を作成
+        if: failure() && github.event_name == 'schedule'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const now = new Date();
+            const lastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+            const ym = `${lastMonth.getFullYear()}-${String(lastMonth.getMonth() + 1).padStart(2, '0')}`;
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `🔁 ${ym} 復旧訓練ログが未記入です`,
+              body: [
+                `前月（${ym}）の復旧訓練ログが記入されていません。`,
+                '',
+                '## 対応',
+                '1. `docs/backup-operations.md` の「8. 復旧訓練」手順に沿って訓練を実施',
+                '2. `docs/backup-drill-log.md` に結果を記入',
+                '3. PR を作成してマージ',
+                '',
+                '## 注意',
+                'このログが未記入のままだと、次回以降のデプロイがブロックされます。',
+              ].join('\n'),
+              labels: ['backup', 'operations'],
+            });

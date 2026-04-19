@@ -5,6 +5,11 @@ import PublicReceipt from './pages/PublicReceipt.jsx'
 import Dashboard from './pages/Dashboard.jsx'
 import ExecDashboard from './pages/ExecDashboard.jsx'
 import ProductCosts from './pages/ProductCosts.jsx'
+import ErpOrders from './pages/ErpOrders.jsx'
+import ErpPurchaseOrders from './pages/ErpPurchaseOrders.jsx'
+import ErpInventory from './pages/ErpInventory.jsx'
+import ErpStockIns from './pages/ErpStockIns.jsx'
+import ErpShipments from './pages/ErpShipments.jsx'
 import DealerExecDashboard from './pages/DealerExecDashboard.jsx'
 import ProductRanking from './pages/ProductRanking.jsx'
 import SalonRanking from './pages/SalonRanking.jsx'
@@ -19,6 +24,9 @@ import DealerLogin from './pages/DealerLogin.jsx'
 import DealerLayout from './pages/DealerLayout.jsx'
 import DealerDashboard from './pages/DealerDashboard.jsx'
 import DealerSalons from './pages/DealerSalons.jsx'
+import DealerOrders from './pages/DealerOrders.jsx'
+import DealerInvoices from './pages/DealerInvoices.jsx'
+import DealerKickbacks from './pages/DealerKickbacks.jsx'
 import DealerChat from './pages/DealerChat.jsx'
 import DealerDocuments from './pages/DealerDocuments.jsx'
 import DealerDocManage from './pages/DealerDocManage.jsx'
@@ -32,6 +40,7 @@ import SalonProductsAdmin from './pages/SalonProductsAdmin.jsx'
 import SalonManage from './pages/SalonManage.jsx'
 import SalonSales from './pages/SalonSales.jsx'
 import KickbackManage from './pages/KickbackManage.jsx'
+import SettlementManage from './pages/SettlementManage.jsx'
 import Inventory from './pages/Inventory.jsx'
 import WarehouseView from './pages/WarehouseView.jsx'
 import WarehousePortal from './pages/WarehousePortal.jsx'
@@ -130,6 +139,9 @@ export default function App() {
         <Route index element={<DealerDashboard />} />
         <Route path="dashboard-exec" element={<DealerExecDashboard />} />
         <Route path="salons" element={<DealerSalons />} />
+        <Route path="orders" element={<DealerOrders />} />
+        <Route path="invoices" element={<DealerInvoices />} />
+        <Route path="kickbacks" element={<DealerKickbacks />} />
         <Route path="chat" element={<DealerChat />} />
         <Route path="documents" element={<DealerDocuments />} />
       </Route>
@@ -149,6 +161,11 @@ export default function App() {
         <Route path="/admin/salon-ranking" element={<ProtectedRoute requireRole="admin"><SalonRanking /></ProtectedRoute>} />
         <Route path="/admin/customer-analytics" element={<ProtectedRoute requireRole="admin"><CustomerAnalytics /></ProtectedRoute>} />
         <Route path="/admin/product-costs" element={<ProtectedRoute requireRole="admin"><ProductCosts /></ProtectedRoute>} />
+        <Route path="/admin/erp/orders" element={<ProtectedRoute requireRole={['admin', 'staff']}><ErpOrders /></ProtectedRoute>} />
+        <Route path="/admin/erp/purchase-orders" element={<ProtectedRoute requireRole={['admin', 'staff']}><ErpPurchaseOrders /></ProtectedRoute>} />
+        <Route path="/admin/erp/inventory" element={<ProtectedRoute requireRole={['admin', 'staff']}><ErpInventory /></ProtectedRoute>} />
+        <Route path="/admin/erp/stock-ins" element={<ProtectedRoute requireRole={['admin', 'staff']}><ErpStockIns /></ProtectedRoute>} />
+        <Route path="/admin/erp/shipments" element={<ProtectedRoute requireRole={['admin', 'staff']}><ErpShipments /></ProtectedRoute>} />
         <Route path="/salons" element={<Salons />} />
         <Route path="/salons/:id" element={<SalonDetail />} />
         <Route path="/attendance" element={<Attendance />} />
@@ -163,6 +180,7 @@ export default function App() {
         <Route path="/admin/inventory" element={<ProtectedRoute requireFeature="inventory"><Inventory /></ProtectedRoute>} />
         <Route path="/admin/warehouse" element={<ProtectedRoute requireFeature="warehouse"><WarehouseView /></ProtectedRoute>} />
         <Route path="/admin/kickback" element={<ProtectedRoute requireFeature="kickback"><KickbackManage /></ProtectedRoute>} />
+        <Route path="/settlements" element={<ProtectedRoute requireRole={['admin', 'staff']}><SettlementManage /></ProtectedRoute>} />
         <Route path="/admin/invoices" element={<ProtectedRoute requireRole="admin"><InvoiceManage /></ProtectedRoute>} />
         <Route path="/admin/users" element={<ProtectedRoute requireFeature="users"><AdminUsers /></ProtectedRoute>} />
         <Route path="/admin/bcart-import" element={<ProtectedRoute requireFeature="bcartImport"><BcartImport /></ProtectedRoute>} />

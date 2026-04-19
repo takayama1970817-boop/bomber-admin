@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   addDoc,
   collection,
@@ -9,6 +9,7 @@ import {
   query,
   serverTimestamp,
   updateDoc,
+  where,
 } from 'firebase/firestore'
 import { ref, uploadBytesResumable, getDownloadURL, deleteObject } from 'firebase/storage'
 import { db, storage } from '../lib/firebase.js'
@@ -35,6 +36,20 @@ const CATEGORIES = [
   { value: 'other', label: 'その他' },
 ]
 
+const VISIBILITIES = [
+  { value: 'all', label: '全員（代理店＋サロン）' },
+  { value: 'dealers', label: '代理店のみ' },
+  { value: 'salons', label: 'サロンのみ' },
+  { value: 'specific', label: '指定相手のみ' },
+]
+
+const VISIBILITY_BADGE = {
+  all: { label: '全員', color: 'bg-gray-100 text-gray-700' },
+  dealers: { label: '代理店', color: 'bg-indigo-100 text-indigo-700' },
+  salons: { label: 'サロン', color: 'bg-pink-100 text-pink-700' },
+  specific: { label: '指定', color: 'bg-amber-100 text-amber-700' },
+}
+
 export default function DealerDocManage() {
   const { profile } = useAuth()
   const [docs, setDocs] = useState([])
@@ -51,6 +66,16 @@ export default function DealerDocManage() {
   const [uploadProgress, setUploadProgress] = useState(0)
   const fileInputRef = useRef(null)
 
+  // 公開範囲
+  const [visibility, setVisibility] = useState('dealers') // 新規のデフォルト
+  const [allowedDealers, setAllowedDealers] = useState([]) // dealerCode[]
+  const [allowedCompanies, setAllowedCompanies] = useState([]) // companyName[]
+  const [isActive, setIsActive] = useState(true)
+
+  // 候補リスト（specific 時の選択肢）
+  const [availableDealers, setAvailableDealers] = useState([]) // {dealerCode, name}[]
+  const [availableSalons, setAvailableSalons] = useState([]) // {companyName}[]
+
   const fetchDocs = async () => {
     try {
       const snap = await getDocs(
@@ -64,7 +89,41 @@ export default function DealerDocManage() {
     }
   }
 
-  useEffect(() => { fetchDocs() }, [])
+  const fetchCandidates = async () => {
+    try {
+      // 代理店候補: allowedEmails で role='dealer' のもの
+      const dealerSnap = await getDocs(
+        query(collection(db, 'allowedEmails'), where('role', '==', 'dealer'))
+      )
+      const dealerMap = new Map()
+      dealerSnap.docs.forEach((d) => {
+        const data = d.data()
+        if (data.dealerCode && !dealerMap.has(data.dealerCode)) {
+          dealerMap.set(data.dealerCode, data.companyName || data.name || data.dealerCode)
+        }
+      })
+      setAvailableDealers(
+        Array.from(dealerMap.entries())
+          .map(([dealerCode, name]) => ({ dealerCode, name }))
+          .sort((a, b) => a.name.localeCompare(b.name, 'ja')),
+      )
+
+      // サロン候補: salons コレクション（name フィールドを companyName として扱う）
+      const salonSnap = await getDocs(collection(db, 'salons'))
+      const salonSet = new Set()
+      salonSnap.docs.forEach((d) => {
+        const name = d.data().name
+        if (name) salonSet.add(name)
+      })
+      setAvailableSalons(
+        Array.from(salonSet).sort((a, b) => a.localeCompare(b, 'ja')).map((n) => ({ companyName: n })),
+      )
+    } catch (e) {
+      console.error('候補リスト取得失敗:', e)
+    }
+  }
+
+  useEffect(() => { fetchDocs(); fetchCandidates() }, [])
 
   const resetForm = () => {
     setTitle('')
@@ -74,6 +133,10 @@ export default function DealerDocManage() {
     setUrl('')
     setEditing(null)
     setUploadProgress(0)
+    setVisibility('dealers')
+    setAllowedDealers([])
+    setAllowedCompanies([])
+    setIsActive(true)
     if (fileInputRef.current) fileInputRef.current.value = ''
   }
 
@@ -85,7 +148,22 @@ export default function DealerDocManage() {
     setFile(null)
     setEditing(d.id)
     setUploadProgress(0)
+    setVisibility(d.visibility || 'dealers')
+    setAllowedDealers(Array.isArray(d.allowedDealers) ? d.allowedDealers : [])
+    setAllowedCompanies(Array.isArray(d.allowedCompanies) ? d.allowedCompanies : [])
+    setIsActive(d.isActive !== false) // undefined or true は true として扱う
     if (fileInputRef.current) fileInputRef.current.value = ''
+  }
+
+  const toggleDealer = (dealerCode) => {
+    setAllowedDealers((prev) =>
+      prev.includes(dealerCode) ? prev.filter((c) => c !== dealerCode) : [...prev, dealerCode],
+    )
+  }
+  const toggleCompany = (companyName) => {
+    setAllowedCompanies((prev) =>
+      prev.includes(companyName) ? prev.filter((c) => c !== companyName) : [...prev, companyName],
+    )
   }
 
   const handleFileChange = (e) => {
@@ -151,6 +229,10 @@ export default function DealerDocManage() {
         title: title.trim(),
         description: description.trim(),
         category,
+        visibility,
+        allowedDealers: visibility === 'specific' ? allowedDealers : [],
+        allowedCompanies: visibility === 'specific' ? allowedCompanies : [],
+        isActive,
         updatedAt: serverTimestamp(),
       }
 
@@ -314,6 +396,86 @@ export default function DealerDocManage() {
               className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none"
             />
           </div>
+
+          {/* 公開範囲 */}
+          <div className="md:col-span-2 rounded-lg border border-amber-200 bg-amber-50 p-4">
+            <div className="mb-3 flex items-center justify-between">
+              <div className="text-sm font-bold text-amber-900">公開範囲</div>
+              <label className="flex items-center gap-2 text-xs text-amber-800">
+                <input
+                  type="checkbox"
+                  checked={isActive}
+                  onChange={(e) => setIsActive(e.target.checked)}
+                  className="h-4 w-4 rounded border-gray-300"
+                />
+                公開中（OFFで全ユーザーから不可視）
+              </label>
+            </div>
+            <select
+              value={visibility}
+              onChange={(e) => setVisibility(e.target.value)}
+              className="mb-3 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none"
+            >
+              {VISIBILITIES.map((v) => (
+                <option key={v.value} value={v.value}>{v.label}</option>
+              ))}
+            </select>
+
+            {visibility === 'specific' && (
+              <div className="space-y-3">
+                <div>
+                  <div className="mb-1 text-xs text-amber-800">
+                    許可する代理店（{allowedDealers.length}件選択中）
+                  </div>
+                  <div className="max-h-40 overflow-auto rounded-lg border border-gray-200 bg-white p-2">
+                    {availableDealers.length === 0 ? (
+                      <div className="p-2 text-xs text-gray-400">代理店なし</div>
+                    ) : (
+                      availableDealers.map((d) => (
+                        <label key={d.dealerCode} className="flex items-center gap-2 px-2 py-1 text-xs hover:bg-gray-50">
+                          <input
+                            type="checkbox"
+                            checked={allowedDealers.includes(d.dealerCode)}
+                            onChange={() => toggleDealer(d.dealerCode)}
+                            className="h-4 w-4"
+                          />
+                          <span className="font-mono text-gray-500">{d.dealerCode}</span>
+                          <span className="text-gray-800">{d.name}</span>
+                        </label>
+                      ))
+                    )}
+                  </div>
+                </div>
+                <div>
+                  <div className="mb-1 text-xs text-amber-800">
+                    許可するサロン（{allowedCompanies.length}件選択中）
+                  </div>
+                  <div className="max-h-40 overflow-auto rounded-lg border border-gray-200 bg-white p-2">
+                    {availableSalons.length === 0 ? (
+                      <div className="p-2 text-xs text-gray-400">サロンなし</div>
+                    ) : (
+                      availableSalons.map((s) => (
+                        <label key={s.companyName} className="flex items-center gap-2 px-2 py-1 text-xs hover:bg-gray-50">
+                          <input
+                            type="checkbox"
+                            checked={allowedCompanies.includes(s.companyName)}
+                            onChange={() => toggleCompany(s.companyName)}
+                            className="h-4 w-4"
+                          />
+                          <span className="text-gray-800">{s.companyName}</span>
+                        </label>
+                      ))
+                    )}
+                  </div>
+                </div>
+                {allowedDealers.length === 0 && allowedCompanies.length === 0 && (
+                  <div className="rounded-md bg-red-50 px-2 py-1 text-xs text-red-700">
+                    ⚠️ 指定相手が未選択です。この状態で保存すると誰も閲覧できません。
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
         </div>
         <div className="mt-4 flex gap-3">
           <button
@@ -347,6 +509,8 @@ export default function DealerDocManage() {
               <tr className="border-b border-gray-100 bg-gray-50 text-left text-xs text-gray-500">
                 <th className="px-4 py-3">タイトル</th>
                 <th className="px-4 py-3">カテゴリ</th>
+                <th className="px-4 py-3">公開範囲</th>
+                <th className="px-4 py-3">状態</th>
                 <th className="px-4 py-3">種類</th>
                 <th className="px-4 py-3">更新日</th>
                 <th className="px-4 py-3 text-center">操作</th>
@@ -368,6 +532,30 @@ export default function DealerDocManage() {
                   </td>
                   <td className="px-4 py-3 text-xs">
                     {CATEGORIES.find((c) => c.value === d.category)?.label || d.category}
+                  </td>
+                  <td className="px-4 py-3">
+                    {(() => {
+                      const v = d.visibility || 'dealers'
+                      const badge = VISIBILITY_BADGE[v] || VISIBILITY_BADGE.dealers
+                      const specificCount = v === 'specific'
+                        ? ((d.allowedDealers || []).length + (d.allowedCompanies || []).length)
+                        : null
+                      return (
+                        <span className={`rounded px-2 py-0.5 text-[10px] font-medium ${badge.color}`}>
+                          {badge.label}
+                          {specificCount !== null ? `（${specificCount}）` : ''}
+                        </span>
+                      )
+                    })()}
+                  </td>
+                  <td className="px-4 py-3">
+                    <span className={`rounded px-2 py-0.5 text-[10px] font-medium ${
+                      d.isActive === false
+                        ? 'bg-red-100 text-red-700'
+                        : 'bg-emerald-100 text-emerald-700'
+                    }`}>
+                      {d.isActive === false ? '停止中' : '公開中'}
+                    </span>
                   </td>
                   <td className="px-4 py-3">
                     <span className={`rounded px-2 py-0.5 text-[10px] font-medium ${
