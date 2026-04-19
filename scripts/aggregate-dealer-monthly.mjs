@@ -159,12 +159,10 @@ function aggregateForDealer({ dealer, salons, orders, windows }) {
 
   // 当月売上（1日〜カットオフ）
   let monthRevenue = 0
-  const monthOrders = []
   for (const o of orders) {
     if (!o.orderDate) continue
     if (o.orderDate >= thisMonthStart && o.orderDate <= cutoff) {
       monthRevenue += o.total
-      monthOrders.push(o)
     }
   }
 
@@ -177,75 +175,91 @@ function aggregateForDealer({ dealer, salons, orders, windows }) {
     }
   }
 
-  // サロン別最終発注日（全期間）
-  const lastOrderByCompany = new Map() // companyName -> Date
+  // orders から companyName 別の first/last 発注日を算出
+  //   （dealerSalons 未登録でも orders 側で補足する。strict 化された orders.dealerCode が source of truth）
+  const ordersByCompany = new Map() // name -> { first: Date, last: Date }
   for (const o of orders) {
     if (!o.companyName || !o.orderDate) continue
-    const prev = lastOrderByCompany.get(o.companyName)
-    if (!prev || o.orderDate > prev) lastOrderByCompany.set(o.companyName, o.orderDate)
+    const prev = ordersByCompany.get(o.companyName)
+    if (!prev) {
+      ordersByCompany.set(o.companyName, { first: o.orderDate, last: o.orderDate })
+    } else {
+      if (o.orderDate < prev.first) prev.first = o.orderDate
+      if (o.orderDate > prev.last) prev.last = o.orderDate
+    }
   }
 
-  // 直近30日以内に発注ありのサロン数
+  // dealerSalons を companyName → meta に
+  const dealerSalonByName = new Map()
+  for (const s of salons) {
+    if (s.companyName) dealerSalonByName.set(s.companyName, s)
+  }
+
+  // 所属サロンの union（dealerSalons + orders）
+  //   - dealerSalons: admin が手動で紐付けたサロン（メタ情報あり、type='own'/'sub' 等）
+  //   - orders: strict化された dealerCode 一致で得られたサロン（自動で補足）
+  //   - 両方に同一 companyName がある場合は dealerSalons 側のメタを優先利用
+  const allNames = new Set([...dealerSalonByName.keys(), ...ordersByCompany.keys()])
+  const ordersOnlyCount = [...ordersByCompany.keys()].filter((n) => !dealerSalonByName.has(n)).length
+
   const thirtyDaysAgo = new Date(cutoff.getTime() - 30 * 24 * 60 * 60 * 1000)
-  let activeSalonCount = 0
-  for (const [, date] of lastOrderByCompany) {
-    if (date >= thirtyDaysAgo) activeSalonCount += 1
-  }
-
-  // 総サロン数（dealerSalons 基準。社長方針）
-  const totalSalonCount = salons.length
-  const operationRate = totalSalonCount > 0 ? activeSalonCount / totalSalonCount : 0
-
-  // 要対応サロン: dealerSalons を起点に、最終発注日でソート
-  // salonKey = dealerSalons の docId（安定キー）
   const fourteenDaysAgo = new Date(cutoff.getTime() - 14 * 24 * 60 * 60 * 1000)
 
+  let activeSalonCount = 0
   const salonsStale30 = []
   const salonsStale14 = []
   const salonsNew = []
 
-  for (const s of salons) {
-    const name = s.companyName || ''
-    const lastOrder = lastOrderByCompany.get(name) || null
-    const createdAt = tsToDate(s.createdAt)
+  for (const name of allNames) {
+    const meta = dealerSalonByName.get(name) || null
+    const ord = ordersByCompany.get(name) || null
+    const salonKey = meta?.id || `auto-${name}`
+    const firstOrder = ord?.first || null
+    const lastOrder = ord?.last || null
+    const createdAt = tsToDate(meta?.createdAt)
 
-    if (!lastOrder) {
-      // 一度も発注がない: 新規 or 長期停滞
-      if (createdAt && createdAt >= thirtyDaysAgo) {
-        salonsNew.push({ salonKey: s.id, name, firstOrderDate: null, _sortKey: createdAt.getTime() })
-      } else {
-        // 30日以上未発注扱い
-        salonsStale30.push({ salonKey: s.id, name, lastOrderDate: null, _sortKey: 0 })
-      }
-      continue
+    // アクティブ判定（直近30日以内に発注あり）
+    if (lastOrder && lastOrder >= thirtyDaysAgo) activeSalonCount += 1
+
+    // 新規判定:
+    //   - firstOrderDate が 30日以内（orders ベース） — 実際に発注が始まった
+    //   - orders がないが dealerSalons.createdAt が 30日以内 — 紐付けたばかりで未発注
+    const isNewByOrder = firstOrder && firstOrder >= thirtyDaysAgo
+    const isNewByLink = !firstOrder && createdAt && createdAt >= thirtyDaysAgo
+    if (isNewByOrder || isNewByLink) {
+      salonsNew.push({
+        salonKey,
+        name,
+        firstOrderDate: firstOrder ? Timestamp.fromDate(firstOrder) : null,
+        _sortKey: (firstOrder || createdAt).getTime(),
+      })
+      continue // 新規は stale に二重計上しない
     }
 
-    if (lastOrder < thirtyDaysAgo) {
+    // 停滞判定（新規でない場合のみ）
+    if (!lastOrder) {
+      // 発注なし & 新規でもない = 長期未発注扱い
+      salonsStale30.push({ salonKey, name, lastOrderDate: null, _sortKey: 0 })
+    } else if (lastOrder < thirtyDaysAgo) {
       salonsStale30.push({
-        salonKey: s.id,
+        salonKey,
         name,
         lastOrderDate: Timestamp.fromDate(lastOrder),
         _sortKey: lastOrder.getTime(),
       })
     } else if (lastOrder < fourteenDaysAgo) {
       salonsStale14.push({
-        salonKey: s.id,
+        salonKey,
         name,
         lastOrderDate: Timestamp.fromDate(lastOrder),
         _sortKey: lastOrder.getTime(),
       })
     }
-
-    // 新規サロン: createdAt が直近30日以内
-    if (createdAt && createdAt >= thirtyDaysAgo) {
-      salonsNew.push({
-        salonKey: s.id,
-        name,
-        firstOrderDate: Timestamp.fromDate(lastOrder),
-        _sortKey: createdAt.getTime(),
-      })
-    }
   }
+
+  // 総サロン数（dealerSalons + orders から補足した union）
+  const totalSalonCount = allNames.size
+  const operationRate = totalSalonCount > 0 ? activeSalonCount / totalSalonCount : 0
 
   // ソート（古い方から / 新規は新しい方から）し、各最大5件
   const trimStale = (arr) =>
@@ -274,19 +288,25 @@ function aggregateForDealer({ dealer, salons, orders, windows }) {
   const kickbackEstimate = Math.round(monthRevenue * (dealer.kbRate || 0) / 100)
 
   return {
-    dealerCode: dealer.dealerCode,
-    month,
-    monthRevenue: Math.round(monthRevenue),
-    prevMonthSameDayRevenue: Math.round(prevMonthSameDayRevenue),
-    activeSalonCount,
-    totalSalonCount,
-    operationRate: Math.round(operationRate * 1000) / 1000, // 小数3桁
-    kickbackEstimate,
-    salonsStale30: trimStale(salonsStale30),
-    salonsStale14: trimStale(salonsStale14),
-    salonsNew: trimNew(salonsNew),
-    recentOrders,
-    snapshotCutoffAt: Timestamp.fromDate(cutoff),
+    snapshot: {
+      dealerCode: dealer.dealerCode,
+      month,
+      monthRevenue: Math.round(monthRevenue),
+      prevMonthSameDayRevenue: Math.round(prevMonthSameDayRevenue),
+      activeSalonCount,
+      totalSalonCount,
+      operationRate: Math.round(operationRate * 1000) / 1000, // 小数3桁
+      kickbackEstimate,
+      salonsStale30: trimStale(salonsStale30),
+      salonsStale14: trimStale(salonsStale14),
+      salonsNew: trimNew(salonsNew),
+      recentOrders,
+      snapshotCutoffAt: Timestamp.fromDate(cutoff),
+    },
+    sourceBreakdown: {
+      dealerSalonsCount: dealerSalonByName.size,
+      ordersDerivedCount: ordersOnlyCount,
+    },
   }
 }
 
@@ -313,14 +333,16 @@ async function main() {
         fetchDealerSalons(dealer.dealerCode),
         fetchDealerOrders(dealer.dealerCode),
       ])
-      const snapshot = aggregateForDealer({ dealer, salons, orders, windows })
+      const { snapshot, sourceBreakdown } = aggregateForDealer({ dealer, salons, orders, windows })
       results.push({ dealer, snapshot, orderCount: orders.length, salonCount: salons.length })
+      const kbHint = dealer.kbRate > 0 ? '' : ' ⚠️ kbRate 未設定'
       console.log(
         `  ✅ ${dealer.dealerCode} ${dealer.companyName || ''} ` +
           `月売上 ¥${snapshot.monthRevenue.toLocaleString()} / ` +
           `前月同日 ¥${snapshot.prevMonthSameDayRevenue.toLocaleString()} / ` +
-          `稼働 ${snapshot.activeSalonCount}/${snapshot.totalSalonCount} / ` +
-          `見込KB ¥${snapshot.kickbackEstimate.toLocaleString()}`,
+          `稼働 ${snapshot.activeSalonCount}/${snapshot.totalSalonCount} ` +
+          `(dealerSalons ${sourceBreakdown.dealerSalonsCount} + orders由来 ${sourceBreakdown.ordersDerivedCount}) / ` +
+          `見込KB ¥${snapshot.kickbackEstimate.toLocaleString()}${kbHint}`,
       )
     } catch (e) {
       errors.push({ dealerCode: dealer.dealerCode, message: e.message })
