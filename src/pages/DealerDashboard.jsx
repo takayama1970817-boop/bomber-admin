@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useAuth } from '../contexts/AuthContext.jsx'
 import { useDealerDashboard, currentYearMonth } from '../hooks/useDealerDashboard.js'
@@ -172,10 +173,21 @@ export default function DealerDashboard() {
 /**
  * ページタイトル + 最終更新表示。
  * 最終更新は snapshot 有無に関わらず必ずレンダリングする（値が無ければ「—」）。
+ * 現在時刻は 30 秒ごとに更新（秒は表示しないので 1 分以内に揃えば十分）。
  */
+function useClockMinutes() {
+  const [now, setNow] = useState(() => new Date())
+  useEffect(() => {
+    const id = setInterval(() => setNow(new Date()), 30 * 1000)
+    return () => clearInterval(id)
+  }, [])
+  return now
+}
+
 function Header({ companyName, snapshot }) {
   const month = snapshot?.month
   const lastUpdated = resolveLastUpdated(snapshot)
+  const now = useClockMinutes()
 
   return (
     <div className="mb-6 flex flex-wrap items-start justify-between gap-3">
@@ -189,7 +201,8 @@ function Header({ companyName, snapshot }) {
         )}
       </div>
       <div className="text-right text-xs text-gray-500">
-        <div>最終更新：{fmtTimestamp(lastUpdated)}</div>
+        <div className="text-gray-700">現在：{fmtTimestamp(now)}</div>
+        <div className="mt-0.5">最終更新：{fmtTimestamp(lastUpdated)}</div>
         <div className="mt-0.5 text-gray-400">※当日12:00締め分まで反映</div>
         <div className="mt-0.5 text-indigo-500">🕐 13:00集計済みデータ（Bカート基準）</div>
       </div>
