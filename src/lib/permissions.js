@@ -251,6 +251,8 @@ export function canCreatePurchaseOrder(p) { return isErpUser(p) }
 export function canEditPurchaseOrder(p) { return isErpUser(p) }
 export function canApprovePurchaseOrder(p) { return isAdmin(p) }
 export function canSendPurchaseOrder(p) { return isErpUser(p) }
+/** 発注取消は破壊的なので admin のみ */
+export function canCancelPurchaseOrder(p) { return isAdmin(p) }
 
 // --- 在庫 ---
 export function canViewInventory(p) { return isErpUser(p) }

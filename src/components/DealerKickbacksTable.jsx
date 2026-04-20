@@ -1,0 +1,98 @@
+import {
+  KICKBACK_STATUS_LABELS,
+  KICKBACK_STATUS_BADGE,
+  normalizeKickbackStatus,
+  extractKickbackAmount,
+  extractSalesAmount,
+  canDownloadKickbackPdf,
+  openKickbackPdf,
+} from '../hooks/useDealerKickbacks.js'
+
+const fmtYen = (n) => `¥${Math.round(Number(n) || 0).toLocaleString()}`
+
+function fmtMonth(m) {
+  if (!m) return '—'
+  return String(m).replace('-', '/')
+}
+
+function fmtDate(ts) {
+  if (!ts) return '—'
+  const d = ts.toDate ? ts.toDate() : new Date(ts)
+  if (Number.isNaN(d.getTime())) return '—'
+  return `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')}`
+}
+
+export default function DealerKickbacksTable({ kickbacks, onSelect }) {
+  if (!kickbacks || kickbacks.length === 0) {
+    return (
+      <div className="rounded-xl border border-dashed border-gray-300 bg-white py-12 text-center text-sm text-gray-400">
+        キックバックデータがありません
+      </div>
+    )
+  }
+
+  return (
+    <div className="overflow-hidden rounded-xl border border-gray-200 bg-white">
+      <table className="min-w-full text-sm">
+        <thead className="bg-gray-50 text-xs text-gray-600">
+          <tr>
+            <th className="px-4 py-2 text-left">月</th>
+            <th className="px-4 py-2 text-right">対象売上</th>
+            <th className="px-4 py-2 text-right">キックバック</th>
+            <th className="px-4 py-2 text-left">支払予定日</th>
+            <th className="px-4 py-2 text-left">状態</th>
+            <th className="px-4 py-2 text-center">PDF</th>
+            <th className="px-4 py-2 text-center">詳細</th>
+          </tr>
+        </thead>
+        <tbody>
+          {kickbacks.map((kb) => {
+            const status = normalizeKickbackStatus(kb)
+            return (
+              <tr key={kb.id} className="border-t border-gray-100 hover:bg-gray-50">
+                <td className="px-4 py-2 whitespace-nowrap font-medium text-gray-900">
+                  {fmtMonth(kb.month || kb.period)}
+                </td>
+                <td className="px-4 py-2 text-right text-gray-700">
+                  {fmtYen(extractSalesAmount(kb))}
+                </td>
+                <td className="px-4 py-2 text-right font-bold text-indigo-900">
+                  {fmtYen(extractKickbackAmount(kb))}
+                </td>
+                <td className="px-4 py-2 text-xs text-gray-600">
+                  {fmtDate(kb.scheduledAt) === '—' ? '—' : fmtDate(kb.scheduledAt)}
+                </td>
+                <td className="px-4 py-2">
+                  <span className={`rounded px-2 py-0.5 text-[11px] font-medium ${KICKBACK_STATUS_BADGE[status]}`}>
+                    {KICKBACK_STATUS_LABELS[status]}
+                  </span>
+                </td>
+                <td className="px-4 py-2 text-center">
+                  {canDownloadKickbackPdf(kb) ? (
+                    <button
+                      onClick={() => openKickbackPdf(kb.pdfUrl)}
+                      className="rounded border border-gray-300 bg-white px-3 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50"
+                      title="清算書PDFを開く"
+                    >
+                      📄 PDF
+                    </button>
+                  ) : (
+                    <span className="text-xs text-gray-300">—</span>
+                  )}
+                </td>
+                <td className="px-4 py-2 text-center">
+                  <button
+                    onClick={() => onSelect?.(kb)}
+                    className="rounded-lg bg-indigo-600 px-3 py-1 text-xs font-medium text-white hover:bg-indigo-700"
+                  >
+                    詳細
+                  </button>
+                </td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+    </div>
+  )
+}

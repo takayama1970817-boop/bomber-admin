@@ -10,10 +10,13 @@ import {
   orderBy,
   query,
   serverTimestamp,
+  updateDoc,
   where,
 } from 'firebase/firestore'
 import { httpsCallable } from 'firebase/functions'
-import { db, functions } from '../lib/firebase.js'
+import { ref as storageRef, uploadBytes, getDownloadURL } from 'firebase/storage'
+import { db, functions, storage } from '../lib/firebase.js'
+import { useAuth } from '../contexts/AuthContext.jsx'
 import { generateKickbackPdfBase64 } from '../lib/generateKickbackPdf.js'
 import { generateKickbackPdf } from '../lib/generateKickbackPdf.js'
 import { downloadEml } from '../lib/generateEml.js'
@@ -274,6 +277,7 @@ function parseCsvText(text) {
 
 export default function KickbackManage() {
   const [searchParams] = useSearchParams()
+  const { profile } = useAuth()
   const initialDealer = searchParams.get('dealer') || ''
 
   const [dealers, setDealers] = useState([])
@@ -876,6 +880,65 @@ export default function KickbackManage() {
       setStatements((prev) => prev.filter((s) => s.id !== id))
     } catch (e) {
       alert('削除に失敗しました')
+    }
+  }
+
+  // アップロード中の stmt.id を追跡（進捗UI用）
+  const [uploadingStmtId, setUploadingStmtId] = useState(null)
+
+  /**
+   * キックバック清算書 PDF を Storage にアップロードし、
+   * kickbacks ドキュメントに pdfUrl 等を保存する。
+   * 同じレコードに再アップロード可能（上書きではなく新規パス + ドキュメント更新）。
+   */
+  const handleUploadKickbackPdf = async (stmt, file) => {
+    if (!file) return
+    if (file.type !== 'application/pdf') {
+      alert('PDFファイルのみアップロード可能です')
+      return
+    }
+    if (file.size > 20 * 1024 * 1024) {
+      alert('ファイルサイズは20MB以下にしてください')
+      return
+    }
+    if (!stmt?.id || !stmt?.dealerCode) {
+      alert('清算書レコードが不正です')
+      return
+    }
+
+    setUploadingStmtId(stmt.id)
+    try {
+      const timestamp = Date.now()
+      const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_')
+      const path = `kickback-pdfs/${stmt.dealerCode}/${stmt.month}_${timestamp}_${safeName}`
+      const ref = storageRef(storage, path)
+      await uploadBytes(ref, file, { contentType: 'application/pdf' })
+      const pdfUrl = await getDownloadURL(ref)
+
+      const patch = {
+        pdfUrl,
+        pdfFileName: file.name,
+        pdfStoragePath: path,
+        pdfUploadedAt: serverTimestamp(),
+        pdfUploadedBy: profile?.uid || '',
+      }
+      await updateDoc(doc(db, 'kickbacks', stmt.id), patch)
+
+      // ローカル state を即時反映（/dealer/kickbacks は次回ロードで反映）
+      setStatements((prev) =>
+        prev.map((s) =>
+          s.id === stmt.id
+            ? { ...s, ...patch, pdfUploadedAt: new Date() }
+            : s,
+        ),
+      )
+
+      alert(`PDFをアップロードしました\n${file.name}`)
+    } catch (e) {
+      console.error('PDF upload error:', e)
+      alert('PDFアップロードに失敗しました: ' + (e?.message || ''))
+    } finally {
+      setUploadingStmtId(null)
     }
   }
 
@@ -1491,6 +1554,47 @@ ${senderEmail}
                         >
                           🧪テスト
                         </button>
+
+                        {/* PDF アップロード（代理店が /dealer/kickbacks で見られる正式PDF） */}
+                        <label
+                          className={`cursor-pointer rounded border px-3 py-1 text-xs font-medium transition-colors ${
+                            uploadingStmtId === stmt.id
+                              ? 'border-gray-300 bg-gray-100 text-gray-400'
+                              : stmt.pdfUrl
+                                ? 'border-amber-300 bg-amber-50 text-amber-700 hover:bg-amber-100'
+                                : 'border-emerald-300 bg-emerald-50 text-emerald-700 hover:bg-emerald-100'
+                          }`}
+                          title={stmt.pdfUrl ? `現在のファイル: ${stmt.pdfFileName || ''}` : '代理店に公開するPDFを登録'}
+                        >
+                          {uploadingStmtId === stmt.id
+                            ? '📤 アップロード中...'
+                            : stmt.pdfUrl
+                              ? '🔄 PDF更新'
+                              : '📤 PDF登録'}
+                          <input
+                            type="file"
+                            accept="application/pdf,.pdf"
+                            className="hidden"
+                            disabled={uploadingStmtId === stmt.id}
+                            onChange={(e) => {
+                              const file = e.target.files?.[0]
+                              e.target.value = '' // 同じファイルを再選択可能にする
+                              if (file) handleUploadKickbackPdf(stmt, file)
+                            }}
+                          />
+                        </label>
+                        {stmt.pdfUrl && (
+                          <a
+                            href={stmt.pdfUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="rounded border border-gray-300 bg-white px-2 py-1 text-xs text-gray-600 hover:bg-gray-50"
+                            title={stmt.pdfFileName || ''}
+                          >
+                            📄 現ファイル
+                          </a>
+                        )}
+
                         <button
                           onClick={() => handleDeleteStmt(stmt.id)}
                           className="text-xs text-red-500 hover:underline"

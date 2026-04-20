@@ -27,6 +27,11 @@ const { sendFax, telnyxWebhook } = require('./sendFax')
 exports.sendFax = sendFax
 exports.telnyxWebhook = telnyxWebhook
 
+// Firestore 日次バックアップ
+const { scheduledFirestoreBackup, cleanupOldBackups } = require('./firestoreBackup')
+exports.scheduledFirestoreBackup = scheduledFirestoreBackup
+exports.cleanupOldBackups = cleanupOldBackups
+
 /**
  * 管理者がFirebase Authユーザーを削除する
  * クライアントからは他人のAuthアカウントを削除できないため、

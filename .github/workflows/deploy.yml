@@ -1,0 +1,52 @@
+name: Deploy
+
+# 目的:
+#   main への push で Firebase Functions / Hosting / Rules をデプロイ。
+#   ただし「復旧訓練ログが前月分まで記入されている」ことを前提条件とする。
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  # === ゲート 復旧訓練ログ必須チェック ===
+  drill-log-gate:
+    name: 🔒 訓練ログ必須チェック
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: 前月の訓練ログを確認
+        run: node scripts/backup/check-drill-log.mjs
+
+  # === 本デプロイ（ゲート通過後のみ実行） ===
+  deploy:
+    name: Firebase デプロイ
+    needs: drill-log-gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Functions の依存インストール
+        run: |
+          cd functions
+          npm ci
+
+      - name: Firebase CLI インストール
+        run: npm install -g firebase-tools
+
+      - name: デプロイ
+        env:
+          FIREBASE_TOKEN: ${{ secrets.FIREBASE_TOKEN }}
+        run: |
+          firebase deploy \
+            --only functions,firestore:rules,hosting \
+            --project bomber-admin-prod \
+            --token "${FIREBASE_TOKEN}" \
+            --non-interactive

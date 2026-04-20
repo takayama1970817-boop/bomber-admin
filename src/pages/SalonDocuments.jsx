@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
-import { collection, getDocs, orderBy, query } from 'firebase/firestore'
+import { collection, getDocs, orderBy, query, where } from 'firebase/firestore'
 import { db } from '../lib/firebase.js'
+import { useAuth } from '../contexts/AuthContext.jsx'
 
 function fmtDate(ts) {
   if (!ts) return '—'
@@ -16,24 +17,52 @@ const CATEGORY_LABELS = {
 }
 
 export default function SalonDocuments() {
+  const { profile } = useAuth()
   const [docs, setDocs] = useState([])
   const [loading, setLoading] = useState(true)
   const [filter, setFilter] = useState('all')
 
   useEffect(() => {
+    if (!profile) return
     ;(async () => {
       try {
-        const snap = await getDocs(
-          query(collection(db, 'dealerDocuments'), orderBy('updatedAt', 'desc')),
-        )
-        setDocs(snap.docs.map((d) => ({ id: d.id, ...d.data() })))
+        // rules の canReadDealerDocument() に合致するクエリを分割実行。
+        const base = collection(db, 'dealerDocuments')
+        const queries = [
+          query(
+            base,
+            where('isActive', '==', true),
+            where('visibility', 'in', ['all', 'salons']),
+            orderBy('updatedAt', 'desc'),
+          ),
+        ]
+        if (profile.companyName) {
+          queries.push(
+            query(
+              base,
+              where('isActive', '==', true),
+              where('visibility', '==', 'specific'),
+              where('allowedCompanies', 'array-contains', profile.companyName),
+              orderBy('updatedAt', 'desc'),
+            ),
+          )
+        }
+        const snaps = await Promise.all(queries.map((q) => getDocs(q)))
+        const map = new Map()
+        snaps.forEach((snap) => snap.docs.forEach((d) => map.set(d.id, { id: d.id, ...d.data() })))
+        const merged = Array.from(map.values()).sort((a, b) => {
+          const ta = a.updatedAt?.toMillis?.() || 0
+          const tb = b.updatedAt?.toMillis?.() || 0
+          return tb - ta
+        })
+        setDocs(merged)
       } catch (e) {
         console.error('資料取得エラー:', e)
       } finally {
         setLoading(false)
       }
     })()
-  }, [])
+  }, [profile])
 
   const filtered = filter === 'all' ? docs : docs.filter((d) => d.category === filter)
   const categories = [...new Set(docs.map((d) => d.category).filter(Boolean))]
