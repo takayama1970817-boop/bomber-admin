@@ -76,12 +76,17 @@ export default function SalonSearchPage() {
             <br className="hidden sm:block" />
             現在開発中です。
           </p>
-          <p className="text-slate-600 text-sm sm:text-base leading-relaxed">
+          <p className="text-slate-600 text-sm sm:text-base leading-relaxed mb-4">
             お客様とサロンの最良のマッチングを実現するため、
             <br className="hidden sm:block" />
             情報の正確性と使いやすさを丁寧に整えておりますので、
             <br className="hidden sm:block" />
             公開まで今しばらくお待ちください。
+          </p>
+          <p className="text-slate-700 text-sm sm:text-base leading-relaxed font-semibold">
+            より多くのサロンと連携し、
+            <br className="sm:hidden" />
+            最適なご案内ができる状態で公開予定です。
           </p>
         </div>
       </section>

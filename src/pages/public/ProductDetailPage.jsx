@@ -14,7 +14,7 @@ function FindSalonCTA({ productName }) {
         FIND A SALON
       </p>
       <h3 className="text-xl sm:text-2xl font-bold mb-3">
-        この商品を扱うサロンを探す
+        お近くの取扱サロンを探す
       </h3>
       <p className="text-slate-300 text-sm leading-relaxed max-w-xl mx-auto mb-6">
         {productName}を実際に体験いただける、お近くの取扱サロンをご案内します。
@@ -23,11 +23,14 @@ function FindSalonCTA({ productName }) {
         to="/salon-search"
         className="inline-flex items-center gap-2 px-7 py-3 rounded-full bg-white text-slate-900 font-semibold text-sm hover:bg-amber-50 transition-colors shadow-lg"
       >
-        サロンを探す
+        お近くの取扱サロンを探す
         <span className="text-[10px] font-bold tracking-wider text-amber-700 bg-amber-100 border border-amber-300 rounded-full px-2 py-0.5">
           Coming Soon
         </span>
       </Link>
+      <p className="mt-4 text-[11px] text-slate-400 tracking-wide">
+        公開後すぐにご案内できるよう準備中です
+      </p>
     </div>
   )
 }
@@ -137,7 +140,7 @@ export default function ProductDetailPage() {
               )}
 
               {/* スペック */}
-              <dl className="grid grid-cols-2 gap-y-3 gap-x-6 text-sm border-y border-slate-100 py-5">
+              <dl className="grid grid-cols-2 gap-y-3 gap-x-6 text-sm border-y border-slate-100 py-5 mb-7">
                 <dt className="text-slate-400">品番</dt>
                 <dd className="text-slate-800 font-medium">{product.code}</dd>
                 <dt className="text-slate-400">容量</dt>
@@ -145,6 +148,22 @@ export default function ProductDetailPage() {
                 <dt className="text-slate-400">カテゴリ</dt>
                 <dd className="text-slate-800 font-medium">{product.category}</dd>
               </dl>
+
+              {/* ファーストビュー内 CTA（スクロールせずに到達） */}
+              <div>
+                <Link
+                  to="/salon-search"
+                  className="inline-flex items-center gap-2 px-7 py-3 rounded-full bg-indigo-700 text-white font-semibold text-sm hover:bg-indigo-800 transition-colors shadow-lg"
+                >
+                  お近くの取扱サロンを探す
+                  <span className="text-[10px] font-bold tracking-wider text-amber-200 bg-white/10 border border-amber-300/50 rounded-full px-2 py-0.5">
+                    Coming Soon
+                  </span>
+                </Link>
+                <p className="mt-3 text-xs text-slate-400 tracking-wide">
+                  公開後すぐにご案内できるよう準備中です
+                </p>
+              </div>
             </div>
           </div>
         </div>

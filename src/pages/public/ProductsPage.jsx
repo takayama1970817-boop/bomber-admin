@@ -181,10 +181,16 @@ export default function ProductsPage() {
           </p>
           <Link
             to="/salon-search"
-            className="inline-flex items-center justify-center px-8 py-3 rounded-full bg-indigo-700 text-white font-semibold text-sm hover:bg-indigo-800 transition-colors shadow-lg"
+            className="inline-flex items-center gap-2 px-8 py-3 rounded-full bg-indigo-700 text-white font-semibold text-sm hover:bg-indigo-800 transition-colors shadow-lg"
           >
-            取扱サロンを探す
+            お近くの取扱サロンを探す
+            <span className="text-[10px] font-bold tracking-wider text-amber-200 bg-white/10 border border-amber-300/50 rounded-full px-2 py-0.5">
+              Coming Soon
+            </span>
           </Link>
+          <p className="mt-4 text-xs text-slate-400 tracking-wide">
+            公開後すぐにご案内できるよう準備中です
+          </p>
         </div>
       </section>
     </>

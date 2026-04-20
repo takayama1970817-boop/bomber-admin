@@ -83,7 +83,7 @@ export default function HomePage() {
               to="/salon-search"
               className="inline-flex items-center gap-2 px-8 py-3 rounded-full bg-white text-slate-900 font-semibold text-sm hover:bg-amber-50 transition-colors shadow-lg"
             >
-              取扱サロンを探す
+              お近くの取扱サロンを探す
               <span className="text-[10px] font-bold tracking-wider text-amber-700 bg-amber-100 border border-amber-300 rounded-full px-2 py-0.5">
                 Coming Soon
               </span>
@@ -96,6 +96,10 @@ export default function HomePage() {
               商品を見る
             </Link>
           </div>
+          {/* CTA 補足: 期待感を醸成 */}
+          <p className="mt-5 text-[11px] sm:text-xs text-slate-400 tracking-wide">
+            公開後すぐにご案内できるよう準備中です
+          </p>
         </div>
       </section>
 
@@ -156,9 +160,9 @@ export default function HomePage() {
                 </svg>
               </span>
               <div>
-                <p className="text-sm font-bold text-slate-900">全国500店舗以上が導入</p>
+                <p className="text-sm font-bold text-slate-900">全国500店舗以上のサロンで導入</p>
                 <p className="text-xs text-slate-500 leading-relaxed mt-0.5">
-                  継続支持されるサロンパートナー
+                  プロの現場で継続して使われている実績
                 </p>
               </div>
             </div>
@@ -297,9 +301,15 @@ export default function HomePage() {
             <p className="text-amber-600 text-xs tracking-[0.3em] font-semibold mb-4">
               GLOBAL EXPANSION
             </p>
-            <h2 className="text-2xl sm:text-3xl lg:text-4xl font-bold text-slate-900 mb-6">
+            <h2 className="text-2xl sm:text-3xl lg:text-4xl font-bold text-slate-900 mb-4">
               世界へ広がる、VAVITTE の品質
             </h2>
+            {/* 即理解用リード（一瞬で伝える） */}
+            <p className="text-base sm:text-lg text-slate-800 font-semibold leading-relaxed mb-6">
+              日本発のサロン専売ブランドとして、
+              <br className="sm:hidden" />
+              中国・インドネシアへ展開しています。
+            </p>
             <p className="text-slate-600 text-sm sm:text-base leading-relaxed max-w-3xl mx-auto">
               日本で磨き上げたプロフェッショナル処方を、アジアのサロン市場へ。
               <br className="hidden sm:block" />
