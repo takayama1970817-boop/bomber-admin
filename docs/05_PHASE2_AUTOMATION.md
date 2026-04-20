@@ -1,7 +1,7 @@
 # 05 Phase 2 自動化設計書（月次自動作成・自動送信・再実行制御）
 
 - **対象**: bomber-admin ERP / 取引精算（kickback + invoice 統合）
-- **版**: v0.1（§1 のみ起草）
+- **版**: v0.2（§1 軽微修正・ChatGPT レビュー反映）
 - **起草開始日**: 2026-04-20
 - **起草者**: ロイヤルトラスト社長 + Claude Code
 - **承認フロー**: §1〜§3 完成後に社長レビュー → ChatGPT レビュー → 両承認で §4 以降着手
@@ -80,6 +80,74 @@
 {type}_{dealerCode}_{YYYY-MM}
 ```
 
+#### type の enum 固定（ChatGPT レビュー反映 / 必須1）
+
+`type` は以下の **2 値のみ** 許可する。それ以外の値は docId 生成前に throw する。
+
+```javascript
+const ALLOWED_TYPES = Object.freeze(['kb', 'invoice'])
+
+/*
+ * 将来拡張（現時点では実装不要・本コメントは設計メモ）:
+ *   - 'refund'     : 返金（代理店への返金が発生した月の精算）
+ *   - 'adjustment' : 調整（過月分の修正・再計算・手動調整）
+ *   - 'payment'    : 支払系（RT から代理店への別建て支払が発生した場合）
+ *
+ * 追加時の手順:
+ *   1. 本 ALLOWED_TYPES を改訂
+ *   2. collectionName のマッピング（§1.3 基本構造）を更新
+ *   3. rules 側の match /{type}/{docId} を追加
+ *   4. 社長承認 + 設計書 §13 変更履歴に記録
+ *
+ * 新種別は既存 kb / invoice の意味論を壊さない独立した種別として追加する。
+ * 既存 docId との衝突は type プレフィクスで自然に防がれる。
+ */
+function validateType(type) {
+  if (!ALLOWED_TYPES.includes(type)) {
+    throw new Error(`Invalid type: ${type}. Must be one of ${ALLOWED_TYPES.join(', ')}`)
+  }
+}
+```
+
+| type | 意味 | 対象 kbGroup |
+|---|---|---|
+| `kb` | KB 清算（kickbacks コレクション） | A / B |
+| `invoice` | 請求書（invoices コレクション） | C |
+
+新種別（例：`refund` / `adjustment` / `payment` 等）を追加する場合は §1.2 の ALLOWED_TYPES を改訂し、
+改訂時は必ず社長承認 + 設計書 §13 変更履歴への記録を行う。
+
+#### dealerCode の正規化（ChatGPT レビュー反映 / 必須2）
+
+`dealerCode` は J 形式（`J` + 4 桁数字）のみ許可する。
+
+```javascript
+const DEALER_CODE_REGEX = /^J\d{4}$/
+
+function validateDealerCode(code) {
+  if (typeof code !== 'string' || !DEALER_CODE_REGEX.test(code)) {
+    throw new Error(`Invalid dealerCode: ${code}. Must match /^J\\d{4}$/`)
+  }
+}
+```
+
+Phase 1 で 8 代理店（v1-V7, I001）を J 形式（J0016-J0023）に統一済み。
+新規代理店登録時も J 形式を強制する（dealers コレクションの rules 側でも検証予定）。
+
+#### month の形式
+
+`YYYY-MM` 形式のみ許可する。
+
+```javascript
+const MONTH_REGEX = /^\d{4}-(0[1-9]|1[0-2])$/
+
+function validateMonth(month) {
+  if (typeof month !== 'string' || !MONTH_REGEX.test(month)) {
+    throw new Error(`Invalid month: ${month}. Must match YYYY-MM`)
+  }
+}
+```
+
 #### 具体例
 
 | 種別 | dealerCode | 月 | docId |
@@ -94,11 +162,13 @@
 2. **衝突条件が自明**：同じ型・同じ代理店・同じ月は必ず同じ docId になる
 3. **検索が容易**：月次バッチの再実行時、対象 docId が決定的に算出できる
 4. **複合キー不要**：`where('dealerCode', '==', ...).where('month', '==', ...)` の複合クエリが不要
+5. **enum 固定で破綻検知容易**：不正な type / dealerCode / month は docId 生成前に throw
 
 #### docId 採用に伴う制約
 
-- `dealerCode` は J 形式（例：J0015, J0019）に正規化済みであること（Phase 1 で完了済）
-- 月は必ず `YYYY-MM` 形式（例：2026-03、2026-04）
+- `type` は `'kb' | 'invoice'` のみ（ALLOWED_TYPES で enum 固定）
+- `dealerCode` は J 形式（`^J\d{4}$`）
+- `month` は `YYYY-MM` 形式（`^\d{4}-(0[1-9]|1[0-2])$`）
 - 同一代理店が同月内に 2 度精算されるユースケースは想定しない（存在するなら別途設計）
 
 #### 禁止する docId 形式
@@ -109,19 +179,35 @@
 
 ### §1.3 Cloud Functions 側の create-only ロジック
 
+#### 本節の原則（ChatGPT レビュー反映 / 推奨2）
+
+**§1 の思想は「再生成しないこと」で統一する。**
+
+- 一度 `create` に成功したドキュメントは、**物理的に上書きも再作成もしない**
+- 月次バッチの再実行は「**未作成分のみ create する**」という冪等動作
+- 既存ドキュメントの `status === 'failed'` は `update` で状態管理する（再 create はしない）
+- `failed` を「作成されなかった」とみなすことはしない（既に 1 件存在している事実は消さない）
+
 #### 基本構造
 
 ```javascript
 // Cloud Functions: createMonthlySettlement(dealerCode, month, type)
+validateType(type)
+validateDealerCode(dealerCode)
+validateMonth(month)
+
 const docId = `${type}_${dealerCode}_${month}`
+const collectionName = type === 'kb' ? 'kickbacks' : 'invoices'
 const docRef = db.collection(collectionName).doc(docId)
 
 await db.runTransaction(async (tx) => {
   const snap = await tx.get(docRef)
   if (snap.exists) {
-    // 既に作成済み → 冪等にスキップ
-    throw new AlreadyExistsError(`${docId} は既に作成済み`)
+    // 既に存在 → 再 create は行わず、冪等にスキップ
+    // status === 'failed' であっても update で状態管理するのみ（§1.7 参照）
+    return { skipped: true, reason: 'already_exists', existingStatus: snap.data().status }
   }
+  // 未作成分のみ create
   tx.create(docRef, {
     dealerCode,
     month,
@@ -132,6 +218,7 @@ await db.runTransaction(async (tx) => {
     version: 1,
     // ... 明細等
   })
+  return { skipped: false }
 })
 ```
 
@@ -142,7 +229,8 @@ await db.runTransaction(async (tx) => {
 | create 関数 | `tx.create()` を使う（`tx.set()` ではない） | `create` は既存ドキュメントがあれば失敗する |
 | transaction | 必須 | get → create の間の競合を防ぐ |
 | docId | 明示指定（`doc(docId)`） | 自動採番を使わない |
-| スキップ時の扱い | 例外ではなくログ記録 | §1.8 参照 |
+| 既存検知 | `snap.exists` なら skip | 再生成しないという思想 |
+| skip の扱い | 例外ではなく戻り値で記録 | §1.8 参照 |
 
 #### `tx.create()` vs `tx.set()`
 
@@ -150,45 +238,98 @@ await db.runTransaction(async (tx) => {
 - **`tx.set(ref, data)`**: 既存ドキュメントを上書き → **絶対に使わない**
 - **`tx.set(ref, data, {merge: true})`**: 既存と新規をマージ → **絶対に使わない**
 
+#### 既存ドキュメントの状態遷移（再 create しない）
+
+一度 create 成功したドキュメントは、以降 `update` のみで状態管理する。
+
+| 現状 status | 想定される次の遷移 | 遷移手段 |
+|---|---|---|
+| `draft` | `approved` / `cancelled` | admin が UI から `update` |
+| `approved` | `sent` / `failed` | 送信処理（§2）が `update` |
+| `sent` | （最終状態） | なし |
+| `failed` | `approved`（リトライ後）/ `cancelled` | admin が UI から `update` |
+| `cancelled` | （最終状態） | なし |
+
+**どの状態であっても再 create は行わない。** 必要に応じて status を update するのみ。
+
 ### §1.4 Firestore rules 側の再 create 禁止
 
-#### rules の防衛ライン
+#### Admin SDK bypass の明文化（ChatGPT レビュー反映 / 必須3）
 
-Cloud Functions のロジックに穴があった場合の最終防衛ラインとして、
-Firestore rules 側でも再 create を禁止する。
+**重要な前提**：Firestore rules は **クライアント SDK 経由のアクセスにのみ適用される**。
+Cloud Functions が使う **Admin SDK は rules を完全にバイパスする**。
+
+これが意味することは：
+
+- rules は「クライアントからの直接操作」を遮断する防衛ラインである
+- rules は「Cloud Functions 内部のロジックバグ」に対する防衛にはならない
+- Admin SDK で書き込む Cloud Functions のコード品質は、**Cloud Functions 側の責任**
+
+したがって本設計の二重防衛は「層 A（Cloud Functions 内部）＋ 層 B（クライアント遮断）」という
+**並列関係** であって、rules が Cloud Functions の背後に立つ直列的な防衛ではない。
+
+#### 二重防衛の正確な位置付け
+
+| 層 | 防衛対象 | 防衛手段 | Admin SDK に効くか |
+|---|---|---|---|
+| A. Cloud Functions 内部 | Scheduler / 手動トリガー / リトライによる重複起動 | transaction + `tx.create()` + validate* | — |
+| B. クライアント経由 | 悪意ある / バグったクライアントコード | Firestore rules `allow create: if false` | ✗（bypass される） |
+
+**層 A が Admin SDK 経由の書き込みを防ぐ唯一の手段** であり、
+layer B はクライアントからの不正操作を防ぐもの。どちらか片方に依存しない。
+
+#### rules 本体
 
 ```javascript
 // firestore.rules
 match /kickbacks/{docId} {
-  // create: Cloud Functions (Admin SDK) 経由のみ許可
-  allow create: if false; // クライアントからの直接 create 禁止
+  // create: クライアント直接 create は一切禁止（Cloud Functions Admin SDK 経由のみ許可）
+  // Admin SDK は rules をバイパスするため、この rule は Admin SDK を制限しない
+  allow create: if false;
 
-  // update: Cloud Functions + admin のみ、status 遷移とログ記録のみ
+  // update: クライアントからは admin のみ、かつ status 遷移関連フィールドのみ
+  // Admin SDK（Cloud Functions）は bypass するので本 rule の制約を受けない
   allow update: if request.auth != null
     && hasValidAdminRole()
-    && onlyAllowedFieldsChanged(['status', 'updatedAt', 'approvedAt', 'approvedBy']);
+    && request.resource.data.diff(resource.data).affectedKeys()
+        .hasOnly(['status', 'updatedAt', 'approvedAt', 'approvedBy', 'cancelledAt', 'cancelledBy', 'cancelReason']);
 
-  // delete: 物理削除禁止
+  // delete: 物理削除禁止（Admin SDK も含めて運用上禁止、論理削除で対応）
+  allow delete: if false;
+}
+
+match /invoices/{docId} {
+  // kickbacks と同じポリシー
+  allow create: if false;
+  allow update: if request.auth != null
+    && hasValidAdminRole()
+    && request.resource.data.diff(resource.data).affectedKeys()
+        .hasOnly(['status', 'updatedAt', 'approvedAt', 'approvedBy', 'cancelledAt', 'cancelledBy', 'cancelReason']);
   allow delete: if false;
 }
 ```
 
+#### Admin SDK 側の自己防衛
+
+Cloud Functions のコードでも「rules のような防衛」を自力で実装する必要がある：
+
+```javascript
+// Cloud Functions 冒頭
+// Admin SDK は rules をバイパスするので、以下を Functions 側で必ずチェック
+validateType(type)              // §1.2 で定義
+validateDealerCode(dealerCode)  // §1.2 で定義
+validateMonth(month)            // §1.2 で定義
+assertEnabled()                 // §1.9 で定義
+```
+
+これを怠ると、Admin SDK の特権で不正な docId / 不正なフィールドが Firestore に書き込まれうる。
+
 #### 設計ポイント
 
-- **クライアントからの create は一切禁止**（`allow create: if false`）
-- Cloud Functions（Admin SDK）経由のみ作成可能（rules は Admin SDK をバイパスする）
-- update は status 遷移関連フィールドのみ許可（allowlist 方式）
-- delete は一切禁止（論理削除で対応）
-
-#### 二重防衛の意味
-
-| 層 | 防衛内容 |
-|---|---|
-| 1. Cloud Functions transaction | `tx.create()` で docId 衝突時に失敗 |
-| 2. Firestore rules | クライアント直接 create 禁止 |
-
-Cloud Functions が何らかの理由でバグっていても、rules 側でクライアントからの直接操作を遮断しているため、
-クライアント経由での二重作成は物理的に不可能。
+- **クライアントからの create は rules で一切禁止**（`allow create: if false`）
+- **Admin SDK からの create は Cloud Functions 内部の validate + transaction で担保**
+- update は クライアント側で status 遷移関連フィールドのみ許可（allowlist 方式）
+- delete は rules で一切禁止（論理削除で対応）
 
 ### §1.5 Scheduler 設計（起点日時・冪等性）
 
@@ -221,7 +362,7 @@ Scheduler 実行時刻から**前月**を対象月とする。
 Scheduler が多重実行されても、§1.3 の `tx.create()` によって
 **最初の 1 回だけが成功し、2 回目以降は `ALREADY_EXISTS` でスキップ** される。
 
-### §1.6 再実行シナリオ（多重実行・手動・リトライ耐性）
+### §1.6 再実行シナリオ（多重実行・手動・リトライ耐性・部分成功）
 
 #### シナリオ 1: Cloud Scheduler が同時に 2 回発火
 
@@ -242,14 +383,15 @@ Firestore transaction が競合を直列化するため、2 回目は必ず exis
 #### シナリオ 3: Cloud Functions タイムアウトで自動リトライ
 
 ```
-03:00 Scheduler 実行 → 途中で 60s タイムアウト
-03:01 Cloud Functions が自動リトライ
+03:00 Scheduler 実行 → 途中で 540s タイムアウト
+03:10 Cloud Functions が自動リトライ（注: retry: false なので手動トリガーに限る）
   → tx.create() 済みの代理店 → existing でスキップ
   → tx.create() 未実施の代理店 → 新規作成成功
 ```
 
-**重要**：Cloud Functions の自動リトライは **作成処理のみ** 許可する。
-送信処理の自動リトライは §1.7 の原則に従い禁止。
+**重要**：Cloud Functions の自動リトライは **無効化**（`retry: false`）。
+タイムアウト後は admin が手動で同じ Function を再実行する運用とする。
+再実行しても冪等（既存分は `already_exists` でスキップ、未作成分のみ create）。
 
 #### シナリオ 4: 手動作成 → Scheduler 実行
 
@@ -259,6 +401,96 @@ Firestore transaction が競合を直列化するため、2 回目は必ず exis
 ```
 
 手動作成した月次精算と Scheduler が衝突しないことを保証する。
+
+#### シナリオ 5: 部分成功（ChatGPT レビュー反映 / 推奨1）
+
+```
+03:00 Scheduler 実行（対象 23 代理店）
+  代理店 J0015〜J0017: tx.create() 成功 → created: 3
+  代理店 J0018: 既に存在（手動早期作成） → skipped: already_exists
+  代理店 J0019: 既に存在（4/25 の手動作成） → skipped: already_exists
+  代理店 J0020: kbGroup 未設定 → skipped: no_kbGroup
+  代理店 J0021〜J0037: 残り 17 代理店 → created: 17
+  代理店 J0038: Bカート API timeout → failed: 1
+
+最終:
+  targetDealerCount: 23
+  createdCount: 20
+  skippedCount: 2
+  failedCount: 1
+  → status: partial_success
+```
+
+#### 部分成功時の扱い
+
+| 分類 | 処理 |
+|---|---|
+| created（成功） | 確定。ドキュメントが Firestore に作成された事実は取り消さない |
+| skipped（スキップ） | 確定。既存扱い。次回バッチでも同様にスキップされる |
+| failed（失敗） | **ドキュメントは作成されていない**（tx.create が throw したため）。次回実行時に再度 create を試行（冪等） |
+
+#### 重要：failed でも「作成されていない」のが正しい状態
+
+- tx.create() が throw した場合、**Firestore にドキュメントは 1 件も存在しない**
+- 次回手動トリガーまたは翌月 Scheduler で再試行すれば作成される
+- 「failed のドキュメントが半端に残る」状態は **発生しない**（transaction で保証）
+
+#### 部分成功の通知
+
+1. `settlementRunLogs` に `status: 'partial_success'` で記録
+2. `failed[]` 配列に失敗詳細（dealerCode / errorMessage）を記録
+3. admin に通知（§3 で詳細定義）
+4. admin が失敗原因を特定後、手動トリガーで再実行（冪等）
+
+#### シナリオ 6: enabled が途中で false になる（ChatGPT レビュー反映 / 推奨3）
+
+```
+03:00:00 Scheduler 実行開始（対象 23 代理店）
+03:00:30 代理店 J0015〜J0017 処理完了（created: 3）
+03:00:35 社長が障害を検知し、settings/settlement_automation.enabled = false
+03:00:36 代理店 J0018 処理開始前に enabled を再確認 → false 検知 → 残り全員を skip（reason: 'automation_disabled_midrun'）
+```
+
+#### enabled の再確認タイミング（本線レビュー反映 / 指摘3-2）
+
+バッチ開始時の一度きりでなく、**各代理店ループの冒頭で毎回 enabled を再確認** する。
+ただし Firestore read は「毎ループ必ず取得」ではなく「状態変化を検知したら以降はスキップ」の
+**break 離脱構造** を採用する。
+
+```javascript
+let enabled = true  // 初期値 true（バッチ開始前のチェックで true 確認済み前提）
+
+for (const dealer of targetDealers) {
+  if (!enabled) {
+    // 一度 false を検知したら以降は追加 read せず全部 skip（意図明示）
+    skipped.push({ dealerCode: dealer.dealerCode, reason: 'automation_disabled_midrun' })
+    continue
+  }
+
+  // 毎回 Firestore read で最新の enabled を確認
+  const config = await db.doc('settings/settlement_automation').get()
+  enabled = config.data()?.enabled === true
+
+  if (!enabled) {
+    // この代理店から以降は skip（break でも良いが continue で全件 skip 記録を残す）
+    skipped.push({ dealerCode: dealer.dealerCode, reason: 'automation_disabled_midrun' })
+    continue
+  }
+
+  await createSettlement(dealer, month, type)
+}
+```
+
+#### なぜ break 構造にするか
+
+| 項目 | 理由 |
+|---|---|
+| 負荷削減 | enabled=false 検知後は追加 read 不要 |
+| **意図明示** | 「一度停止したら元に戻らない」というバッチ内の不可逆性を明示 |
+| 再実行安全 | バッチ中に false→true に戻っても、当バッチは停止を貫く（次回手動トリガーで再開） |
+
+read コストは 1 代理店あたり 1 回の Firestore read（= 数十ミリ秒）。
+23 代理店で約 1 秒のオーバーヘッド。false 検知後は 0 秒。緊急停止の即応性を優先する。
 
 ### §1.7 失敗時の設計原則
 
@@ -316,13 +548,33 @@ Firestore SDK が transaction の競合解決として提供する標準メカ�
 
 月次バッチ 1 回の実行に対して 1 ドキュメントを記録する、**作成実行単位の監査ログ**。
 
-#### docId 形式
+#### docId 形式（ChatGPT レビュー反映 / 必須4）
 
+**`addDoc` による自動採番を採用** する。
+
+```javascript
+const logRef = await db.collection('settlementRunLogs').add({
+  targetMonth: '2026-04',
+  trigger: 'scheduler',
+  runAt: FieldValue.serverTimestamp(),
+  // ... (記録内容)
+})
 ```
-{YYYY-MM}_{trigger}_{runAt}
-例: 2026-04_scheduler_2026-05-01T03:00:00Z
-例: 2026-04_manual_2026-04-25T14:32:11Z
-```
+
+#### 自動採番を採用する理由
+
+`settlementRunLogs` は **実行単位の記録** であって冪等キーは不要。
+むしろ同秒同ミリ秒で複数トリガーが走った場合、固定 docId では衝突する。
+
+| 代替案 | 問題点 |
+|---|---|
+| `{YYYY-MM}_{trigger}_{runAt-sec}` | 同秒で複数実行があると衝突 |
+| `{YYYY-MM}_{trigger}_{runAt-ms}` | 極めて稀だが同ミリ秒衝突リスク |
+| `{YYYY-MM}_{trigger}_{runAt}_{random4}` | 可読性低下 |
+| **`addDoc`（自動採番）** | ✅ **衝突リスクなし、実行単位は重複しても問題なし** |
+
+settlementRunLogs は「何回実行したか」を記録するログであって、
+**実行 1 回 = 1 ログが冪等性を担保する必要はない**（実行履歴は重複しない）。
 
 #### 記録内容
 
@@ -391,16 +643,33 @@ match /settlementRunLogs/{logId} {
 | 2 | 二重作成 0 件 | `kickbacks` / `invoices` で同一 `{dealerCode, month}` 複数存在 = 0 件 |
 | 3 | スキップ理由が想定範囲内 | `already_exists` 以外のスキップについて原因特定済み |
 
-#### 停止条件（即座に自動作成を止める条件）
+#### 停止条件（即座に自動作成を止める条件・ChatGPT レビュー反映 / 必須5）
 
 以下のいずれか **1 つでも** 発生した場合、即座に自動作成を停止する。
 
-| # | 条件 |
-|---|---|
-| 1 | 二重作成を 1 件でも検知 |
-| 2 | Cloud Functions のエラー率 5% 超（1 か月の `failedCount / targetDealerCount`） |
-| 3 | Firestore rules の異常 create 試行を検知（rules 違反ログで判定） |
-| 4 | 社長判断で停止指示 |
+| # | 条件 | 判定単位 |
+|---|---|---|
+| 1 | **二重作成を 1 件でも検知**（件数問わず即停止） | 都度検知（日次集計 §1.10 参照） |
+| 2 | **1 回のバッチで** エラー率 5% 超 **かつ** 失敗件数 ≥ 2 | バッチ単位（月1回） |
+| 3 | Firestore rules の異常 create 試行を検知 | 都度検知（rules 違反ログ） |
+| 4 | 社長判断で停止指示 | 随時 |
+
+#### エラー率条件の補足
+
+旧案「1 か月合計のエラー率 5% 超」は月末まで検知できない問題があった（ChatGPT レビュー指摘）。
+修正後は以下の 2 条件を **AND** で判定：
+
+```javascript
+// 1 回のバッチ単位で判定
+const errorRate = failedCount / targetDealerCount
+const shouldStop = errorRate > 0.05 && failedCount >= 2
+
+// failedCount >= 2 を併用する理由:
+//   - 1 件の一時的エラー（Bカート API timeout 等）で全停止しない
+//   - ただし 2 件以上の同時失敗は構造的問題の可能性があるため停止
+```
+
+**二重作成検知は件数条件なし**（1 件でも即停止）。
 
 #### 停止方法
 
@@ -448,9 +717,130 @@ if (config.data()?.enabled !== true) {
 | 1 | 1 回目バッチ正常終了 | `settlementRunLogs` |
 | 2 | 1 回目バッチの作成件数が想定と一致 | `createdCount` を手動集計と照合 |
 | 3 | 2 回目バッチで 1 回目分がすべて `already_exists` でスキップ | `skipped[].reason` 確認 |
-| 4 | 二重作成が発生していない | `kickbacks` / `invoices` の件数確認クエリ |
+| 4 | 二重作成が発生していない | §1.10 の「二重作成検知クエリ」を毎日自動実行 |
 | 5 | 手動トリガーでもスキップされる | admin が実際に手動トリガーして確認 |
 | 6 | rules 違反の直接 create 試行 0 件 | Firestore rules ログ確認 |
+
+#### 二重作成検知クエリ（ChatGPT レビュー反映 / 推奨4・本線レビュー反映 / 指摘3-1）
+
+観測項目 #4 の自動検知を具体化する。**2 つのタイミングで起動** する（即検知 + 日次保険）。
+
+| # | タイミング | 起動方法 | 目的 |
+|---|---|---|---|
+| 1 | 月次バッチ終了直後 | `createMonthlySettlement` の最後で `detectDuplicates()` を呼ぶ | **即検知**（バッチ起因の二重作成を数秒以内に検知） |
+| 2 | 毎日 01:00 JST | Cloud Scheduler 独立ジョブ | **日次保険**（手動作成・CS 事故・過去分の不整合も網羅） |
+
+#### なぜ 2 系統にするか
+
+**旧案の「毎日 01:00 のみ」は最大 24 時間気付かない**（本線レビュー指摘）。
+月次バッチは代理店全件をまとめて処理する最大のリスク源なので、
+バッチ直後の即検知を必ず通す。
+
+| 単独案 | 問題 |
+|---|---|
+| バッチ直後のみ | 手動作成・過去分不整合を見逃す |
+| 日次のみ（01:00） | 月次バッチ起因の二重作成に最大 24 時間気付かない |
+| **2 系統併用（採用）** | ✅ 即検知 + 網羅性 を両立 |
+
+#### バッチ直後の呼び出し
+
+```javascript
+// Cloud Functions: createMonthlySettlement の末尾
+// バッチ処理完了後、同一 Functions 内で detectDuplicates を呼ぶ
+// （独立した Cloud Functions として分離するより、呼び出し漏れが起きにくい）
+try {
+  await detectDuplicates({ triggeredBy: 'post_batch', targetMonth: month })
+} catch (e) {
+  // 検知ロジック自体の失敗はバッチ全体を失敗扱いにしない
+  // （作成は既に完了しているため、日次保険に任せる）
+  console.error('[WARN] post-batch detectDuplicates failed:', e)
+  await db.collection('settlementRunLogs').add({
+    type: 'duplicate_check_failed',
+    triggeredBy: 'post_batch',
+    targetMonth: month,
+    errorMessage: String(e),
+    createdAt: FieldValue.serverTimestamp(),
+  })
+}
+```
+
+#### 日次保険の呼び出し
+
+Cloud Scheduler から毎日 01:00 JST に起動する。
+
+```javascript
+// Cloud Functions: detectDuplicateSettlements
+//   - 日次保険: Cloud Scheduler から毎日 01:00 JST 起動
+//   - 即検知: createMonthlySettlement 末尾から呼び出し
+//
+// 目的: kickbacks / invoices で同一 {type, dealerCode, month} の
+//       ドキュメントが 2 件以上存在していないか検知する
+//
+// 仕組み:
+//   - docId が {type}_{dealerCode}_{YYYY-MM} 形式なので、
+//     同一キーの複数ドキュメントは原理的に発生しない
+//   - ただし「意味的重複」（別の docId で同一 {dealerCode, month}）は
+//     手動作成バグ等で発生しうるためこれを検知する
+
+async function detectDuplicates({ triggeredBy = 'scheduled_daily', targetMonth = null } = {}) {
+  const collections = ['kickbacks', 'invoices']
+  const duplicates = []
+
+  for (const colName of collections) {
+    const snap = await db.collection(colName).get()
+    const seen = new Map() // key: "dealerCode|month", value: [docId, ...]
+
+    for (const doc of snap.docs) {
+      const { dealerCode, month } = doc.data()
+      if (!dealerCode || !month) continue
+      const key = `${dealerCode}|${month}`
+      if (!seen.has(key)) seen.set(key, [])
+      seen.get(key).push(doc.id)
+    }
+
+    for (const [key, ids] of seen) {
+      if (ids.length > 1) {
+        duplicates.push({ collection: colName, key, docIds: ids })
+      }
+    }
+  }
+
+  if (duplicates.length > 0) {
+    // 停止条件 #1 発動（件数問わず即停止）
+    await db.doc('settings/settlement_automation').update({
+      enabled: false,
+      disabledAt: FieldValue.serverTimestamp(),
+      disabledBy: 'duplicate_detector',
+      disabledReason: `二重作成検知: ${JSON.stringify(duplicates).slice(0, 500)}`,
+    })
+    // admin 通知
+    await notifyAdmin({
+      severity: 'critical',
+      title: '【緊急】二重作成を検知しました',
+      body: `自動作成を即停止しました。詳細: ${JSON.stringify(duplicates, null, 2)}`,
+    })
+  }
+
+  // 検知結果を監査ログに記録（triggeredBy で即検知/日次保険を区別）
+  await db.collection('settlementDuplicateChecks').add({
+    runAt: FieldValue.serverTimestamp(),
+    triggeredBy,                    // 'post_batch' | 'scheduled_daily' | 'manual'
+    targetMonth: targetMonth || null, // post_batch 時のみ指定
+    checkedCollections: collections,
+    duplicatesFound: duplicates.length,
+    duplicates,
+  })
+}
+```
+
+#### 検知クエリの配置
+
+| 配置 | 理由 |
+|---|---|
+| バッチ直後（post_batch） | 月次バッチ起因の二重作成を数秒以内に即検知 |
+| 日次 01:00 JST（scheduled_daily） | 手動作成・過去分不整合も網羅する保険 |
+| 検知時は自動で automation を停止 | 停止可能性の担保（判断基準 #3） |
+| 検知ロジック失敗は非致命 | バッチ完了は既に確定、日次保険でカバー |
 
 #### 検証成功条件
 
@@ -491,3 +881,4 @@ if (config.data()?.enabled !== true) {
 |---|---|---|---|
 | 2026-04-18 | v0.0 | 初期章立て策定、Phase 2 着手条件確定 | 社長 + Claude |
 | 2026-04-20 | v0.1 | §1 起草完了 | Claude |
+| 2026-04-20 | v0.2 | §1 軽微修正（ChatGPT レビュー反映 9点）：type enum 固定 / dealerCode 正規化 / Admin SDK bypass 明文化 / runLogs docId addDoc 採用 / エラー率条件修正 / 部分成功シナリオ追加 / 再生成しない思想統一 / enabled 途中停止挙動 / 二重作成検知方法具体化 | Claude |
