@@ -1,7 +1,7 @@
 # 05 Phase 2 自動化設計書（月次自動作成・自動送信・再実行制御）
 
 - **対象**: bomber-admin ERP / 取引精算（kickback + invoice 統合）
-- **版**: v0.6（§3 起草）
+- **版**: v0.7（§3 本線レビュー反映）
 - **起草開始日**: 2026-04-20
 - **起草者**: ロイヤルトラスト社長 + Claude Code
 - **承認フロー**: §1〜§3 完成後に社長レビュー → ChatGPT レビュー → 両承認で §4 以降着手
@@ -2060,19 +2060,62 @@ const logRef = await db.collection('settlementRunLogs').add({ /* data */ })
 | `data_inconsistency` | Bカートと Firestore の不整合 |
 | `automation_disabled_midrun` | バッチ途中で enabled=false 検知 |
 
-#### 大量失敗時の分割保存
+#### 大量失敗時の扱い（v0.7 簡素化：overflow/ を撤回）
 
 `skipped[]` / `failed[]` は Firestore ドキュメント 1MB 制限を避けるため **最大 500 件** まで。
-それを超える場合は以下のサブコレクション形式で分割保存する。
+500 件を超えるケースは **「切り詰めて警告通知を出す」** 方針に簡素化する。
 
+#### 理由：overflow/ サブコレクションを撤回
+
+旧案（v0.6）では overflow/ サブコレクションで 500 件超を分割保存する設計だった。
+本線レビュー結果により、以下の理由で撤回する：
+
+| 観点 | 評価 |
+|---|---|
+| 実運用頻度 | 代理店数 23 件前提では 500 件超は発生しえない（現実的でない） |
+| 複雑度 | 監査クエリが overflow 未対応だと見落とすバグの温床 |
+| 保守コスト | 使われない機能が仕様として残ると次世代メンテ時に誤解を招く |
+| 判断基準 #4 | 運用の便利さの観点でも「500件超は異常事態」として捉えるべき |
+
+#### 簡素化後の挙動
+
+```javascript
+const MAX_ARRAY_SIZE = 500
+
+if (skipped.length + failed.length > MAX_ARRAY_SIZE) {
+  // 新しい順に切り詰め
+  const truncatedSkipped = skipped.slice(-Math.floor(MAX_ARRAY_SIZE / 2))
+  const truncatedFailed = failed.slice(-Math.ceil(MAX_ARRAY_SIZE / 2))
+
+  // 切り詰め事実を記録
+  await logRef.update({
+    skipped: truncatedSkipped,
+    failed: truncatedFailed,
+    arrayTruncated: true,
+    originalSkippedCount: skipped.length,
+    originalFailedCount: failed.length,
+  })
+
+  // 警告通知（severity: critical）
+  await notifyAdmin({
+    severity: 'critical',
+    title: '【異常】settlementRunLogs の配列が 500 件を超過',
+    body: `通常運用では発生しない件数の skipped/failed が発生しました。
+  targetMonth: ${targetMonth}
+  skipped: ${skipped.length}
+  failed: ${failed.length}
+  → 500件に切り詰めて保存。詳細は Cloud Logging を参照。`,
+  })
+}
 ```
-settlementRunLogs/{runLogId}
-  ├─ skipped[] : 最大 500 件（最新優先）
-  ├─ failed[]  : 最大 500 件（最新優先）
-  └─ overflow/ : サブコレクション（500件超分）
-        ├─ chunk_001 : { skipped: [...], failed: [...] }
-        └─ chunk_002 : { ... }
-```
+
+#### 500 件超が発生した場合の調査経路
+
+ログ側で切り詰められた分は **Cloud Logging（stdout/stderr）で参照** する。
+Cloud Functions の `console.log(JSON.stringify(entry))` で全件出力しておき、
+Cloud Logging の検索で特定代理店・特定エラーを抽出する。
+
+これにより Firestore の複雑化を避けつつ、調査経路を確保する。
 
 #### 代表クエリ例
 
@@ -2428,23 +2471,83 @@ Admin SDK は rules をバイパスするため、rules 層では防げない。
 | A. rules 層 | `allow update, delete: if false` | クライアント SDK |
 | B. Cloud Functions コード規約 | update / delete を書かない | Admin SDK |
 
-**重要な例外**：`settlementEmailLogs` の status 遷移（pending → sent / failed 等）は
-append-only 原則の例外とする。理由：
+**重要な例外**：`settlementEmailLogs` のみ、status 進行のために update を許可する。
+append-only 原則の例外として設計する。理由：
 
 - status 遷移は「新規ログを作る」のではなく「既存ログの進行状態を更新する」性質
 - 同一 kickbackId に対して複数ログを作らないことが §2.2 の docId 固定の根拠
 - ただし過去の状態は `resendHistory[]` や `attemptCount` で保存される
 
-このため **`settlementEmailLogs` のみ Cloud Functions 経由で update 許可**（ただしクライアントからは完全禁止）。
-他の 4 コレクションは Cloud Functions からも update しない厳格 append-only。
+#### emailLogs 更新可能フィールドの allowlist（v0.7 厳格化）
+
+**実装者の裁量で任意フィールドを update させないため**、更新可能フィールドを明示列挙する。
+Cloud Functions 側も rules 側も、この allowlist 外への update は throw / deny する。
+
+| フィールド | 更新を許すタイミング | 許可関数 |
+|---|---|---|
+| `status` | Stage 2/3 完了時・resolve 時・再送時 | `sendSettlementEmail` / `resolveSettlementEmailLog` / `manualResendSettlementEmail` |
+| `updatedAt` | 上記いずれかの update と同時 | 上記すべて |
+| `sentAt` | Stage 3 成功時のみ | `sendSettlementEmail`（成功パス） |
+| `sesMessageId` | Stage 3 成功時のみ | 同上 |
+| `errorMessage` | Stage 2/3 失敗時・resolve 時 | `sendSettlementEmail`（失敗パス） / `resolveSettlementEmailLog` |
+| `attemptCount` | 再送時の increment のみ | `manualResendSettlementEmail` |
+| `lastResendAttemptAt` | 再送実行時 | 同上 |
+| `resendHistory` | arrayUnion 追記のみ | 同上 |
+| `resolvedBy` / `resolvedByEmail` / `resolvedAt` / `resolvedReason` | resolve 時のみ | `resolveSettlementEmailLog` |
+| `manualResendApprovedAt` / `ApprovedBy` / `ApprovedByEmail` / `ApprovalReason` | 承認時のみ（set）、再送完了時にクリア | `approveStalePendingResend` / `manualResendSettlementEmail` |
+| `redactedFields` / redact 対象フィールド | 誤記録訂正時のみ（admin 手動） | 専用 Function `redactSettlementEmailLog` |
+
+#### 更新禁止フィールド（set 後は不変）
+
+以下のフィールドは **Stage 1 の create 以降、一切 update してはならない**：
+
+- `kickbackId` / `dealerCode` / `dealerName` / `month` / `type`
+- `toEmail` / `ccCount` / `ccDomains` / `ccSource` / `bccCount` / `bccDomains` / `bccSource`
+- `isTestSend` / `sentBy` / `sentByEmail` / `createdAt`
+
+これらを変更する必要がある場合は、**ログを redacted として論理無効化し、新規の精算・送信を別 kickbackId で行う**。
+
+#### Cloud Functions 側の update ガード
+
+```javascript
+// Cloud Functions の共通ヘルパー（全 update で必ず通す）
+const EMAIL_LOG_UPDATABLE_FIELDS = Object.freeze([
+  'status', 'updatedAt', 'sentAt', 'sesMessageId', 'errorMessage',
+  'attemptCount', 'lastResendAttemptAt', 'resendHistory',
+  'resolvedBy', 'resolvedByEmail', 'resolvedAt', 'resolvedReason',
+  'manualResendApprovedAt', 'manualResendApprovedBy',
+  'manualResendApprovedByEmail', 'manualResendApprovalReason',
+  'redactedFields',
+  // redact 対象フィールドは動的判定（下記）
+])
+
+const EMAIL_LOG_REDACTABLE_FIELDS = Object.freeze([
+  'toEmail', 'errorMessage', 'resolvedReason', 'manualResendApprovalReason',
+])
+
+function assertEmailLogUpdateAllowed(updateKeys, { allowRedaction = false } = {}) {
+  const allowed = new Set(EMAIL_LOG_UPDATABLE_FIELDS)
+  if (allowRedaction) {
+    for (const f of EMAIL_LOG_REDACTABLE_FIELDS) allowed.add(f)
+  }
+  const invalid = updateKeys.filter((k) => !allowed.has(k))
+  if (invalid.length > 0) {
+    throw new Error(`emailLog update disallowed fields: ${invalid.join(', ')}`)
+  }
+}
+```
+
+#### 他コレクションの update ポリシー
 
 | コレクション | Cloud Functions update | 例外理由 |
 |---|---|---|
 | settlementRunLogs | ✗ 禁止 | 実行単位の記録は不変 |
-| settlementEmailLogs | ✅ 許可（status 遷移のみ） | docId 固定と両立させるため |
+| settlementEmailLogs | ✅ allowlist に列挙したフィールドのみ許可 | docId 固定と両立させるため |
 | settlementDuplicateChecks | ✗ 禁止 | 検知単位の記録は不変 |
 | settlementInconsistencyChecks | ✗ 禁止 | 同上 |
 | settlementStalePendingLogs | ✗ 禁止 | 同上 |
+
+emailLogs 以外の 4 コレクションは Cloud Functions からも update しない厳格 append-only。
 
 #### 物理削除の完全禁止
 
@@ -2531,23 +2634,51 @@ const dedupeKey = `stage3_failure_${kickbackId}_${Date.now() % 86400000}`
 
 ### §3.8 ログ保持期間・アーカイブ
 
-#### Firestore 保持期間
+#### Firestore 保持期間（v0.7 根拠明示）
 
-| コレクション | Firestore 保持 | アーカイブ先 |
-|---|---|---|
-| settlementRunLogs | **5 年** | BigQuery（5 年経過分） |
-| settlementEmailLogs | **7 年** | BigQuery（法的保存義務を考慮） |
-| settlementDuplicateChecks | 2 年 | GCS（JSON Lines） |
-| settlementInconsistencyChecks | 2 年 | GCS（JSON Lines） |
-| settlementStalePendingLogs | 2 年 | GCS（JSON Lines） |
-| adminNotifications | 3 年 | BigQuery |
+| コレクション | Firestore 保持 | 根拠区分 | アーカイブ先 |
+|---|---|---|---|
+| settlementRunLogs | **7 年** | 業務判断（改訂） | BigQuery |
+| settlementEmailLogs | **7 年** | 法的要件（仮置き） | BigQuery |
+| settlementDuplicateChecks | 2 年 | 業務判断 | GCS（JSON Lines） |
+| settlementInconsistencyChecks | 2 年 | 業務判断 | GCS（JSON Lines） |
+| settlementStalePendingLogs | 2 年 | 業務判断 | GCS（JSON Lines） |
+| adminNotifications | 3 年 | 業務判断 | BigQuery |
 
-#### 採用理由
+#### 根拠の分類（v0.7）
 
-- **settlementEmailLogs が 7 年**：税務関連の帳票送信履歴として最長保持
-- **settlementRunLogs が 5 年**：経営監査・税務調査での実行履歴参照を想定
-- **検知ログが 2 年**：事故発生から 2 年遡れれば十分（運用実績から調整可）
-- **adminNotifications が 3 年**：対応履歴の参照需要
+保持期間の根拠を **「法的要件」** と **「業務判断」** に明確に分ける。
+
+**法的要件（仮置き：法務確認保留）**
+
+- `settlementEmailLogs` の 7 年保持は以下の仮置き根拠による：
+  - 法人税法施行規則第 59 条（帳簿書類の保存）：青色申告法人の保存義務 7 年
+  - 電子帳簿保存法：電子取引記録の保存義務 7 年
+  - ただし「精算書送信ログ」がこれらの対象となるかは法務レビューが必要
+- **本設計書の数値は「仮置き」であり、法務確認で短縮・延長されうる**
+- 法務レビュー完了前は 7 年保持で運用し、確定後に §3.8 を再改訂
+
+**業務判断（設計チーム判断）**
+
+- `settlementRunLogs` の 7 年：emailLogs と揃えることで運用管理を単純化
+  - 旧案の 5 年を 7 年に統一（emailLogs と同期間で突合しやすい）
+- `settlementDuplicateChecks` / `InconsistencyChecks` / `StalePendingLogs` の 2 年：
+  - 事故調査の現実的な遡及範囲（直近 1 年の実績 + 翌年の監査）
+  - 同種事故の再発防止策評価に必要な期間
+- `adminNotifications` の 3 年：
+  - 対応履歴を「過去 3 年で同じパターンの通知があったか」確認する実用範囲
+
+#### 法的レビュー保留事項
+
+以下は法務確認後に確定する：
+
+1. `settlementEmailLogs` の 7 年が十分か・過剰か
+2. 取引終了時のパージ（§3.10）と法的保存義務の両立
+3. BigQuery / GCS アーカイブ後の形式での保存義務充足可否
+4. `toEmail` 平文保持の個人情報保護法との整合（§3.10）
+
+**現段階では上記を「仮置き運用」とし、法務確認完了前に本番稼働させない**。
+法務確認が得られ次第 §3.8 を再改訂し、確定版として v1.0 に昇格させる。
 
 #### アーカイブ運用
 
@@ -2670,19 +2801,54 @@ async function getMonthlySummary(targetMonth) {
 | 操作者 uid / email | ✅ | 責任追跡のため必須 |
 | 操作理由（reason） | ✅ | 最大 500 文字（切り詰め） |
 
-#### toEmail を平文で残す理由
+#### toEmail を平文で残す理由（v0.7 目的限定）
 
-送信責任の明確化のため、**どのアドレスに送ったか** は完全な形で残す必要がある。
-ただし以下の制約：
+**目的を以下の 3 点に限定** する。これ以外の用途では toEmail を参照しない。
+
+| # | 目的 | 参照シーン |
+|---|---|---|
+| 1 | 送信責任の明確化 | 税務・法務対応で「いつ・どこに送ったか」の立証 |
+| 2 | 事故調査 | 二重送信・誤送信発生時の影響範囲特定 |
+| 3 | 代理店からの問合せ対応 | 「◯月分は届いていない」への回答で実送信先を確認 |
+
+#### 目的外利用の禁止
+
+- マーケティング・営業活動への流用は禁止
+- 宛先の統計分析（ドメイン別集計）は `bccDomains` / `ccDomains` で代替（§3.10 冒頭の表）
+- 目的外アクセスは `adminAccessLogs`（§3.7 の通知系と同等の監査）で記録検討
+
+#### 保存範囲の最小化
 
 - `toEmail` は `settlementEmailLogs` のみに記録
 - 他のログ（runLogs / 検知ログ / adminNotifications）には含めない
 - admin 以外は読めない（rules で制限）
+- 通知本文（notifyAdmin の body）には toEmail を含めない（代わりに kickbackId のみ記録し、admin が必要時にログを参照）
+
+#### 取引終了時のパージ手順（v0.7 追加）
+
+代理店との取引終了時、該当代理店の過去の `toEmail` を以下の手順でパージする：
+
+1. 代理店の契約終了日を `dealers/{dealerCode}.terminatedAt` に記録
+2. 契約終了から 1 年経過後、自動パージバッチ（`purgeTerminatedDealerEmails`）を Cloud Scheduler で月次起動
+3. 該当 dealerCode の `settlementEmailLogs` に対して以下を実行：
+   - `toEmail` を `<PURGED>` に置換
+   - `redactedFields: ['toEmail']` を追加
+   - `purgedAt` / `purgedReason` を記録
+4. `settlementPurgeLogs` コレクションにパージ履歴を記録
 
 #### 平文記録を最小化する工夫
 
 CC / BCC のように「多対多」になりうる項目はドメインのみ記録。
 フルアドレスが必要な障害調査は SendGrid ダッシュボード（外部システム）に委ねる。
+
+#### 個人情報保護法との整合
+
+- 個人情報保護法第 17 条（利用目的の特定）：上記 3 目的のみに限定
+- 第 19 条（利用目的による制限）：目的外利用禁止を本設計書に明記
+- 第 22 条（正確性の確保等）：不要になった時点でパージ（取引終了 + 1 年）
+- 第 23 条（安全管理措置）：admin 限定 rules + Cloud Functions 境界
+
+**注意**：法的要件の最終解釈は法務確認が必要。本節は設計判断の根拠を示すもので、法的合規性の最終担保ではない。
 
 #### 誤って記録してしまった場合の対応
 
@@ -2767,3 +2933,4 @@ Phase 2 運用中に事故が起きた場合、以下の情報があれば **完
 | 2026-04-20 | v0.4 | §2 本線レビュー反映 5点：(1) Stage3失敗を warning → 即停止+CRITICAL通知に変更 / (2) pending長期残留検知（10分毎 detectStalePending）追加 / (3) resendHistory.resentAt を serverTimestamp → ISO文字列に変更 / (4) sent整合性不一致検知（detectSentInconsistency）追加（パターンA/B/C）/ (5) manualResend 対象を failed + 長時間pending に拡張（SendGrid確認チェックボックス等の安全策付き）。停止条件は 5点 → 7点 に拡張。観測項目は 8点 → 10点 に拡張。 | Claude |
 | 2026-04-20 | v0.5 | §2 本線レビュー反映 2点（整合性修正）：(1) §2.8 の旧「batch失敗時 warning を返す」文言を削除し、v0.4 方針（即停止+CRITICAL+HttpsError('data-loss')）に §2.5/§2.8/§2.10 全体で統一 / (2) stale pending からの manualResend の安全策強化：UI checkbox のみでは再送不可とし、経路A（resolveSettlementEmailLog で failed 経由）または経路B（admin 専用承認フラグ manualResendApprovedAt/By）のいずれかを必須化。クライアント側の checkbox はセキュリティ境界にならないため、Cloud Functions 側で Firestore 状態を見て判定する。承認フラグは10分有効・1回消費・専用 Function で厳密管理。 | Claude |
 | 2026-04-20 | v0.6 | §3 起草完了：監査ログ仕様の集約。(1) 5つの監査コレクション責務マップ（runLogs/emailLogs/Duplicate/Inconsistency/StalePending）/ (2) settlementRunLogs 完全スキーマ + 代表クエリ4例 + 500件超のサブコレクション分割 / (3) settlementEmailLogs 完全スキーマ + 代表クエリ5例 + resendHistory 10件上限 / (4) 補助コレクション3種の共通構造 / (5) 書き込み境界と append-only 保証（2層防衛 + Cloud Functions 規約）/ (6) notifyAdmin 設計（severity 3階層 / adminNotifications fan-out / 冪等キー）/ (7) 保持期間（emailLogs 7年 / runLogs 5年 / 検知 2年）+ BigQuery/GCS アーカイブ / (8) 監査クエリと月次サマリ / (9) PII 方針（メール本文・CCフル不記録、ドメインのみ）/ (10) §1〜§3 整合性確認と事故再現性担保 | Claude |
+| 2026-04-20 | v0.7 | §3 本線レビュー反映 4点：(1) emailLogs update フィールドの allowlist を明示列挙し、実装側ガード関数 assertEmailLogUpdateAllowed を定義。更新禁止フィールドも明記 / (2) settlementRunLogs の overflow/ サブコレクション設計を撤回。500件で頭打ち + critical 通知 + Cloud Logging 参照に簡素化 / (3) toEmail 平文保存の目的を3点に限定明記。目的外利用禁止 + 取引終了+1年で自動パージ手順（purgeTerminatedDealerEmails）追加 + 個人情報保護法関連条文との整合コメント / (4) 保持期間の根拠を「法的要件（仮置き）」と「業務判断」に分離。runLogs を 5年→7年に変更し emailLogs と統一。法務レビュー保留事項4点を明示 | Claude |
