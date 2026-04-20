@@ -1,5 +1,19 @@
 name: DryRun Verify (test)
 
+# 目的:
+#   bomber-admin-test で Phase 2 段階1 の関数を dryRun 相当で検証する。
+#   社長は Actions タブでボタンを押すだけで検証ができる。
+#
+# 設計:
+#   - 本番書き込みは一切行わない（スクリプト側で強制）
+#   - 実行できるのは以下のみ:
+#       * createMonthlySettlement（dryRun 相当・Admin SDK による読み取り走査のみ）
+#       * detectDuplicates（走査のみ、settlementDuplicateChecks への書き込みなし）
+#   - 結果は GitHub Actions の Step Summary に JSON + notes で表示
+#
+# トリガー:
+#   workflow_dispatch のみ。push では絶対に発火しない。
+
 on:
   workflow_dispatch:
     inputs:
@@ -21,14 +35,15 @@ jobs:
   dryrun:
     name: DryRun 検証
     runs-on: ubuntu-latest
+
+    # 多重実行を抑止（同一関数を連打されても 1 実行のみ）
     concurrency:
       group: dryrun-test-${{ inputs.function_name }}
       cancel-in-progress: false
+
     steps:
       - name: チェックアウト
         uses: actions/checkout@v4
-        with:
-          ref: feature/phase2-stage1
 
       - name: Node セットアップ
         uses: actions/setup-node@v4
@@ -37,6 +52,8 @@ jobs:
 
       - name: firebase-admin インストール
         run: |
+          # scripts/ci-dryrun.mjs は firebase-admin のみ使用
+          # プロジェクト直下に最小依存だけ入れる
           npm init -y
           npm install firebase-admin
 
@@ -50,7 +67,7 @@ jobs:
           SA_PROJECT=$(cat "${GOOGLE_APPLICATION_CREDENTIALS}" | grep -o '"project_id":[^,]*' | head -1)
           echo "Service Account project: ${SA_PROJECT}"
           if ! echo "${SA_PROJECT}" | grep -q 'bomber-admin-test'; then
-            echo "Service Account が bomber-admin-test 以外を指しています。中断します。"
+            echo "❌ Service Account が bomber-admin-test 以外を指しています。中断します。"
             exit 1
           fi
 
@@ -62,8 +79,23 @@ jobs:
 
       - name: 実行完了
         if: success()
-        run: echo "DryRun 完了"
+        run: |
+          echo "✅ DryRun 完了"
+          echo "- 関数: ${{ inputs.function_name }}"
+          echo "- 対象月: ${{ inputs.target_month }} (空なら前月)"
+          echo "- 結果は Step Summary を参照"
 
       - name: 失敗時のガイド
         if: failure()
-        run: echo "DryRun 失敗"
+        run: |
+          echo "❌ DryRun 失敗"
+          echo ""
+          echo "想定される原因:"
+          echo "  1. FIREBASE_SERVICE_ACCOUNT が bomber-admin-test 用でない"
+          echo "  2. サービスアカウントに Cloud Datastore Viewer 以上の権限がない"
+          echo "  3. settings/settlement_automation が未初期化"
+          echo "  4. dealers コレクションに active==true の代理店が 0 件"
+          echo ""
+          echo "対応:"
+          echo "  - docs/ci-cd-setup-test.md §1-2 を参照"
+          echo "  - scripts/init-settlement-automation.mjs を先に実行"
