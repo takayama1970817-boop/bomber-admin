@@ -44,6 +44,45 @@ export const CATEGORY_GRADIENT_MAP = {
   other:     'from-slate-500 to-slate-700',
 }
 
+// CSV / Bカートで未指定時のフォールバック辞書（カテゴリ別）
+// UI 側で空判定して使用するため、ここでは「常に何か返す」設計。
+export const RECOMMENDED_FOR_DEFAULTS = {
+  aging:     ['年齢肌が気になる方', 'ハリ・弾力を求めたい方', 'サロン施術の効果を持続させたい方'],
+  moisture:  ['乾燥が気になる方', 'うるおいのある肌を目指したい方', 'デリケート肌の方'],
+  lotion:    ['肌のキメを整えたい方', 'クリームの浸透力を高めたい方', 'コットンパックを習慣にしたい方'],
+  cleansing: ['メイクと汚れをやさしく落としたい方', 'デリケート肌の方', '洗顔後のつっぱりが気になる方'],
+  essence:   ['くすみが気になる方', '透明感を引き出したい方', '紫外線・外的ストレスが気になる方'],
+  other:     ['プロのサロンが選ぶ品質を求める方'],
+}
+
+export const USAGE_SALON_DEFAULTS = {
+  aging:     'エイジングケアメニューの仕上げに。ハリ・弾力を引き出す施術と相性の良い設計です。',
+  moisture:  'パック・マッサージ・仕上げのうるおい補給に。施術中の乾燥を防ぎます。',
+  lotion:    '施術前の肌整え、施術後のクールダウン、コットンパックなど幅広い用途に。',
+  cleansing: '施術前のクレンジング・拭き取りに。肌のコンディションを整えます。',
+  essence:   '集中ケアメニューの主役として。お客様の透明感を引き出します。',
+  other:     'サロンメニューの付加価値アップにご活用ください。',
+}
+
+export const USAGE_HOME_DEFAULTS = {
+  aging:     '朝晩の洗顔・化粧水のあと、適量を顔全体になじませてください。',
+  moisture:  '朝晩のお手入れの仕上げに、適量を顔全体になじませてください。',
+  lotion:    '洗顔後、適量を手のひらまたはコットンに取り、肌になじませます。',
+  cleansing: '乾いた手のひらに適量を取り、顔全体になじませた後、ぬるま湯で洗い流します。',
+  essence:   '化粧水のあと、2〜3滴を手のひらで温め、顔全体になじませてください。',
+  other:     '取扱説明書に従ってご使用ください。',
+}
+
+export function recommendedForFor(categoryKey) {
+  return RECOMMENDED_FOR_DEFAULTS[categoryKey] || RECOMMENDED_FOR_DEFAULTS.other
+}
+export function usageSalonFor(categoryKey) {
+  return USAGE_SALON_DEFAULTS[categoryKey] || USAGE_SALON_DEFAULTS.other
+}
+export function usageHomeFor(categoryKey) {
+  return USAGE_HOME_DEFAULTS[categoryKey] || USAGE_HOME_DEFAULTS.other
+}
+
 export function toCategoryKey(categoryName) {
   if (!categoryName) return 'other'
   return CATEGORY_KEY_MAP[categoryName.trim()] || 'other'
@@ -82,6 +121,15 @@ const staticProducts = [
       '高密着・高浸透処方',
       '敏感肌にも配慮した低刺激設計',
     ],
+    recommendedFor: [
+      '年齢肌のハリ・弾力を取り戻したい方',
+      'サロン施術の効果をご自宅でも持続させたい方',
+      '敏感肌でも使えるエイジングケアを探している方',
+    ],
+    usageSalon:
+      'エイジングケアメニューの仕上げに。リフトアップ施術や深層保湿施術と組み合わせると、お客様が即時的なハリ感を実感できます。',
+    usageHome:
+      '朝晩の洗顔・化粧水のあと、パール粒大を手のひらで温め、顔全体になじませてください。気になる部位は重ね塗りを推奨します。',
     usage:
       '朝晩の洗顔・化粧水のあと、適量（パール粒大）を手のひらで温め、顔全体になじませてください。特に気になる部位は重ね塗りを推奨します。',
     gradient: 'from-indigo-600 to-purple-700',

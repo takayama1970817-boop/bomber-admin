@@ -150,6 +150,15 @@ function transformBcartProduct(raw) {
         .map((f) => f.trim())
         .filter(Boolean)
 
+  const recommendedSrc = raw.recommended_for ?? raw.recommended ?? ''
+  const recommendedFor = Array.isArray(recommendedSrc)
+    ? recommendedSrc.map((s) => String(s).trim()).filter(Boolean)
+    : String(recommendedSrc).split('|').map((s) => s.trim()).filter(Boolean)
+
+  const usageHome =
+    String(raw.usage_home ?? raw.usage ?? raw.how_to_use ?? '').trim() || null
+  const usageSalon = String(raw.usage_salon ?? raw.usage_pro ?? '').trim() || null
+
   const image =
     String(raw.image_url ?? raw.image1 ?? raw.main_image ?? raw.thumbnail ?? '').trim() ||
     null
@@ -168,7 +177,10 @@ function transformBcartProduct(raw) {
     shortDesc,
     description,
     features,
-    usage: String(raw.usage ?? raw.how_to_use ?? '').trim() || null,
+    recommendedFor,
+    usageSalon,
+    usageHome,
+    usage: usageHome, // 互換: 旧 usage 参照箇所のため残す
     image,
     gradient: gradientFor(categoryKey),
     displayOrder: toNum(raw.display_order ?? raw.sort_order ?? raw.sort) ?? 9999,

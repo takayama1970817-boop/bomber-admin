@@ -1,5 +1,36 @@
 import { Link, Navigate, useParams } from 'react-router-dom'
 import { usePublicProducts } from '../../hooks/usePublicProducts.js'
+import {
+  recommendedForFor,
+  usageSalonFor,
+  usageHomeFor,
+} from '../../data/products.js'
+
+// 中部・最下部に配置する共通 CTA バナー（サロン検索は Coming Soon）
+function FindSalonCTA({ productName }) {
+  return (
+    <div className="rounded-2xl bg-gradient-to-br from-slate-900 via-indigo-950 to-slate-900 text-white px-6 sm:px-10 py-10 sm:py-12 text-center shadow-lg">
+      <p className="text-amber-400 text-[11px] tracking-[0.25em] font-semibold mb-3">
+        FIND A SALON
+      </p>
+      <h3 className="text-xl sm:text-2xl font-bold mb-3">
+        この商品を扱うサロンを探す
+      </h3>
+      <p className="text-slate-300 text-sm leading-relaxed max-w-xl mx-auto mb-6">
+        {productName}を実際に体験いただける、お近くの取扱サロンをご案内します。
+      </p>
+      <Link
+        to="/salon-search"
+        className="inline-flex items-center gap-2 px-7 py-3 rounded-full bg-white text-slate-900 font-semibold text-sm hover:bg-amber-50 transition-colors shadow-lg"
+      >
+        サロンを探す
+        <span className="text-[10px] font-bold tracking-wider text-amber-700 bg-amber-100 border border-amber-300 rounded-full px-2 py-0.5">
+          Coming Soon
+        </span>
+      </Link>
+    </div>
+  )
+}
 
 export default function ProductDetailPage() {
   const { slug } = useParams()
@@ -18,7 +49,16 @@ export default function ProductDetailPage() {
     return <Navigate to="/products" replace />
   }
 
-  // 関連商品：同カテゴリ or カテゴリ横断で上から最大3件
+  // フォールバック付きで取り出し（CSV/Bカート未指定時はカテゴリ別デフォルト）
+  const recommendedFor =
+    product.recommendedFor && product.recommendedFor.length > 0
+      ? product.recommendedFor
+      : recommendedForFor(product.categoryKey)
+  const usageSalon = product.usageSalon || usageSalonFor(product.categoryKey)
+  const usageHome =
+    product.usageHome || product.usage || usageHomeFor(product.categoryKey)
+
+  // 関連商品：同カテゴリ優先で最大3件
   const related = products
     .filter((p) => p.slug !== product.slug)
     .sort((a) => (a.categoryKey === product.categoryKey ? -1 : 1))
@@ -37,11 +77,11 @@ export default function ProductDetailPage() {
         </div>
       </nav>
 
-      {/* 本体 */}
+      {/* ── ① 画像 + ② 商品名 + ③ キャッチコピー（説明・スペック含む基本情報ブロック） ── */}
       <section className="py-10 sm:py-14 bg-white">
         <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-10 lg:gap-14 items-start">
-            {/* ビジュアル */}
+            {/* 画像 */}
             <div
               className={`aspect-square rounded-3xl bg-gradient-to-br ${product.gradient} relative overflow-hidden`}
             >
@@ -65,7 +105,7 @@ export default function ProductDetailPage() {
               </span>
             </div>
 
-            {/* 情報 */}
+            {/* 商品名・キャッチコピー・説明・スペック */}
             <div>
               <div className="flex items-center gap-2 mb-3">
                 <span className="text-[11px] tracking-wider text-indigo-600 font-semibold">
@@ -78,22 +118,26 @@ export default function ProductDetailPage() {
                 )}
               </div>
 
+              {/* ② 商品名 */}
               <h1 className="text-2xl sm:text-3xl lg:text-4xl font-bold text-slate-900 leading-tight mb-4">
                 {product.name}
               </h1>
 
+              {/* ③ キャッチコピー */}
               {product.tagline && (
                 <p className="text-indigo-700 font-semibold text-sm sm:text-base mb-6">
                   {product.tagline}
                 </p>
               )}
 
-              <p className="text-slate-600 text-sm sm:text-base leading-relaxed mb-8">
-                {product.description}
-              </p>
+              {product.description && (
+                <p className="text-slate-600 text-sm sm:text-base leading-relaxed mb-8">
+                  {product.description}
+                </p>
+              )}
 
               {/* スペック */}
-              <dl className="grid grid-cols-2 gap-y-3 gap-x-6 text-sm border-y border-slate-100 py-5 mb-8">
+              <dl className="grid grid-cols-2 gap-y-3 gap-x-6 text-sm border-y border-slate-100 py-5">
                 <dt className="text-slate-400">品番</dt>
                 <dd className="text-slate-800 font-medium">{product.code}</dd>
                 <dt className="text-slate-400">容量</dt>
@@ -101,28 +145,12 @@ export default function ProductDetailPage() {
                 <dt className="text-slate-400">カテゴリ</dt>
                 <dd className="text-slate-800 font-medium">{product.category}</dd>
               </dl>
-
-              {/* CTA */}
-              <div className="flex flex-col sm:flex-row gap-3">
-                <Link
-                  to="/salon-search"
-                  className="inline-flex items-center justify-center px-6 py-3 rounded-full bg-indigo-700 text-white font-semibold text-sm hover:bg-indigo-800 transition-colors shadow-lg"
-                >
-                  取扱サロンを探す
-                </Link>
-                <Link
-                  to="/products"
-                  className="inline-flex items-center justify-center px-6 py-3 rounded-full border border-slate-300 text-slate-700 font-semibold text-sm hover:border-indigo-300 hover:text-indigo-700 transition-colors"
-                >
-                  商品一覧へ戻る
-                </Link>
-              </div>
             </div>
           </div>
         </div>
       </section>
 
-      {/* 特長 */}
+      {/* ── ④ 特徴 ── */}
       {product.features?.length > 0 && (
         <section className="py-14 bg-slate-50">
           <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8">
@@ -148,19 +176,86 @@ export default function ProductDetailPage() {
         </section>
       )}
 
-      {/* 使用方法 */}
-      {product.usage && (
+      {/* ── この商品がおすすめな方 ── */}
+      {recommendedFor.length > 0 && (
         <section className="py-14 bg-white">
-          <div className="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8">
-            <h2 className="text-xl sm:text-2xl font-bold text-slate-900 text-center mb-6">
-              ご使用方法
-            </h2>
-            <p className="text-slate-600 text-sm sm:text-base leading-relaxed text-center">
-              {product.usage}
+          <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8">
+            <p className="text-amber-600 text-[11px] tracking-[0.25em] font-semibold text-center mb-3">
+              FOR WHOM
             </p>
+            <h2 className="text-xl sm:text-2xl font-bold text-slate-900 text-center mb-10">
+              この商品がおすすめな方
+            </h2>
+            <ul className="space-y-3 max-w-2xl mx-auto">
+              {recommendedFor.map((r, i) => (
+                <li
+                  key={i}
+                  className="flex items-start gap-3 bg-slate-50 rounded-xl px-5 py-4"
+                >
+                  <span className="flex items-center justify-center w-7 h-7 rounded-full bg-amber-100 text-amber-700 flex-shrink-0">
+                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                    </svg>
+                  </span>
+                  <p className="text-sm sm:text-base text-slate-700 leading-relaxed">{r}</p>
+                </li>
+              ))}
+            </ul>
           </div>
         </section>
       )}
+
+      {/* ── ⑤ 使用シーン（サロン施術 / ホームケア） ── */}
+      <section className="py-14 bg-slate-50">
+        <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8">
+          <p className="text-amber-600 text-[11px] tracking-[0.25em] font-semibold text-center mb-3">
+            HOW TO USE
+          </p>
+          <h2 className="text-xl sm:text-2xl font-bold text-slate-900 text-center mb-10">
+            使用シーン
+          </h2>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            {/* サロン施術 */}
+            <div className="bg-white rounded-2xl p-7 shadow-sm border border-slate-100">
+              <div className="flex items-center gap-3 mb-4">
+                <span className="flex items-center justify-center w-10 h-10 rounded-full bg-indigo-100 text-indigo-700">
+                  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M3 11.25h18M5.25 6h13.5M3 16.5h18M9 21V11.25M15 21V11.25" />
+                  </svg>
+                </span>
+                <div>
+                  <p className="text-[10px] tracking-wider text-indigo-600 font-bold">SALON</p>
+                  <h3 className="text-base font-bold text-slate-900">サロン施術</h3>
+                </div>
+              </div>
+              <p className="text-sm text-slate-600 leading-relaxed">{usageSalon}</p>
+            </div>
+
+            {/* ホームケア */}
+            <div className="bg-white rounded-2xl p-7 shadow-sm border border-slate-100">
+              <div className="flex items-center gap-3 mb-4">
+                <span className="flex items-center justify-center w-10 h-10 rounded-full bg-rose-100 text-rose-700">
+                  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 12l8.954-8.955a1.5 1.5 0 012.121 0L21.75 12M4.5 9.75v9.75A1.5 1.5 0 006 21h3v-6h6v6h3a1.5 1.5 0 001.5-1.5V9.75" />
+                  </svg>
+                </span>
+                <div>
+                  <p className="text-[10px] tracking-wider text-rose-600 font-bold">HOME</p>
+                  <h3 className="text-base font-bold text-slate-900">ホームケア</h3>
+                </div>
+              </div>
+              <p className="text-sm text-slate-600 leading-relaxed">{usageHome}</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* ── ⑥ CTA 中部 ── */}
+      <section className="py-12 bg-white">
+        <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8">
+          <FindSalonCTA productName={product.name} />
+        </div>
+      </section>
 
       {/* 関連商品 */}
       {related.length > 0 && (
@@ -191,6 +286,13 @@ export default function ProductDetailPage() {
           </div>
         </section>
       )}
+
+      {/* ── ⑥ CTA 最下部 ── */}
+      <section className="py-16 bg-white">
+        <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8">
+          <FindSalonCTA productName={product.name} />
+        </div>
+      </section>
     </>
   )
 }

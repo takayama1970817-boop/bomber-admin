@@ -21,7 +21,7 @@ import {
 
 export const CSV_COLUMNS = [
   'code',
-  'slug',       // optional: 空なら code から自動生成
+  'slug',           // optional: 空なら code から自動生成
   'name',
   'category',
   'unit',
@@ -29,8 +29,11 @@ export const CSV_COLUMNS = [
   'badge',
   'short_desc',
   'description',
-  'features',
-  'usage',
+  'features',       // | 区切り
+  'recommended_for',// | 区切り （optional - 詳細ページ「この商品がおすすめな方」用）
+  'usage_salon',    // optional - 「使用シーン: サロン施術」用
+  'usage_home',     // optional - 「使用シーン: ホームケア」用
+  'usage',          // 互換: 使用方法（usage_home が空のときのフォールバック）
   'tagline',
   'image_url',
   'display_order',
@@ -160,6 +163,14 @@ export function parseProductsCsv(csvText, options = {}) {
     // price は Bカート側の卸価格のため公開出力には含めない（方針: 公開用項目のみ）。
     // 将来、小売価格を公開する場合は別カラムを追加する。
 
+    const recommendedRaw = String(get('recommended_for') || '').trim()
+    const recommendedFor = recommendedRaw
+      ? recommendedRaw.split('|').map((s) => s.trim()).filter(Boolean)
+      : []
+    const usageHome = String(get('usage_home') || '').trim()
+      || String(get('usage') || '').trim() // 互換: usage_home 未指定時は usage を流用
+      || null
+
     products.push({
       slug,
       code,
@@ -172,7 +183,10 @@ export function parseProductsCsv(csvText, options = {}) {
       shortDesc: String(get('short_desc') || '').trim(),
       description: String(get('description') || '').trim(),
       features,
-      usage: String(get('usage') || '').trim() || null,
+      recommendedFor,
+      usageSalon: String(get('usage_salon') || '').trim() || null,
+      usageHome,
+      usage: usageHome, // 互換: 旧 usage 参照箇所のため残す
       image: String(get('image_url') || '').trim() || null,
       gradient: gradientFor(categoryKey),
       displayOrder: toNumberOrNull(get('display_order')) ?? 9999,
