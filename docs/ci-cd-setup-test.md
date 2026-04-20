@@ -136,8 +136,48 @@ CI/CD が暴走した場合:
 2. ワークフロー無効化: Actions タブ → 右上メニュー → 「Disable workflow」
 3. `.github/workflows/deploy-test.yml` を削除する PR を作成
 
-## 9. 変更履歴
+## 9. DryRun 検証ワークフロー（v1.1 追加）
+
+本番書き込みを一切行わずに関数の挙動を確認するための検証ワークフロー:
+`.github/workflows/dryrun-test.yml`
+
+### 9.1 目的
+
+- 社長が CLI を打たずに検証できる
+- workflow_dispatch でボタン操作のみ
+- dryRun 強制固定（ワークフロー側で本番書き込み不可）
+
+### 9.2 使い方
+
+1. GitHub リポジトリ → Actions タブ
+2. 左メニュー「DryRun Verify (test)」
+3. 「Run workflow」
+4. 入力:
+   - function_name: `createMonthlySettlement` or `detectDuplicates`
+   - target_month: 省略可（省略時は前月）
+5. 実行ボタン
+
+### 9.3 結果の確認
+
+- 実行完了後、該当 Run の「Summary」欄に JSON 形式で結果表示
+- createMonthlySettlement: 対象代理店数 / 作成予定件数 / スキップ理由
+- detectDuplicates: 走査件数 / 二重検知件数 / 各コレクション別内訳
+
+### 9.4 安全保証
+
+- Admin SDK による **読み取りのみ**（走査 + 存在確認）
+- 本番 Function の createMonthlySettlement は呼ばない
+- 結果的に kickbacks / invoices / settlementRunLogs への書き込みは **物理的に発生しない**
+- dryRun=true は yml 内で固定（ユーザが書き換え不可）
+
+### 9.5 関連ファイル
+
+- `.github/workflows/dryrun-test.yml` - ワークフロー定義
+- `scripts/ci-dryrun.mjs` - Admin SDK 経由の検証スクリプト
+
+## 10. 変更履歴
 
 | 日付 | 版 | 変更内容 |
 |---|---|---|
 | 2026-04-20 | v1 | 初版作成（feature/phase2-stage1 の test 自動デプロイ） |
+| 2026-04-20 | v1.1 | DryRun 検証ワークフロー追加（workflow_dispatch 経由、CLI 不要） |
