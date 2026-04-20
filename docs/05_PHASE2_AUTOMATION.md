@@ -1,7 +1,7 @@
 # 05 Phase 2 自動化設計書（月次自動作成・自動送信・再実行制御）
 
 - **対象**: bomber-admin ERP / 取引精算（kickback + invoice 統合）
-- **版**: v0.2（§1 軽微修正・ChatGPT レビュー反映）
+- **版**: v0.3（§2 起草・本線レビュー反映）
 - **起草開始日**: 2026-04-20
 - **起草者**: ロイヤルトラスト社長 + Claude Code
 - **承認フロー**: §1〜§3 完成後に社長レビュー → ChatGPT レビュー → 両承認で §4 以降着手
@@ -859,7 +859,654 @@ async function detectDuplicates({ triggeredBy = 'scheduled_daily', targetMonth =
 
 ## §2 重複送信の防止機構
 
-（未起草。§1 の社長レビュー + ChatGPT レビュー承認後に起草開始）
+### §2.1 目的と原則
+
+#### 目的
+
+自動作成された精算ドキュメント（`kickbacks` / `invoices`）に対して、
+**1 ドキュメントが自動送信メカニズムで複数回送信されること** を物理的に防ぐ。
+
+#### 前提：§1 の成果を前提とする
+
+§1 で「1 代理店 × 1 月 = 最大 1 ドキュメント」が保証されている。
+したがって §2 は **「1 ドキュメント = 最大 1 回だけ自動送信」** を実現すればよい。
+
+§1 の作成側二重防止が効いていない状態では §2 は意味を持たない。
+本節は §1 が本番合格した後でなければ実装・有効化しない。
+
+#### 原則
+
+- 送信の冪等性は **クライアント側の再実行制御** ではなく **ログ層（settlementEmailLogs）** で保証する
+- 送信処理は「**ログ確定 → SES 送信 → 結果更新**」の 3 段階で進め、途中で落ちても安全
+- **SES 送信成功だけでは「送信済み」と判定しない**（ログ整合込みで判定）
+- 送信失敗時に **自動再送しない**（手動確認後の手動再送のみ）
+- 手動再送は admin 限定、かつ自動送信とは別経路で実行し、監査ログは共通テーブルに記録
+
+#### 設計判断の優先順位（§0.2 の再掲）
+
+1. **二重防止**
+2. **監査性**
+3. **停止可能性**
+4. **運用の便利さ**
+
+「届かないより重複のほうがマシ」という判断はしない。重複送信は信用問題に直結する。
+
+### §2.2 settlementEmailLogs の役割と docId 設計
+
+#### settlementEmailLogs の役割
+
+送信 1 回分に対して 1 ドキュメントを記録する、**送信単位の監査ログ**。
+
+§1.8 の `settlementRunLogs`（実行単位）とは明確に分離する。作成事故と送信事故を切り分けるため。
+
+| ログ | 単位 | 記録タイミング | 目的 |
+|---|---|---|---|
+| `settlementRunLogs` | 月次バッチ 1 実行 | 作成バッチの開始〜終了 | 作成事故の切り分け |
+| `settlementEmailLogs` | 送信 1 通 | 送信処理の各段階 | 送信事故の切り分け |
+
+#### docId 設計：kickbackId / invoiceId を採用
+
+**settlementEmailLogs の docId は、送信対象ドキュメントの ID（kickbackId または invoiceId）をそのまま使う**。
+
+```
+docId 形式: {kickbackId} または {invoiceId}
+
+具体例:
+  settlementEmailLogs/kb_J0015_2026-04
+  settlementEmailLogs/invoice_J0021_2026-04
+```
+
+#### 採用理由
+
+1. **1 ドキュメント = 1 ログ**：同一精算に対して複数の送信ログが作られない（冪等キー）
+2. **§1 の docId を流用**：`kb_J0015_2026-04` の形式を踏襲し、監査時に即対応付け可能
+3. **docId 衝突で二重送信を物理防止**：`tx.create()` で既存検知すれば自動送信の二重化は原理的に防げる
+4. **参照が自明**：送信ログから元の精算ドキュメントを直接取得できる（同じ docId）
+
+#### 自動採番（addDoc）を使わない理由
+
+`settlementEmailLogs` を `addDoc` にすると、同一精算に対して複数ログが作れてしまう。
+それでは「1 ドキュメント = 1 送信」の保証をデータ層で担保できない。
+
+| 代替案 | 問題 |
+|---|---|
+| `addDoc`（自動採番） | 同一精算に複数ログ → 二重送信を検知できない |
+| `{kickbackId}_{attemptNo}` | attemptNo の採番ロジックが必要 → 複雑化 |
+| **`{kickbackId}` そのまま（採用）** | ✅ データ層で一意性保証、複雑度最小 |
+
+#### 再送の扱い
+
+再送は「新規ログを作る」のではなく「既存ログを update する」設計とする（§2.7 で詳述）。
+これにより「何度送ったか」は同一ドキュメントの attempt 履歴として記録される。
+
+### §2.3 送信対象判定の前提条件
+
+送信対象に含めるためには **以下 5 条件を AND ですべて満たす** 必要がある。
+1 つでも欠けた代理店・精算は送信対象外とし、理由を記録する。
+
+| # | 条件 | 判定方法 |
+|---|---|---|
+| 1 | 対象月が確定していること | `kickback.status === 'approved'` または `invoice.status === 'issued'` |
+| 2 | 代理店が存続していること | `dealers/{dealerCode}.active === true` |
+| 3 | kbGroup が A/B/C のいずれかであること | `dealers.kbGroup in ['A', 'B', 'C']` |
+| 4 | `dealers.settlementEmail` が有効な形式で設定されていること | `/^[^\s@]+@[^\s@]+\.[^\s@]+$/` にマッチ |
+| 5 | 対象帳票（kickback または invoice）が既に作成済み | Firestore に docId が存在する |
+
+#### 条件未達のスキップ理由コード
+
+```javascript
+const SKIP_REASONS = Object.freeze([
+  'not_approved',       // #1: status が approved / issued でない
+  'dealer_inactive',    // #2: dealers.active === false
+  'no_kbGroup',         // #3: kbGroup 未設定
+  'invalid_email',      // #4: settlementEmail が未設定 or 不正形式
+  'document_missing',   // #5: 対象帳票が存在しない（通常ありえない異常）
+])
+```
+
+スキップは `settlementEmailLogs` には記録しない（送信を試みていないため）。
+代わりに `settlementRunLogs`（§2 用の別バッチログ = `settlementSendRunLogs`、§3 で定義）に記録する。
+
+#### 判定時の原則
+
+- 判定は送信実行の **直前** に行う（§2.4 の pending-first の前段）
+- キャッシュした判定結果を使わない（Firestore 最新値で毎回判定）
+- 判定コスト増は許容する（二重送信リスクより安い）
+
+### §2.4 Cloud Functions 側の pending-first ロジック
+
+#### 3 段階構造
+
+送信処理は **必ず以下の 3 段階** を順番に実行する。途中で落ちても再実行で安全に復帰できるよう設計する。
+
+```
+Stage 1: ログ確定（pending）
+  ├─ settlementEmailLogs/{id} に transaction で pending 作成
+  ├─ 既に sent / pending が存在すれば reject
+  └─ failed のみ上書き許可
+
+Stage 2: SES（SendGrid）送信
+  ├─ Stage 1 が完了してから初めて SES API を叩く
+  └─ 成功時は x-message-id を取得
+
+Stage 3: 結果更新
+  ├─ 成功 → status を sent に update（最大 3 回リトライ）
+  ├─ 失敗 → status を failed に update（errorMessage 記録）
+  └─ Stage 3 失敗時は pending 残留（admin が手動で resolve）
+```
+
+#### Stage 1 のコード（pending-first）
+
+```javascript
+const logRef = db.collection('settlementEmailLogs').doc(kickbackId)
+
+await db.runTransaction(async (tx) => {
+  const snap = await tx.get(logRef)
+  if (snap.exists) {
+    const prev = snap.data() || {}
+    if (prev.status === 'sent') {
+      throw new HttpsError('already-exists', `既に送信済み (messageId: ${prev.sesMessageId})`)
+    }
+    if (prev.status === 'pending') {
+      throw new HttpsError('already-exists', '送信処理中です')
+    }
+    // status === 'failed' のみ再試行許可（pending で上書き）
+  }
+  tx.set(logRef, {
+    kickbackId,
+    dealerCode,
+    dealerName,
+    month,
+    status: 'pending',
+    toEmail,
+    ccCount, ccDomains, ccSource,
+    bccCount, bccDomains, bccSource,
+    isTestSend,
+    sentBy,
+    sentByEmail,
+    createdAt: snap.exists ? (snap.data().createdAt || now) : now,
+    updatedAt: now,
+    sesMessageId: null,
+    errorMessage: null,
+    attemptCount: (snap.exists ? (snap.data().attemptCount || 0) : 0) + 1,
+  })
+})
+```
+
+#### なぜ pending を先に確定させるか
+
+| 理由 | 説明 |
+|---|---|
+| 二重送信防止 | pending を先に書き込めば、同時実行の 2 回目は即座に拒否できる |
+| 送信中表示 | UI が「送信中…」を表示できる（ユーザーの二重ボタン押下を抑止） |
+| 再実行安全 | Stage 2 / 3 で落ちても pending 残留を検知して手動リカバリ可能 |
+| 監査性 | 送信を試みた事実が必ず記録される（SES API が落ちていても記録は残る） |
+
+#### Stage 1 失敗時の挙動
+
+Stage 1 の transaction が throw した場合、**Stage 2（SES 送信）は絶対に実行しない**。
+これにより「ログ未記録 + 実送信済み」という最悪ケースを防ぐ。
+
+### §2.5 送信前ログ確定 → SES送信 → 結果更新 の3段階
+
+#### Stage 2: SES（SendGrid）送信
+
+Stage 1 完了後、SendGrid API を呼び出す。
+
+```javascript
+// Stage 1 が成功した前提で Stage 2 に進む
+const sgApiKey = process.env.SENDGRID_API_KEY || settings.sendgridApiKey
+if (!sgApiKey) {
+  // Stage 1 は完了している → failed に update してから throw
+  await logRef.update({
+    status: 'failed',
+    errorMessage: 'SendGrid API キーが未設定',
+    updatedAt: FieldValue.serverTimestamp(),
+  })
+  throw new HttpsError('failed-precondition', 'SendGrid API キーが未設定')
+}
+
+sgMail.setApiKey(sgApiKey)
+
+let sesMessageId
+try {
+  const [response] = await sgMail.send(msg)
+  const headers = response?.headers || {}
+  sesMessageId = headers['x-message-id'] || null
+} catch (err) {
+  // Stage 2 失敗 → failed に update
+  const errMsg = String(err?.message || err)
+  await logRef.update({
+    status: 'failed',
+    errorMessage: errMsg.slice(0, 1000),
+    updatedAt: FieldValue.serverTimestamp(),
+  })
+  throw new HttpsError('internal', `メール送信失敗: ${errMsg}`)
+}
+```
+
+#### Stage 3: 結果更新（成功確定）
+
+SES 送信成功後、Firestore の status を `sent` に更新する。ここが落ちると最悪ケース。
+
+```javascript
+// Stage 3: status=sent 確定（3回リトライ）
+const finalUpdate = {
+  status: 'sent',
+  sesMessageId,
+  sentAt: FieldValue.serverTimestamp(),
+  updatedAt: FieldValue.serverTimestamp(),
+}
+let updateErr = null
+for (let attempt = 1; attempt <= 3; attempt++) {
+  try {
+    await logRef.update(finalUpdate)
+    updateErr = null
+    break
+  } catch (e) {
+    updateErr = e
+    if (attempt < 3) await new Promise(r => setTimeout(r, 500 * attempt))
+  }
+}
+
+if (updateErr) {
+  // 最悪ケース: SES 送信済みだが status 更新失敗 → pending 残留
+  console.error('[CRITICAL] SES 送信成功だが Firestore 更新失敗', {
+    kickbackId, sesMessageId, error: updateErr.message,
+  })
+  // 呼び出し元に warning で返し、admin が resolveSettlementEmailLog で手動確定できるようにする
+  return {
+    success: true,
+    warning: 'SES送信は完了したがログ更新に失敗。admin 手動確定を推奨',
+    kickbackId,
+    sesMessageId,
+  }
+}
+
+return { success: true, kickbackId, sesMessageId }
+```
+
+#### なぜ Stage 3 に 3 回リトライを入れるか
+
+- Stage 1 / Stage 2 は「自動再試行しない」原則（§1.7）に従う
+- Stage 3 は「**SES は既に送信済み**」という既成事実があるため、ログ整合のほうが優先
+- リトライしないとログが pending のまま残り、後の送信済み判定（§2.8）で混乱する
+- ただし 3 回で諦め、それ以上は admin に通知する（自動無限リトライはしない）
+
+#### Stage 3 の 3 回リトライが §1.7 原則と矛盾しない理由
+
+§1.7 の「自動再試行禁止」は **「実アクション（送信・作成）の再試行」** を禁止するもの。
+Stage 3 のリトライは **「既に完了した実アクションの結果記録」** のリトライであり、性質が異なる。
+
+| §1.7 対象（禁止） | Stage 3 リトライ（許可） |
+|---|---|
+| 送信自体を再試行 | 送信済みの結果を記録する update を再試行 |
+| 二重送信リスクあり | 二重送信リスクなし（既に送信済み） |
+| 根本原因隠蔽のリスク | 一時的 Firestore 瞬断への耐性 |
+
+### §2.6 送信ログの status 遷移
+
+#### 状態遷移図
+
+```
+        (なし)
+           │
+           ▼
+       [pending]  ← Stage 1 完了
+           │
+           ├─ SES 成功 → [sent]       (最終状態)
+           │
+           └─ SES 失敗 → [failed]     (admin 手動再送で [pending] に戻る)
+```
+
+#### 許可される遷移
+
+| from | to | 遷移手段 | 備考 |
+|---|---|---|---|
+| (なし) | `pending` | `tx.create` or `tx.set` | Stage 1 |
+| `pending` | `sent` | `update` | Stage 3 成功 |
+| `pending` | `failed` | `update` | Stage 2 / 3 失敗 |
+| `failed` | `pending` | `update` | admin 手動再送（§2.7） |
+| `pending` | `failed` | `update` | admin 手動 resolve（§2.9） |
+| `pending` | `sent` | `update` | admin 手動 resolve（§2.9、sesMessageId 明示） |
+
+#### 禁止される遷移
+
+| from | to | 理由 |
+|---|---|---|
+| `sent` | (任意) | sent は最終状態。書き換え禁止 |
+| (任意) | (なし)（削除） | append-only（§2.10 参照） |
+
+#### status 遷移の rules 側制約
+
+```javascript
+// firestore.rules
+match /settlementEmailLogs/{docId} {
+  allow read: if hasValidAdminRole();
+  // create / update は Cloud Functions（Admin SDK）経由のみ
+  // Admin SDK は rules をバイパスするため、クライアント側は完全遮断
+  allow create, update: if false;
+  allow delete: if false;
+}
+```
+
+Cloud Functions 側で以下を必ずチェック：
+
+```javascript
+function assertStatusTransition(from, to) {
+  const allowed = {
+    '__none__': ['pending'],
+    'pending':  ['sent', 'failed'],
+    'failed':   ['pending'],  // 再送
+    'sent':     [],            // 最終状態
+  }
+  if (!allowed[from]?.includes(to)) {
+    throw new Error(`Invalid status transition: ${from} → ${to}`)
+  }
+}
+```
+
+### §2.7 再送シナリオ（自動再試行禁止・手動再送のみ）
+
+#### 原則
+
+- 送信失敗時の **自動再送は行わない**（§1.7 の原則を送信側にも適用）
+- 再送は **admin の手動操作** でのみ可能
+- 手動再送は **別の Cloud Function**（`manualResendSettlementEmail`）で行い、自動送信関数とは完全分離
+- 手動再送の監査は `settlementEmailLogs` の同一ドキュメントに attempt 履歴として追記
+
+#### 自動再送を禁止する理由
+
+| 理由 | 説明 |
+|---|---|
+| 真因隠蔽 | API 障害が自動リトライで「成功」するとログに障害事実が残らない |
+| 二重送信リスク | 送信側のタイムアウトと自動再送の組み合わせは重複送信事故の典型 |
+| 停止可能性 | 自動再送を止めるには別の停止スイッチが必要 → 設計が複雑化 |
+| 監査性 | 自動再送の履歴は監査側で「人の判断」と区別できない |
+
+#### 手動再送の責務分離
+
+| 経路 | Cloud Function | 権限 | 対象 status |
+|---|---|---|---|
+| 自動送信 | `sendSettlementEmail` | admin 限定 + testDealerCode 制限（段階解放後は全代理店） | `pending` が作成可能（なし / failed） |
+| 手動再送 | `manualResendSettlementEmail` | **admin 限定**（§2.9） | `failed` のみ |
+| 手動確定 | `resolveSettlementEmailLog` | admin 限定 | `pending` 残留のみ（5分経過） |
+
+#### 手動再送の流れ
+
+1. admin が SettlementManage UI で失敗ログを確認
+2. `status === 'failed'` のログに「再送」ボタンが表示される
+3. admin が再送ボタンを押下 → `manualResendSettlementEmail` 呼び出し
+4. Cloud Function 内で Stage 1（pending に戻す）→ Stage 2（SES 送信）→ Stage 3（結果更新）
+5. attemptCount をインクリメント、resentBy / resentAt を記録
+
+#### 手動再送のログ追記
+
+新規ログを作らず、既存ログを update する。attempt 履歴は `attemptCount` で数え、
+詳細は `resendHistory[]` 配列に追記する（肥大化防止のため最新 10 件まで）。
+
+```javascript
+await logRef.update({
+  status: 'pending',  // failed → pending に戻す（Stage 1 相当）
+  attemptCount: FieldValue.increment(1),
+  resendHistory: FieldValue.arrayUnion({
+    resentAt: FieldValue.serverTimestamp(),  // 配列内の serverTimestamp は実際には許可されないので Date.now() で代替
+    resentBy: adminUid,
+    resentByEmail: adminEmail,
+    previousStatus: 'failed',
+    previousError: prevErrorMessage,
+  }),
+  updatedAt: FieldValue.serverTimestamp(),
+})
+```
+
+### §2.8 送信済み判定の厳密化
+
+#### 原則：SES 成功 **だけ** では sent 判定しない
+
+「送信済み」の判定は以下 **3 条件を AND** で満たすときのみとする。
+
+| # | 条件 |
+|---|---|
+| 1 | `settlementEmailLogs/{id}.status === 'sent'` |
+| 2 | `settlementEmailLogs/{id}.sesMessageId` が非 null（SendGrid の x-message-id 保持済み） |
+| 3 | 元の精算ドキュメント（kickbacks / invoices）側にも `sentAt` が記録されている |
+
+#### 3 条件 AND を採用する理由
+
+SES API は「送信成功」を返したが、その直後に Firestore 書き込みが落ちた場合、
+`settlementEmailLogs` は pending のまま残る。このときシステム的には「送信済み」だが
+データ的には「未送信」と判定できてしまう。
+
+これを防ぐため、ログ層と本体ドキュメント層の **両方** に sent 記録を残し、
+判定時は両方揃っているときのみ sent 扱いとする。
+
+#### 精算ドキュメント側の sentAt 記録
+
+Stage 3 の結果更新時、**同一 batch で** 両方を更新する：
+
+```javascript
+const batch = db.batch()
+batch.update(logRef, {
+  status: 'sent',
+  sesMessageId,
+  sentAt: FieldValue.serverTimestamp(),
+  updatedAt: FieldValue.serverTimestamp(),
+})
+batch.update(kickbackRef, {
+  sentAt: FieldValue.serverTimestamp(),
+  lastSendLogId: kickbackId,  // logRef.id と同じ
+})
+await batch.commit()
+```
+
+batch 失敗時は §2.5 の 3 回リトライで復旧を試みる。
+リトライ失敗時は warning を返し、admin が resolveSettlementEmailLog で手動確定。
+
+#### 「送信済み判定」関数の共通化
+
+```javascript
+function isSettlementSent({ emailLog, settlement }) {
+  return (
+    emailLog?.status === 'sent' &&
+    !!emailLog?.sesMessageId &&
+    !!settlement?.sentAt
+  )
+}
+```
+
+この関数を UI（SettlementManage.jsx）とバッチ両方で使い、判定ロジックを一本化する。
+
+### §2.9 失敗時の扱い（admin 手動確認）
+
+#### 失敗の分類
+
+| 分類 | 起因 | 対応 |
+|---|---|---|
+| Stage 1 失敗 | 既に sent / pending が存在 | 正常挙動。拒否メッセージを呼び出し元へ |
+| Stage 2 失敗 | SendGrid API 障害 / 宛先不正 / API キー未設定 | failed 確定。admin が原因特定後に手動再送 |
+| Stage 3 失敗 | Firestore 瞬断等（3 回リトライ後） | pending 残留。admin が resolveSettlementEmailLog で手動確定 |
+
+#### admin 手動確認フロー
+
+```
+Stage 2 失敗（failed 確定）
+  ├─ SettlementManage UI に「再送」ボタン表示
+  ├─ admin が errorMessage を確認
+  ├─ 原因特定後に「再送」押下
+  └─ manualResendSettlementEmail 呼び出し
+
+Stage 3 失敗（pending 残留）
+  ├─ SettlementManage UI に「pending解除」ボタン表示（5分経過後のみ有効）
+  ├─ admin が SendGrid ダッシュボードで実送信確認
+  ├─ sesMessageId を取得
+  └─ resolveSettlementEmailLog({ targetStatus: 'sent', sesMessageId, reason }) 呼び出し
+```
+
+#### admin 手動再送の制約
+
+| 制約 | 理由 |
+|---|---|
+| admin 限定 | staff / dealer / salon は再送不可（誤操作防止） |
+| reason 必須 | 再送理由を必ず記録（何度目か・どんな判断か） |
+| status=failed のみ対象 | pending / sent は再送対象外 |
+| 短時間連打防止 | 同一ログへの再送は 60 秒クールダウン |
+
+#### admin 手動 resolve の制約
+
+| 制約 | 理由 |
+|---|---|
+| admin 限定 | pending の強制確定は特権操作 |
+| 5 分経過後のみ | 送信処理との競合防止（§2.5 の Stage 3 リトライは 1-2 秒で完了する） |
+| reason 必須 | 何を根拠に sent / failed に確定したか記録 |
+| targetStatus='sent' 時は sesMessageId 必須 | SendGrid ダッシュボードから確認した実 ID を要求 |
+
+#### 通知設計（§3 で詳細）
+
+- Stage 2 / Stage 3 失敗時は admin に即時通知（メール / Slack）
+- 通知内容：kickbackId / errorMessage / 推奨アクション（再送 / resolve）
+
+### §2.10 段階運用上の解除条件・停止条件
+
+#### 第 2 段階の位置づけ
+
+- **目的**：送信機構の二重防止を **テスト代理店 1 件のみ** で本番検証する
+- **期間**：本番環境で 1 か月
+- **対象**：`settings/rt_company.testDealerCode` で指定された 1 代理店のみ（現状 J0015）
+- **送信方法**：**手動送信のみ**（Scheduler 自動化は第 3 段階）
+
+#### 第 2 段階で行うこと
+
+1. 自動送信関数（`sendSettlementEmail`）をデプロイ（ただし Scheduler 連携なし）
+2. SettlementManage UI から手動トリガーでの送信を検証
+3. pending-first ロジック・3 段階遷移・Stage 3 リトライを実地確認
+4. 二重送信防止（409 Conflict）を実地確認
+5. 再送機能・resolve 機能を実地確認
+
+#### 解除条件（第 3 段階に進んでよい条件）
+
+以下 5 条件を **すべて** 満たした場合のみ、第 3 段階（段階解放）に進む。
+
+| # | 条件 | 確認方法 |
+|---|---|---|
+| 1 | テスト代理店への送信が 1 か月間エラー 0 件 | `settlementEmailLogs` の status=failed 合計が 0 |
+| 2 | 二重送信 0 件 | 同一 kickbackId に対して status=sent が 1 件のみ |
+| 3 | pending 残留 0 件 | 5 分以上経過した pending が 0 件 |
+| 4 | SES 成功 + Firestore 更新の整合性 100% | `isSettlementSent()` で sent 判定された全件が 3 条件揃っている |
+| 5 | 手動再送・resolve 機能が 1 回以上実地検証済み | 意図的に failed を起こして再送を通す |
+
+#### 停止条件（即座に自動送信を止める条件）
+
+以下のいずれか **1 つでも** 発生した場合、即座に自動送信を停止する。
+
+| # | 条件 | 判定単位 |
+|---|---|---|
+| 1 | **二重送信を 1 件でも検知**（件数問わず即停止） | 都度検知（§2.11 の検知クエリ） |
+| 2 | Stage 3 失敗（pending 残留）が 1 回でも発生 | 都度検知 |
+| 3 | SES エラー率 5% 超（送信試行数に対する failed 数） | 1 週間単位で集計 |
+| 4 | 手動再送で意図と異なる結果が 1 件でも発生 | 都度検知 |
+| 5 | 社長判断で停止指示 | 随時 |
+
+#### 停止方法
+
+§1.9 と同じく `settings/settlement_automation.enabled = false` で即時停止。
+自動送信 Scheduler（第 3 段階以降）がこのフラグを見て動作を中断する。
+
+手動送信（第 2 段階）は `enabled` とは別に、UI 側で送信ボタンを非表示にする
+フラグを `settings/rt_company.settlementManualSendDisabled = true` として追加する。
+
+```javascript
+// settings/rt_company
+{
+  settlementManualSendDisabled: false,  // true で手動送信 UI も全停止
+  settlementManualSendDisabledAt: null,
+  settlementManualSendDisabledBy: null,
+  settlementManualSendDisabledReason: null,
+}
+```
+
+### §2.11 第 2 段階の検証計画
+
+#### 検証期間
+
+- **開始**: §1〜§3 レビュー承認 + §1 第 1 段階合格後の任意日
+- **終了**: 開始から 1 か月経過 + 解除条件 5 点すべて達成時点
+
+#### 観測項目
+
+| # | 項目 | 観測方法 |
+|---|---|---|
+| 1 | Stage 1 の pending 作成が毎回成功 | `settlementEmailLogs` に pending 記録が確実に残る |
+| 2 | Stage 2 の SES 送信が成功 | `sesMessageId` が記録される |
+| 3 | Stage 3 の status=sent 遷移が成功 | `isSettlementSent()` が true を返す |
+| 4 | 二重送信試行が 409 Conflict で拒否 | 実地で同一精算に 2 回送信して確認 |
+| 5 | failed からの手動再送が成功 | 意図的に API キー不正で failed を作り、再送で sent に |
+| 6 | pending 残留の resolve が成功 | 5 分経過後に resolveSettlementEmailLog で sent 確定 |
+| 7 | 代理店側にメール到達（本文・BCC 非表示） | 実メール受信確認 3 点（§2026-04-19 の送信テストで検証済） |
+| 8 | isTest=true のテスト清算書でのみ件名プレフィクスが付く | 本番実データに誤って付かないことを確認 |
+
+#### 二重送信検知クエリ（§2.10 停止条件 #1 対応）
+
+§1.10 の二重作成検知と同様、2 系統で起動する。
+
+| # | タイミング | 起動方法 | 目的 |
+|---|---|---|---|
+| 1 | 送信処理完了直後 | `sendSettlementEmail` の最後で検知ロジック呼び出し | 即検知 |
+| 2 | 毎日 01:00 JST | Cloud Scheduler 独立ジョブ | 日次保険 |
+
+```javascript
+// Cloud Functions: detectDuplicateSettlementEmails
+//
+// 目的: 同一 kickbackId に対して status=sent のログが 2 件以上ないか検知
+//       （docId 固定なので原理的に発生しないが、意味的重複を検知する）
+
+async function detectDuplicateEmails() {
+  const snap = await db.collection('settlementEmailLogs')
+    .where('status', '==', 'sent')
+    .get()
+
+  const seen = new Map()  // key: kickbackId, value: [logId, ...]
+  for (const doc of snap.docs) {
+    const kickbackId = doc.data().kickbackId
+    if (!kickbackId) continue
+    if (!seen.has(kickbackId)) seen.set(kickbackId, [])
+    seen.get(kickbackId).push(doc.id)
+  }
+
+  const duplicates = []
+  for (const [kickbackId, ids] of seen) {
+    if (ids.length > 1) duplicates.push({ kickbackId, logIds: ids })
+  }
+
+  if (duplicates.length > 0) {
+    // 停止条件 #1 発動
+    await db.doc('settings/settlement_automation').update({
+      enabled: false,
+      disabledAt: FieldValue.serverTimestamp(),
+      disabledBy: 'duplicate_email_detector',
+      disabledReason: `二重送信検知: ${JSON.stringify(duplicates).slice(0, 500)}`,
+    })
+    await notifyAdmin({
+      severity: 'critical',
+      title: '【緊急】二重送信を検知しました',
+      body: `自動送信を即停止しました。詳細: ${JSON.stringify(duplicates, null, 2)}`,
+    })
+  }
+}
+```
+
+#### 検証成功条件
+
+観測項目 8 点 **すべて成功** かつ §2.10 解除条件 5 点 **すべて達成** で §2 本番合格。
+1 点でも失敗・未達成の場合は第 3 段階を延期し、§2 の修正・再検証から始める。
+
+#### 検証失敗時の復旧手順
+
+1. `settings/rt_company.settlementManualSendDisabled = true` で手動送信 UI を即停止
+2. 必要に応じて `settings/settlement_automation.enabled = false` も併用
+3. `settlementEmailLogs` と代理店実受信箱を照合し、二重送信が発生している場合は代理店へ即謝罪連絡
+4. 根本原因を特定
+5. §2 の本文を修正し、再レビューを受けてから再稼働
 
 ---
 
@@ -882,3 +1529,4 @@ async function detectDuplicates({ triggeredBy = 'scheduled_daily', targetMonth =
 | 2026-04-18 | v0.0 | 初期章立て策定、Phase 2 着手条件確定 | 社長 + Claude |
 | 2026-04-20 | v0.1 | §1 起草完了 | Claude |
 | 2026-04-20 | v0.2 | §1 軽微修正（ChatGPT レビュー反映 9点）：type enum 固定 / dealerCode 正規化 / Admin SDK bypass 明文化 / runLogs docId addDoc 採用 / エラー率条件修正 / 部分成功シナリオ追加 / 再生成しない思想統一 / enabled 途中停止挙動 / 二重作成検知方法具体化 | Claude |
+| 2026-04-20 | v0.3 | §2 起草完了：重複送信の防止機構。docId=kickbackId 固定 / pending-first 3段階 / SES成功だけでは sent判定しない / 自動再送禁止・手動再送のみ / admin 手動 resolve / 二重送信検知2系統 / 第2段階はテスト代理店1件で1か月検証 | Claude |
