@@ -1,7 +1,7 @@
 # 05 Phase 2 自動化設計書（月次自動作成・自動送信・再実行制御）
 
 - **対象**: bomber-admin ERP / 取引精算（kickback + invoice 統合）
-- **版**: v0.3（§2 起草・本線レビュー反映）
+- **版**: v0.4（§2 本線レビュー反映）
 - **起草開始日**: 2026-04-20
 - **起草者**: ロイヤルトラスト社長 + Claude Code
 - **承認フロー**: §1〜§3 完成後に社長レビュー → ChatGPT レビュー → 両承認で §4 以降着手
@@ -1111,20 +1111,63 @@ for (let attempt = 1; attempt <= 3; attempt++) {
 
 if (updateErr) {
   // 最悪ケース: SES 送信済みだが status 更新失敗 → pending 残留
-  console.error('[CRITICAL] SES 送信成功だが Firestore 更新失敗', {
+  // v0.4 変更: warning で返すのではなく「即停止 + CRITICAL通知」に変更
+  // 理由: pending 残留を1件でも放置すると isSettlementSent() の整合性が崩れる。
+  //       送信事故の潜在リスクを早期に顕在化させるため、即座に自動送信を止める。
+
+  // ① settings/settlement_automation.enabled = false で即停止
+  try {
+    await db.doc('settings/settlement_automation').update({
+      enabled: false,
+      disabledAt: FieldValue.serverTimestamp(),
+      disabledBy: 'stage3_failure_detector',
+      disabledReason: `Stage3 失敗により自動停止（kickbackId: ${kickbackId}, sesMessageId: ${sesMessageId}）`,
+    })
+  } catch (stopErr) {
+    // 停止操作自体の失敗は別ログ（settings 書き込みも Firestore 不調なら手動停止）
+    console.error('[CRITICAL] Stage3 失敗 + 停止操作も失敗', stopErr)
+  }
+
+  // ② admin へ CRITICAL 通知
+  await notifyAdmin({
+    severity: 'critical',
+    title: '【緊急】Stage3 失敗：SES 送信成功だが Firestore 更新失敗',
+    body: `自動送信を即停止しました。
+  kickbackId: ${kickbackId}
+  sesMessageId: ${sesMessageId}
+  error: ${updateErr.message}
+
+  対応:
+    1. SendGrid ダッシュボードで sesMessageId の実送信を確認
+    2. resolveSettlementEmailLog({ targetStatus: 'sent', sesMessageId, reason }) で手動確定
+    3. settings/settlement_automation.enabled = true に戻して再開`,
+  })
+
+  console.error('[CRITICAL] Stage3 失敗 → automation 即停止', {
     kickbackId, sesMessageId, error: updateErr.message,
   })
-  // 呼び出し元に warning で返し、admin が resolveSettlementEmailLog で手動確定できるようにする
-  return {
-    success: true,
-    warning: 'SES送信は完了したがログ更新に失敗。admin 手動確定を推奨',
-    kickbackId,
-    sesMessageId,
-  }
+
+  // ③ 呼び出し元には HttpsError で throw（warning ではなく明確なエラー扱い）
+  throw new HttpsError(
+    'data-loss',
+    `Stage3 失敗：SES 送信成功だが Firestore 更新失敗。自動送信を停止しました。admin 手動確定が必要です。(kickbackId: ${kickbackId}, sesMessageId: ${sesMessageId})`,
+  )
 }
 
 return { success: true, kickbackId, sesMessageId }
 ```
+
+#### Stage3 失敗を warning ではなく CRITICAL 扱いにする理由（v0.4 変更）
+
+旧案（v0.3）は Stage3 失敗を warning として呼び出し元に返していた。本線レビュー指摘により、
+以下の理由で **即停止 + CRITICAL 通知** に変更した。
+
+| 理由 | 説明 |
+|---|---|
+| 整合性崩壊 | pending 残留 1 件でも `isSettlementSent()` の 3 条件 AND 判定が乱れる |
+| 潜在事故の顕在化 | warning だと「気付かずに運用継続」が起こりうる |
+| 停止可能性の担保 | 判断基準 #3「停止可能性」に従い、疑わしきは止める |
+| admin 介入の強制 | 自動リカバリさせず必ず人の判断を通す（§1.7 原則の徹底） |
 
 #### なぜ Stage 3 に 3 回リトライを入れるか
 
@@ -1246,19 +1289,39 @@ function assertStatusTransition(from, to) {
 詳細は `resendHistory[]` 配列に追記する（肥大化防止のため最新 10 件まで）。
 
 ```javascript
+// v0.4 変更: resentAt は ISO 8601 文字列で記録する
+// 理由: Firestore の arrayUnion() 内部では serverTimestamp() が使用不可のため。
+//       旧案の Date.now() は数値なので人間の可読性が低い。
+//       ISO 文字列なら Firestore Console 上で即座に時刻を確認できる。
+
+const nowIso = new Date().toISOString()  // 例: '2026-04-20T15:32:11.234Z'
+
 await logRef.update({
   status: 'pending',  // failed → pending に戻す（Stage 1 相当）
   attemptCount: FieldValue.increment(1),
   resendHistory: FieldValue.arrayUnion({
-    resentAt: FieldValue.serverTimestamp(),  // 配列内の serverTimestamp は実際には許可されないので Date.now() で代替
+    resentAt: nowIso,              // ISO 文字列（UTC）
     resentBy: adminUid,
     resentByEmail: adminEmail,
     previousStatus: 'failed',
     previousError: prevErrorMessage,
   }),
-  updatedAt: FieldValue.serverTimestamp(),
+  updatedAt: FieldValue.serverTimestamp(),  // ルート直下は serverTimestamp 使用可
 })
 ```
+
+#### resendHistory の時刻形式
+
+| フィールド | 型 | 理由 |
+|---|---|---|
+| `resentAt`（配列内） | ISO 8601 文字列 | arrayUnion 内で serverTimestamp 不可 |
+| `updatedAt`（ルート） | serverTimestamp | Firestore サーバ時刻で厳密記録 |
+| `createdAt`（ルート） | serverTimestamp | 同上 |
+| `sentAt`（ルート） | serverTimestamp | 同上 |
+
+ISO 文字列はクライアント時刻に依存するため厳密性は劣るが、
+`updatedAt`（serverTimestamp）を併用することで実時刻の照合は可能。
+監査時は `resendHistory[].resentAt` と `updatedAt` を突き合わせて整合確認する。
 
 ### §2.8 送信済み判定の厳密化
 
@@ -1316,6 +1379,95 @@ function isSettlementSent({ emailLog, settlement }) {
 ```
 
 この関数を UI（SettlementManage.jsx）とバッチ両方で使い、判定ロジックを一本化する。
+
+#### 整合性不一致の検知（v0.4 追加 / 推奨4）
+
+3 条件 AND で「sent」と判定できない中間状態を検知する `detectSentInconsistency()` を別途用意する。
+これは日次 01:00 JST の二重送信検知と同じ Scheduler で起動し、不一致を発見したら即停止する。
+
+```javascript
+// Cloud Functions: detectSentInconsistency（日次 01:00 JST）
+//
+// 検知する不整合パターン:
+//   A. emailLog.status='sent' かつ sesMessageId あり なのに settlement.sentAt が null
+//   B. emailLog.status='sent' かつ sesMessageId なし（x-message-id 取得失敗）
+//   C. settlement.sentAt あり なのに emailLog が存在しない or status != 'sent'
+//   D. emailLog.status='pending' が一定時間以上残留（§2.11 で別途扱う）
+
+async function detectSentInconsistency() {
+  const inconsistencies = []
+
+  const logsSnap = await db.collection('settlementEmailLogs').get()
+  for (const logDoc of logsSnap.docs) {
+    const log = logDoc.data()
+    const kickbackId = log.kickbackId
+
+    // パターン B: sent なのに sesMessageId が無い
+    if (log.status === 'sent' && !log.sesMessageId) {
+      inconsistencies.push({
+        pattern: 'B_sent_without_messageId',
+        kickbackId,
+        logId: logDoc.id,
+      })
+      continue
+    }
+
+    // パターン A: emailLog=sent だが settlement.sentAt が null
+    if (log.status === 'sent' && log.sesMessageId) {
+      const colName = kickbackId.startsWith('kb_') ? 'kickbacks' : 'invoices'
+      const settlementSnap = await db.collection(colName).doc(kickbackId).get()
+      if (!settlementSnap.exists) {
+        inconsistencies.push({
+          pattern: 'C_log_exists_settlement_missing',
+          kickbackId,
+          logId: logDoc.id,
+        })
+      } else if (!settlementSnap.data().sentAt) {
+        inconsistencies.push({
+          pattern: 'A_sent_log_no_settlement_sentAt',
+          kickbackId,
+          logId: logDoc.id,
+        })
+      }
+    }
+  }
+
+  // パターン C（settlement.sentAt あり かつ emailLog なし）は別ループで検知
+  // ※ コード省略（上記と同様の構造で kickbacks / invoices 両方をスキャン）
+
+  if (inconsistencies.length > 0) {
+    // 即停止（停止条件 #2 相当）
+    await db.doc('settings/settlement_automation').update({
+      enabled: false,
+      disabledAt: FieldValue.serverTimestamp(),
+      disabledBy: 'sent_inconsistency_detector',
+      disabledReason: `整合性不一致検知: ${JSON.stringify(inconsistencies).slice(0, 500)}`,
+    })
+    await notifyAdmin({
+      severity: 'critical',
+      title: '【緊急】送信整合性の不一致を検知しました',
+      body: `自動送信を即停止しました。詳細: ${JSON.stringify(inconsistencies, null, 2)}`,
+    })
+  }
+
+  await db.collection('settlementInconsistencyChecks').add({
+    runAt: FieldValue.serverTimestamp(),
+    checked: logsSnap.size,
+    inconsistenciesFound: inconsistencies.length,
+    inconsistencies,
+  })
+}
+```
+
+#### 整合性チェックの目的
+
+| パターン | 意味 | 想定原因 | 対応 |
+|---|---|---|---|
+| A | emailLog=sent だが settlement.sentAt なし | Stage3 の batch 部分失敗 | resolveSettlementEmailLog で手動確定 + settlement 側更新 |
+| B | emailLog=sent だが sesMessageId なし | SendGrid レスポンス異常 | SendGrid ダッシュボードで実送信確認 |
+| C | settlement.sentAt あり だが emailLog なし | 手動操作ミス or 過去データ | 監査ログとして別途記録（実害なし） |
+
+このチェックで「isSettlementSent() が検知できない中間状態」を日次で洗い出す。
 
 ### §2.9 失敗時の扱い（admin 手動確認）
 
@@ -1401,11 +1553,13 @@ Stage 3 失敗（pending 残留）
 
 | # | 条件 | 判定単位 |
 |---|---|---|
-| 1 | **二重送信を 1 件でも検知**（件数問わず即停止） | 都度検知（§2.11 の検知クエリ） |
-| 2 | Stage 3 失敗（pending 残留）が 1 回でも発生 | 都度検知 |
-| 3 | SES エラー率 5% 超（送信試行数に対する failed 数） | 1 週間単位で集計 |
-| 4 | 手動再送で意図と異なる結果が 1 件でも発生 | 都度検知 |
-| 5 | 社長判断で停止指示 | 随時 |
+| 1 | **二重送信を 1 件でも検知**（件数問わず即停止） | 都度検知（§2.11 の二重送信検知） |
+| 2 | **Stage 3 失敗が 1 回でも発生（v0.4: 即停止 + CRITICAL 通知）** | 都度検知（§2.5 Stage3 ロジック内で自動停止） |
+| 3 | **pending 長期残留（10 分超）が 1 件でも発生（v0.4 追加）** | 10 分毎検知（§2.11 detectStalePending） |
+| 4 | **送信整合性不一致（A/B/C パターン）が 1 件でも発生（v0.4 追加）** | 日次検知（§2.8 detectSentInconsistency） |
+| 5 | SES エラー率 5% 超（送信試行数に対する failed 数） | 1 週間単位で集計 |
+| 6 | 手動再送で意図と異なる結果が 1 件でも発生 | 都度検知 |
+| 7 | 社長判断で停止指示 | 随時 |
 
 #### 停止方法
 
@@ -1444,6 +1598,8 @@ Stage 3 失敗（pending 残留）
 | 6 | pending 残留の resolve が成功 | 5 分経過後に resolveSettlementEmailLog で sent 確定 |
 | 7 | 代理店側にメール到達（本文・BCC 非表示） | 実メール受信確認 3 点（§2026-04-19 の送信テストで検証済） |
 | 8 | isTest=true のテスト清算書でのみ件名プレフィクスが付く | 本番実データに誤って付かないことを確認 |
+| 9 | pending 長期残留 0 件 | `detectStalePending` の 10 分毎チェックで 0 件継続 |
+| 10 | 整合性不一致 0 件（A/B/C パターン） | `detectSentInconsistency` の日次チェックで 0 件継続 |
 
 #### 二重送信検知クエリ（§2.10 停止条件 #1 対応）
 
@@ -1495,9 +1651,126 @@ async function detectDuplicateEmails() {
 }
 ```
 
+#### pending 長期残留検知（v0.4 追加 / 必須2）
+
+Stage3 失敗が起きた場合（v0.4 で即停止扱いに変更）や、
+手動再送中に処理が中断した場合、`status=pending` が長時間残留しうる。
+
+これを検知する独立した Cloud Functions を追加する。
+
+| 項目 | 設計 |
+|---|---|
+| 起動方法 | Cloud Scheduler（毎分 01:00 / 11:00 / 21:00 / 31:00 / 41:00 / 51:00 など、10分毎） |
+| 検知条件 | `settlementEmailLogs.status === 'pending'` かつ `updatedAt < now - 10分` |
+| 対応 | admin に通知 + `settings/settlement_automation.enabled = false` で即停止 |
+| 閾値 | 10 分（Stage3 の 3 回リトライ最大 1.5 秒 + SES 送信最大 60 秒を考慮して余裕を持たせる） |
+
+```javascript
+// Cloud Functions: detectStalePending（10分毎実行）
+
+const STALE_PENDING_THRESHOLD_MS = 10 * 60 * 1000  // 10分
+
+async function detectStalePending() {
+  const now = Date.now()
+  const threshold = new Date(now - STALE_PENDING_THRESHOLD_MS)
+
+  const snap = await db.collection('settlementEmailLogs')
+    .where('status', '==', 'pending')
+    .where('updatedAt', '<', threshold)
+    .get()
+
+  if (snap.empty) return
+
+  const stale = snap.docs.map((d) => ({
+    logId: d.id,
+    kickbackId: d.data().kickbackId,
+    attemptCount: d.data().attemptCount || 1,
+    createdAt: d.data().createdAt?.toDate?.()?.toISOString() || 'unknown',
+    updatedAt: d.data().updatedAt?.toDate?.()?.toISOString() || 'unknown',
+    stalledMinutes: Math.floor((now - d.data().updatedAt.toMillis()) / 60000),
+  }))
+
+  // 即停止
+  await db.doc('settings/settlement_automation').update({
+    enabled: false,
+    disabledAt: FieldValue.serverTimestamp(),
+    disabledBy: 'stale_pending_detector',
+    disabledReason: `pending 長期残留 ${stale.length} 件検知（10分超）`,
+  })
+
+  await notifyAdmin({
+    severity: 'critical',
+    title: '【緊急】pending 長期残留を検知しました',
+    body: `自動送信を即停止しました。詳細:\n${JSON.stringify(stale, null, 2)}`,
+  })
+
+  await db.collection('settlementStalePendingLogs').add({
+    runAt: FieldValue.serverTimestamp(),
+    staleCount: stale.length,
+    staleLogs: stale,
+  })
+}
+```
+
+#### pending 長期残留の復旧フロー
+
+1. 検知通知を admin が受信
+2. SendGrid ダッシュボードで各 kickbackId の実送信状況を確認
+3. 実送信済み → `resolveSettlementEmailLog({ targetStatus: 'sent', sesMessageId, reason })` で sent 確定
+4. 実送信未済 → `resolveSettlementEmailLog({ targetStatus: 'failed', reason })` で failed 確定
+5. 全件処理後 `settings/settlement_automation.enabled = true` に戻して再開
+
+#### manualResend の対象拡張（v0.4 追加 / 推奨5）
+
+旧案（v0.3）では manualResend の対象は `status === 'failed'` のみだった。
+本線レビュー指摘により、**「長時間 pending（10分超）」も手動再送対象に含める** ように拡張する。
+
+```javascript
+// Cloud Functions: manualResendSettlementEmail
+async function manualResend({ kickbackId, reason }) {
+  const logRef = db.collection('settlementEmailLogs').doc(kickbackId)
+  const snap = await logRef.get()
+  if (!snap.exists) throw new HttpsError('not-found', '対象ログなし')
+
+  const log = snap.data()
+  const now = Date.now()
+  const updatedAtMs = log.updatedAt?.toMillis?.() || 0
+  const isStalePending =
+    log.status === 'pending' && now - updatedAtMs > 10 * 60 * 1000
+
+  // 再送対象は「failed」または「長時間 pending」のみ
+  if (log.status !== 'failed' && !isStalePending) {
+    throw new HttpsError(
+      'failed-precondition',
+      `再送不可: status=${log.status}（failed または 10分超 pending のみ対象）`,
+    )
+  }
+
+  // 長時間 pending からの再送は特別扱い
+  //   - SendGrid ダッシュボードで実送信確認していない場合、二重送信リスクあり
+  //   - UI 側で「SendGrid で未送信を確認しましたか」の確認 checkbox を必須にする
+  //   - ログに resendFromStalePending: true を記録
+
+  // 以下は §2.7 と同じ Stage 1〜3 の処理を呼び出し
+  // ...
+}
+```
+
+#### 長時間 pending からの再送の安全策
+
+| 安全策 | 内容 |
+|---|---|
+| UI 確認必須 | 「SendGrid ダッシュボードで実送信されていないことを確認しましたか」のチェックボックス |
+| reason 必須 | 通常の再送より詳細な理由を要求（文字数下限を設ける） |
+| 監査強化 | `resendFromStalePending: true` フラグを `resendHistory[]` に記録 |
+| cool-down | 長時間 pending からの再送は 5 分のクールダウン（通常の 60 秒より長い） |
+
+長時間 pending は「SES では既に送信済み」の可能性が現実的にある。
+確認せず再送すると二重送信事故になるため、通常の failed 再送より厳しい安全策を課す。
+
 #### 検証成功条件
 
-観測項目 8 点 **すべて成功** かつ §2.10 解除条件 5 点 **すべて達成** で §2 本番合格。
+観測項目 10 点 **すべて成功** かつ §2.10 解除条件 5 点 **すべて達成** で §2 本番合格。
 1 点でも失敗・未達成の場合は第 3 段階を延期し、§2 の修正・再検証から始める。
 
 #### 検証失敗時の復旧手順
@@ -1530,3 +1803,4 @@ async function detectDuplicateEmails() {
 | 2026-04-20 | v0.1 | §1 起草完了 | Claude |
 | 2026-04-20 | v0.2 | §1 軽微修正（ChatGPT レビュー反映 9点）：type enum 固定 / dealerCode 正規化 / Admin SDK bypass 明文化 / runLogs docId addDoc 採用 / エラー率条件修正 / 部分成功シナリオ追加 / 再生成しない思想統一 / enabled 途中停止挙動 / 二重作成検知方法具体化 | Claude |
 | 2026-04-20 | v0.3 | §2 起草完了：重複送信の防止機構。docId=kickbackId 固定 / pending-first 3段階 / SES成功だけでは sent判定しない / 自動再送禁止・手動再送のみ / admin 手動 resolve / 二重送信検知2系統 / 第2段階はテスト代理店1件で1か月検証 | Claude |
+| 2026-04-20 | v0.4 | §2 本線レビュー反映 5点：(1) Stage3失敗を warning → 即停止+CRITICAL通知に変更 / (2) pending長期残留検知（10分毎 detectStalePending）追加 / (3) resendHistory.resentAt を serverTimestamp → ISO文字列に変更 / (4) sent整合性不一致検知（detectSentInconsistency）追加（パターンA/B/C）/ (5) manualResend 対象を failed + 長時間pending に拡張（SendGrid確認チェックボックス等の安全策付き）。停止条件は 5点 → 7点 に拡張。観測項目は 8点 → 10点 に拡張。 | Claude |
