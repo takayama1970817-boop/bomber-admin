@@ -1,0 +1,69 @@
+name: DryRun Verify (test)
+
+on:
+  workflow_dispatch:
+    inputs:
+      function_name:
+        description: '検証対象の関数'
+        required: true
+        default: 'createMonthlySettlement'
+        type: choice
+        options:
+          - createMonthlySettlement
+          - detectDuplicates
+      target_month:
+        description: '対象月 (YYYY-MM 形式、省略時は前月)'
+        required: false
+        type: string
+        default: ''
+
+jobs:
+  dryrun:
+    name: DryRun 検証
+    runs-on: ubuntu-latest
+    concurrency:
+      group: dryrun-test-${{ inputs.function_name }}
+      cancel-in-progress: false
+    steps:
+      - name: チェックアウト
+        uses: actions/checkout@v4
+        with:
+          ref: feature/phase2-stage1
+
+      - name: Node セットアップ
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: firebase-admin インストール
+        run: |
+          npm init -y
+          npm install firebase-admin
+
+      - name: Google 認証（サービスアカウント）
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+
+      - name: プロジェクト ID 確認
+        run: |
+          SA_PROJECT=$(cat "${GOOGLE_APPLICATION_CREDENTIALS}" | grep -o '"project_id":[^,]*' | head -1)
+          echo "Service Account project: ${SA_PROJECT}"
+          if ! echo "${SA_PROJECT}" | grep -q 'bomber-admin-test'; then
+            echo "Service Account が bomber-admin-test 以外を指しています。中断します。"
+            exit 1
+          fi
+
+      - name: DryRun 実行
+        run: |
+          node scripts/ci-dryrun.mjs \
+            "${{ inputs.function_name }}" \
+            "${{ inputs.target_month }}"
+
+      - name: 実行完了
+        if: success()
+        run: echo "DryRun 完了"
+
+      - name: 失敗時のガイド
+        if: failure()
+        run: echo "DryRun 失敗"
