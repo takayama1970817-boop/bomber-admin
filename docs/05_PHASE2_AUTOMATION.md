@@ -1,7 +1,7 @@
 # 05 Phase 2 自動化設計書（月次自動作成・自動送信・再実行制御）
 
 - **対象**: bomber-admin ERP / 取引精算（kickback + invoice 統合）
-- **版**: v0.5（§2 本線レビュー反映・整合性修正）
+- **版**: v0.6（§3 起草）
 - **起草開始日**: 2026-04-20
 - **起草者**: ロイヤルトラスト社長 + Claude Code
 - **承認フロー**: §1〜§3 完成後に社長レビュー → ChatGPT レビュー → 両承認で §4 以降着手
@@ -1907,7 +1907,846 @@ admin の認証 + reason 必須 + 詳細監査ログで厳密に管理する。
 
 ## §3 監査ログ（settlementRunLogs / settlementEmailLogs）
 
-（未起草。§2 完成後に起草開始）
+### §3.1 目的と原則
+
+#### 目的
+
+Phase 2 自動化（月次自動作成・自動送信・再実行制御）で発生する **すべてのイベントを監査可能な形で記録** し、
+事故発生時の原因追跡・責任所在の明確化・再発防止策の策定を可能にする。
+
+#### §1 / §2 との関係
+
+§1・§2 の各節で散在していたログ仕様を §3 に集約する。§3 は以下の役割を担う。
+
+- ログコレクションの責務マップを一元提示（§3.2）
+- 各コレクションの正式スキーマ定義（§3.3〜§3.5）
+- append-only と書き込み境界の総合ポリシー（§3.6）
+- 通知・保持期間・監査クエリ・PII 方針（§3.7〜§3.10）
+
+#### 原則
+
+- **2 系統分離**：作成側（settlementRunLogs）と送信側（settlementEmailLogs）を明確に分ける
+- **append-only**：一度書いたログは update / delete しない（rules 層で物理保証）
+- **Admin SDK も含めた書き込み境界**：Cloud Functions 経由のみ書き込み可能。それ以外は read のみ
+- **PII 最小化**：メール本文・フル宛先・金額明細は残さず、集計値とドメイン情報に留める
+- **再現性重視**：事故が起きたとき、ログだけで「何が起きたか」を時系列で再構築できる粒度
+
+#### 判断基準（§0.2 の再掲）
+
+1. **二重防止**：ログ自身の二重書き込みも防ぐ（§3.3 / §3.4 の docId ポリシー）
+2. **監査性**：ログがログとして機能する最優先条件
+3. **停止可能性**：異常検知時にログが足枷にならない（通知経路の独立性）
+4. **運用の便利さ**：監査性を犠牲にしない範囲で便利にする
+
+### §3.2 コレクション全体像
+
+Phase 2 で使用する監査コレクションは **5 つ**。責務・docId・起源・書き込みタイミングを一覧化する。
+
+| # | コレクション | 責務 | docId 方式 | 書き込み起源 | 参照節 |
+|---|---|---|---|---|---|
+| 1 | `settlementRunLogs` | 作成バッチ実行単位の記録 | `addDoc`（自動採番） | `createMonthlySettlement` 実行終了時 | §3.3 |
+| 2 | `settlementEmailLogs` | 送信 1 通単位の記録 | `{kickbackId}`（固定） | `sendSettlementEmail` の Stage 1〜3 | §3.4 |
+| 3 | `settlementDuplicateChecks` | 二重作成・二重送信の検知結果 | `addDoc`（自動採番） | `detectDuplicates` / `detectDuplicateEmails` | §3.5 |
+| 4 | `settlementInconsistencyChecks` | 送信整合性の不一致検知結果 | `addDoc`（自動採番） | `detectSentInconsistency` | §3.5 |
+| 5 | `settlementStalePendingLogs` | pending 長期残留の検知結果 | `addDoc`（自動採番） | `detectStalePending` | §3.5 |
+
+#### 参照関係の整理
+
+```
+settlementRunLogs (作成バッチ単位)
+       │
+       │ runLogId 参照
+       ▼
+   kickbacks / invoices (精算本体)
+       │
+       │ docId 一致
+       ▼
+settlementEmailLogs (送信単位)
+       │
+       │ kickbackId 参照
+       ▼
+   [各検知ログ]
+     ├─ settlementDuplicateChecks
+     ├─ settlementInconsistencyChecks
+     └─ settlementStalePendingLogs
+```
+
+精算本体（kickbacks / invoices）は **監査ログではない**（業務データ）が、
+監査ログから参照される中心ドキュメントとして位置付ける。
+
+#### settlementRunLogs と settlementEmailLogs を分離する根拠
+
+| 観点 | settlementRunLogs | settlementEmailLogs |
+|---|---|---|
+| 単位 | 月次バッチ 1 実行 | 送信 1 通 |
+| 粒度 | 全代理店分の集計 | 1 代理店 1 月分 |
+| 発火頻度 | 月 1 回（手動含めて年 20 回程度） | 代理店数 × 月（年 数百件） |
+| 事故種別 | 作成漏れ・作成失敗・スキップ理由不明 | 未送信・二重送信・宛先誤り |
+| 冪等キー | 不要（addDoc） | 必要（kickbackId 固定） |
+
+**事故調査の切り分けを明確にするため**、粒度も事故種別も異なる 2 つを同一コレクションに混ぜない。
+
+### §3.3 settlementRunLogs 詳細仕様
+
+#### 目的
+
+月次バッチ（`createMonthlySettlement`）の 1 回の実行について、対象件数・作成件数・スキップ件数・失敗件数を
+集計して 1 ドキュメントに記録する。
+
+#### docId
+
+`addDoc` による自動採番（§1.8 で確定済）。
+
+```javascript
+const logRef = await db.collection('settlementRunLogs').add({ /* data */ })
+```
+
+#### 完全スキーマ
+
+```javascript
+{
+  // --- 基本情報 ---
+  targetMonth: '2026-04',                    // 対象月（YYYY-MM）
+  trigger: 'scheduler' | 'manual',           // 起動経路
+  runAt: <Timestamp>,                        // serverTimestamp
+  operator: 'scheduler' | '<uid>',           // scheduler or admin uid
+  operatorEmail: '<email>' | null,           // manual 時のみ
+  runLogId: '<auto-id>',                     // 自己参照（arrayUnion で精算本体に埋め込む用）
+
+  // --- 対象件数 ---
+  targetDealerCount: 23,                     // 送信対象の全代理店数
+  createdCount: 20,                          // tx.create 成功
+  skippedCount: 2,                           // 既存 or 条件未達でスキップ
+  failedCount: 1,                            // 失敗（ドキュメント作成に至らず）
+
+  // --- 詳細配列（最大 500 件まで） ---
+  // 500件超の場合は後述の「分割保存」で対応
+  skipped: [
+    { dealerCode: 'J0015', reason: 'already_exists', existingDocId: 'kb_J0015_2026-04' },
+    { dealerCode: 'J0016', reason: 'no_kbGroup' },
+  ],
+  failed: [
+    { dealerCode: 'J0020', errorMessage: 'Bカート API timeout', retryable: false },
+  ],
+
+  // --- ステータス ---
+  status: 'success' | 'partial_success' | 'failed' | 'aborted',
+  //   success:         failedCount === 0
+  //   partial_success: createdCount > 0 かつ failedCount > 0
+  //   failed:          createdCount === 0 かつ failedCount > 0
+  //   aborted:         途中で enabled=false により中断
+
+  // --- 時刻・計測 ---
+  durationMs: 42153,                         // 開始〜終了の経過時間
+  createdAt: <Timestamp>,                    // serverTimestamp
+
+  // --- Phase 2 以降の拡張用 ---
+  scriptVersion: '2026-04-20.v1',            // 実装バージョン
+  environmentFlags: {                        // 実行時の automation 状態
+    enabledAtStart: true,
+    enabledAtEnd: true,
+  },
+}
+```
+
+#### スキップ理由コード（§1.8 から継承）
+
+| reason | 意味 |
+|---|---|
+| `already_exists` | 既に作成済み（正常スキップ） |
+| `no_kbGroup` | 代理店の kbGroup 未設定 |
+| `dealer_inactive` | `dealers.active === false` |
+| `no_target_orders` | 対象月に注文 0 件 |
+| `data_inconsistency` | Bカートと Firestore の不整合 |
+| `automation_disabled_midrun` | バッチ途中で enabled=false 検知 |
+
+#### 大量失敗時の分割保存
+
+`skipped[]` / `failed[]` は Firestore ドキュメント 1MB 制限を避けるため **最大 500 件** まで。
+それを超える場合は以下のサブコレクション形式で分割保存する。
+
+```
+settlementRunLogs/{runLogId}
+  ├─ skipped[] : 最大 500 件（最新優先）
+  ├─ failed[]  : 最大 500 件（最新優先）
+  └─ overflow/ : サブコレクション（500件超分）
+        ├─ chunk_001 : { skipped: [...], failed: [...] }
+        └─ chunk_002 : { ... }
+```
+
+#### 代表クエリ例
+
+**A. 直近 1 か月の実行履歴を取得（管理画面）**
+
+```javascript
+const snap = await db.collection('settlementRunLogs')
+  .where('targetMonth', '==', '2026-04')
+  .orderBy('runAt', 'desc')
+  .get()
+// 結果: 4月分のバッチ実行が scheduler 1回 + manual N回 の全履歴
+```
+
+**B. 失敗が発生したバッチのみ抽出**
+
+```javascript
+const snap = await db.collection('settlementRunLogs')
+  .where('status', 'in', ['failed', 'partial_success'])
+  .orderBy('runAt', 'desc')
+  .limit(20)
+  .get()
+```
+
+**C. 特定代理店が過去にスキップされた履歴を追う**
+
+```javascript
+// skipped は配列なので array-contains ではなく、dealerCode を抽出したセカンダリインデックスが必要
+// 2026-04 時点では小規模なので、全件取得してクライアント側フィルタでも許容
+const snap = await db.collection('settlementRunLogs')
+  .orderBy('runAt', 'desc')
+  .limit(12)  // 直近 1 年
+  .get()
+const history = snap.docs
+  .map(d => d.data())
+  .filter(r => r.skipped?.some(s => s.dealerCode === 'J0015'))
+```
+
+**D. scheduler 実行のみを集計（自動化の稼働率確認）**
+
+```javascript
+const snap = await db.collection('settlementRunLogs')
+  .where('trigger', '==', 'scheduler')
+  .where('targetMonth', '>=', '2026-01')
+  .where('targetMonth', '<=', '2026-12')
+  .orderBy('targetMonth')
+  .get()
+// 結果: 2026 年の毎月 1 回の自動実行記録
+```
+
+### §3.4 settlementEmailLogs 詳細仕様
+
+#### 目的
+
+送信 1 通に対して 1 ドキュメントを記録する。同一精算（同一 kickbackId）に対する
+複数回の送信試行は **同一ドキュメントの attempt 履歴として追記** する（新規ドキュメントを作らない）。
+
+#### docId
+
+**`{kickbackId}` または `{invoiceId}` 固定**（§2.2 で確定済）。
+
+```
+例: kb_J0015_2026-04
+例: invoice_J0021_2026-04
+```
+
+#### 完全スキーマ
+
+```javascript
+{
+  // --- 基本情報 ---
+  kickbackId: 'kb_J0015_2026-04',            // docId と一致
+  dealerCode: 'J0015',
+  dealerName: 'featuring one',
+  month: '2026-04',
+  type: 'kb' | 'invoice',
+
+  // --- ステータス ---
+  status: 'pending' | 'sent' | 'failed',
+  attemptCount: 2,                           // Stage1 を通過した総回数
+
+  // --- 送信先・送信経路 ---
+  toEmail: 'sato.featuring.one@gmail.com',
+  ccCount: 0,
+  ccDomains: [],                             // フルアドレスは残さない（§3.10）
+  ccSource: null,                            // 'request' | 'settings' | null
+  bccCount: 1,
+  bccDomains: ['@royaltrust.jp'],
+  bccSource: 'settings',
+  isTestSend: false,
+
+  // --- 操作者 ---
+  sentBy: '<admin-uid>',
+  sentByEmail: 'admin@royaltrust.jp',
+
+  // --- SES 結果 ---
+  sesMessageId: 'eIP3hdluQS6KnFKohJqLvA',    // SendGrid x-message-id
+  errorMessage: null,                        // failed 時のみ
+
+  // --- 時刻 ---
+  createdAt: <Timestamp>,                    // Stage1 初回作成時
+  updatedAt: <Timestamp>,                    // 最新の update
+  sentAt: <Timestamp>,                       // Stage3 成功時のみ
+  lastResendAttemptAt: <Timestamp> | null,   // クールダウン判定用
+
+  // --- 再送履歴（最新 10 件のみ、ISO 文字列） ---
+  resendHistory: [
+    {
+      resentAt: '2026-04-20T15:32:11.234Z',
+      resentBy: '<admin-uid>',
+      resentByEmail: 'admin@royaltrust.jp',
+      previousStatus: 'failed',
+      previousError: 'SendGrid 401',
+      fromStalePending: false,
+    },
+  ],
+
+  // --- stale pending からの resend 承認フラグ（§2.11 v0.5）---
+  manualResendApprovedAt: null,
+  manualResendApprovedBy: null,
+  manualResendApprovedByEmail: null,
+  manualResendApprovalReason: null,
+
+  // --- resolve 履歴（pending 残留解除）---
+  resolvedBy: null,
+  resolvedByEmail: null,
+  resolvedAt: null,
+  resolvedReason: null,
+}
+```
+
+#### 許可される状態遷移（§2.6 より）
+
+```
+(なし) → pending → sent (最終)
+                → failed → pending (再送) → sent (最終)
+                        → failed (再送失敗)
+pending → sent (resolve 手動確定)
+pending → failed (resolve 手動失敗確定)
+```
+
+#### resendHistory の上限管理
+
+最大 10 件を保持し、超過分は古い順に削除する。
+
+```javascript
+// 書き込み時のロジック（Cloud Functions 側）
+const current = snap.data()?.resendHistory || []
+const updated = [...current, newEntry].slice(-10)  // 新しい順で最新 10 件
+await logRef.update({ resendHistory: updated })
+```
+
+11 件目以降の履歴が必要なケースは極めて稀（= 1 通に対して 11 回以上再送する状況）。
+その場合は `resolvedReason` や `errorMessage` にまとめ、個別案件として手動記録する。
+
+#### 代表クエリ例
+
+**A. 送信済み判定（§2.8 の isSettlementSent）**
+
+```javascript
+// UI / バッチ共通で使う関数を再掲
+function isSettlementSent({ emailLog, settlement }) {
+  return (
+    emailLog?.status === 'sent' &&
+    !!emailLog?.sesMessageId &&
+    !!settlement?.sentAt
+  )
+}
+
+// 使用例: 特定精算が完全送信済みか判定
+const logSnap = await db.collection('settlementEmailLogs').doc(kickbackId).get()
+const settSnap = await db.collection('kickbacks').doc(kickbackId).get()
+const sent = isSettlementSent({
+  emailLog: logSnap.data(),
+  settlement: settSnap.data(),
+})
+```
+
+**B. 特定代理店の送信履歴（過去 12 か月）**
+
+```javascript
+const snap = await db.collection('settlementEmailLogs')
+  .where('dealerCode', '==', 'J0015')
+  .orderBy('createdAt', 'desc')
+  .limit(24)  // 24 = 12 か月 × 2 種別（kb / invoice）
+  .get()
+```
+
+**C. pending 残留の検知（§2.11 detectStalePending）**
+
+```javascript
+const threshold = new Date(Date.now() - 10 * 60 * 1000)  // 10 分前
+const snap = await db.collection('settlementEmailLogs')
+  .where('status', '==', 'pending')
+  .where('updatedAt', '<', threshold)
+  .get()
+// 10 分以上 pending のまま残留しているログ
+```
+
+**D. failed 一覧（admin の手動再送候補）**
+
+```javascript
+const snap = await db.collection('settlementEmailLogs')
+  .where('status', '==', 'failed')
+  .orderBy('updatedAt', 'desc')
+  .limit(50)
+  .get()
+```
+
+**E. 整合性チェック（§2.8 detectSentInconsistency パターンA）**
+
+```javascript
+// emailLog=sent なのに settlement.sentAt が null のケースを拾う
+const logsSnap = await db.collection('settlementEmailLogs')
+  .where('status', '==', 'sent')
+  .get()
+
+const inconsistencies = []
+for (const logDoc of logsSnap.docs) {
+  const log = logDoc.data()
+  const colName = log.kickbackId.startsWith('kb_') ? 'kickbacks' : 'invoices'
+  const settSnap = await db.collection(colName).doc(log.kickbackId).get()
+  if (settSnap.exists && !settSnap.data().sentAt) {
+    inconsistencies.push({ kickbackId: log.kickbackId, pattern: 'A' })
+  }
+}
+```
+
+### §3.5 補助コレクション仕様
+
+3 つの検知ログコレクションは共通構造を持つ。
+
+#### 共通構造
+
+```javascript
+{
+  runAt: <Timestamp>,                        // 検知実行時刻
+  triggeredBy: 'post_batch' | 'scheduled_daily' | 'scheduled_10min' | 'manual',
+  ... (コレクション固有のフィールド)
+}
+```
+
+#### settlementDuplicateChecks
+
+二重作成・二重送信の検知結果。
+
+```javascript
+{
+  runAt: <Timestamp>,
+  triggeredBy: 'post_batch' | 'scheduled_daily',
+  targetMonth: '2026-04' | null,             // post_batch 時のみ
+  checkedCollections: ['kickbacks', 'invoices'],
+  duplicatesFound: 0,
+  duplicates: [
+    // 0件なら空配列
+    { collection: 'kickbacks', key: 'J0015|2026-04', docIds: ['kb_J0015_2026-04', 'duplicate_xxx'] },
+  ],
+}
+```
+
+#### settlementInconsistencyChecks
+
+送信整合性の不一致検知結果（§2.8 パターン A/B/C）。
+
+```javascript
+{
+  runAt: <Timestamp>,
+  triggeredBy: 'scheduled_daily',
+  checked: 42,                               // チェック対象ログ数
+  inconsistenciesFound: 0,
+  inconsistencies: [
+    { pattern: 'A_sent_log_no_settlement_sentAt', kickbackId: '...', logId: '...' },
+    { pattern: 'B_sent_without_messageId', kickbackId: '...', logId: '...' },
+    { pattern: 'C_log_exists_settlement_missing', kickbackId: '...', logId: '...' },
+  ],
+}
+```
+
+#### settlementStalePendingLogs
+
+pending 長期残留（10 分超）の検知結果（§2.11）。
+
+```javascript
+{
+  runAt: <Timestamp>,
+  triggeredBy: 'scheduled_10min',
+  staleCount: 0,
+  staleLogs: [
+    {
+      logId: 'kb_J0015_2026-04',
+      kickbackId: 'kb_J0015_2026-04',
+      attemptCount: 2,
+      createdAt: '2026-04-20T14:00:00.000Z',
+      updatedAt: '2026-04-20T14:00:30.000Z',
+      stalledMinutes: 15,
+    },
+  ],
+}
+```
+
+### §3.6 書き込み境界と append-only 保証
+
+#### 書き込み境界の原則
+
+| 境界 | 書き込み可否 | 手段 |
+|---|---|---|
+| **クライアント SDK**（ブラウザ） | ✗ **完全禁止** | rules で `allow create, update, delete: if false` |
+| **Admin SDK**（Cloud Functions） | ✅ **create のみ** | rules バイパス + 運用ルール |
+| **Admin SDK**（手動スクリプト） | ⚠ **例外時のみ** | 社長承認 + 監査記録必須 |
+
+#### クライアント SDK への rules 設定（全コレクション共通）
+
+```javascript
+// firestore.rules
+match /settlementRunLogs/{id} {
+  allow read: if hasValidAdminRole();
+  allow create, update, delete: if false;
+}
+match /settlementEmailLogs/{id} {
+  allow read: if hasValidAdminRole();
+  allow create, update, delete: if false;
+}
+match /settlementDuplicateChecks/{id} {
+  allow read: if hasValidAdminRole();
+  allow create, update, delete: if false;
+}
+match /settlementInconsistencyChecks/{id} {
+  allow read: if hasValidAdminRole();
+  allow create, update, delete: if false;
+}
+match /settlementStalePendingLogs/{id} {
+  allow read: if hasValidAdminRole();
+  allow create, update, delete: if false;
+}
+```
+
+クライアント側からは **admin だけが read 可能**、write は完全禁止。
+
+#### Admin SDK の運用ルール
+
+Admin SDK は rules をバイパスするため、rules 層では防げない。
+以下を **Cloud Functions のコード側で必ず守る**：
+
+| ルール | 実装 |
+|---|---|
+| 1. create は Cloud Functions 関数内のみ | 該当する関数名一覧（§3.2）以外から書かない |
+| 2. update / delete は一切しない | コードレビューで明示的にブロック（lint ルール検討） |
+| 3. 例外時の書き換えは専用関数のみ | `resolveSettlementEmailLog` のような承認付き関数 |
+
+#### append-only 保証（2 層防衛）
+
+| 層 | 防衛内容 | 有効範囲 |
+|---|---|---|
+| A. rules 層 | `allow update, delete: if false` | クライアント SDK |
+| B. Cloud Functions コード規約 | update / delete を書かない | Admin SDK |
+
+**重要な例外**：`settlementEmailLogs` の status 遷移（pending → sent / failed 等）は
+append-only 原則の例外とする。理由：
+
+- status 遷移は「新規ログを作る」のではなく「既存ログの進行状態を更新する」性質
+- 同一 kickbackId に対して複数ログを作らないことが §2.2 の docId 固定の根拠
+- ただし過去の状態は `resendHistory[]` や `attemptCount` で保存される
+
+このため **`settlementEmailLogs` のみ Cloud Functions 経由で update 許可**（ただしクライアントからは完全禁止）。
+他の 4 コレクションは Cloud Functions からも update しない厳格 append-only。
+
+| コレクション | Cloud Functions update | 例外理由 |
+|---|---|---|
+| settlementRunLogs | ✗ 禁止 | 実行単位の記録は不変 |
+| settlementEmailLogs | ✅ 許可（status 遷移のみ） | docId 固定と両立させるため |
+| settlementDuplicateChecks | ✗ 禁止 | 検知単位の記録は不変 |
+| settlementInconsistencyChecks | ✗ 禁止 | 同上 |
+| settlementStalePendingLogs | ✗ 禁止 | 同上 |
+
+#### 物理削除の完全禁止
+
+いかなる場合も Firestore の物理削除（`doc.delete()`）は行わない。
+誤書き込み・テストデータの混入等があった場合は：
+
+1. `isDeprecated: true` / `deprecatedAt` / `deprecatedBy` / `deprecatedReason` をセット
+2. 論理削除フラグを読み取り側で除外するクエリに切り替え
+3. アーカイブ時（§3.8）に物理削除ではなく BigQuery / GCS へ移送
+
+### §3.7 admin への通知（notifyAdmin）
+
+#### 目的
+
+監査ログに記録されたイベントのうち、**即時の admin 判断が必要なもの** を人が気付ける形で届ける。
+
+#### severity 階層
+
+| severity | 意味 | 通知手段 | 例 |
+|---|---|---|---|
+| `info` | 参考情報。即対応不要 | Firestore `adminNotifications` コレクションのみ | バッチ正常終了 |
+| `warning` | 要注意。24 時間以内の確認推奨 | 上記 + メール（admin のみ） | 部分成功（failed 1 件） |
+| `critical` | 緊急。即時対応必須 | 上記 + 即時メール + SMS（将来）| Stage3 失敗・二重送信検知・pending 残留 |
+
+#### notifyAdmin 関数の契約
+
+```javascript
+/**
+ * admin への通知。Cloud Functions 内からのみ呼び出し可能。
+ * @param {object} params
+ * @param {'info'|'warning'|'critical'} params.severity
+ * @param {string} params.title  - 100 文字以内
+ * @param {string} params.body   - 本文（10000 文字以内）
+ * @param {object} [params.context] - 関連する kickbackId / runLogId 等
+ * @returns {Promise<{notificationId: string}>}
+ */
+async function notifyAdmin({ severity, title, body, context })
+```
+
+#### adminNotifications コレクション
+
+通知は **まず Firestore に記録し、そこから各手段に fan-out する**。通知手段の障害がログ欠損に繋がらない設計。
+
+```javascript
+// adminNotifications/{auto-id}
+{
+  severity: 'critical',
+  title: '【緊急】Stage3 失敗',
+  body: '...',
+  context: { kickbackId: '...', sesMessageId: '...' },
+  source: 'stage3_failure_detector',         // どの関数が発火したか
+  createdAt: <Timestamp>,
+  deliveryStatus: {
+    firestore: { status: 'success', at: <Timestamp> },
+    email: { status: 'pending' | 'success' | 'failed', at: <Timestamp>, error: null },
+    sms: { status: 'not_configured' },       // 将来
+  },
+  readBy: [],                                // admin が既読にしたユーザー uid
+  acknowledgedAt: null,                      // admin が対応完了で承認した時刻
+  acknowledgedBy: null,
+}
+```
+
+#### 通知の append-only 保証
+
+`adminNotifications` も §3.6 の append-only 原則に従う。
+例外的に update が許されるのは以下のみ：
+
+- `deliveryStatus` の fan-out 結果記録（Cloud Functions から）
+- `readBy[]` への arrayUnion（admin UI から）
+- `acknowledgedAt` / `acknowledgedBy`（admin が対応完了時、UI から）
+
+その他のフィールド（severity / title / body / context）は不変。
+
+#### 通知の冪等性
+
+同じ事象に対して重複通知しないよう、通知元関数は冪等キーを持つ。
+
+```javascript
+// 例: Stage3 失敗通知の冪等キー
+const dedupeKey = `stage3_failure_${kickbackId}_${Date.now() % 86400000}`
+// 24 時間以内の同一イベントは 1 通のみ
+```
+
+### §3.8 ログ保持期間・アーカイブ
+
+#### Firestore 保持期間
+
+| コレクション | Firestore 保持 | アーカイブ先 |
+|---|---|---|
+| settlementRunLogs | **5 年** | BigQuery（5 年経過分） |
+| settlementEmailLogs | **7 年** | BigQuery（法的保存義務を考慮） |
+| settlementDuplicateChecks | 2 年 | GCS（JSON Lines） |
+| settlementInconsistencyChecks | 2 年 | GCS（JSON Lines） |
+| settlementStalePendingLogs | 2 年 | GCS（JSON Lines） |
+| adminNotifications | 3 年 | BigQuery |
+
+#### 採用理由
+
+- **settlementEmailLogs が 7 年**：税務関連の帳票送信履歴として最長保持
+- **settlementRunLogs が 5 年**：経営監査・税務調査での実行履歴参照を想定
+- **検知ログが 2 年**：事故発生から 2 年遡れれば十分（運用実績から調整可）
+- **adminNotifications が 3 年**：対応履歴の参照需要
+
+#### アーカイブ運用
+
+```
+毎月 1 日 05:00 JST に Cloud Scheduler 起動
+  ↓
+Cloud Functions: archiveOldSettlementLogs
+  ↓
+  各コレクションで保持期間を超えたドキュメントを取得
+  ↓
+  BigQuery または GCS に書き込み
+  ↓
+  書き込み成功後、Firestore 側に isArchived: true を付与（物理削除はしない）
+  ↓
+  isArchived: true のものは UI 検索対象から外す
+```
+
+#### 物理削除の例外
+
+- 原則、**Firestore からの物理削除は行わない**（§3.6）
+- ただし BigQuery / GCS にアーカイブ済みかつ Firestore の使用容量が課金上限に近づいた場合、
+  **社長承認 + 二重確認** で物理削除を許可する
+- 物理削除時は `settlementArchiveAudit` コレクションに削除記録を残す
+
+### §3.9 監査クエリと集計
+
+#### 事故調査時の必須クエリパターン
+
+**ケース 1: 特定精算（kickbackId）で何が起きたか時系列で追う**
+
+```javascript
+// 1. 精算本体
+const settlement = await db.collection('kickbacks').doc(kickbackId).get()
+
+// 2. 送信ログ（attempt 履歴含む）
+const emailLog = await db.collection('settlementEmailLogs').doc(kickbackId).get()
+
+// 3. 該当月のバッチ実行履歴
+const runLogsSnap = await db.collection('settlementRunLogs')
+  .where('targetMonth', '==', settlement.data().month)
+  .orderBy('runAt', 'desc')
+  .get()
+
+// 4. 検知ログで言及されているか
+const inconsistencySnap = await db.collection('settlementInconsistencyChecks')
+  .orderBy('runAt', 'desc')
+  .limit(30)  // 直近 30 日
+  .get()
+// inconsistencies[] の中に kickbackId が含まれるものを抽出
+```
+
+**ケース 2: ある期間に発生した全事故を一覧化**
+
+```javascript
+const from = new Date('2026-04-01')
+const to = new Date('2026-04-30')
+
+// バッチ失敗
+const runFailsSnap = await db.collection('settlementRunLogs')
+  .where('runAt', '>=', from)
+  .where('runAt', '<=', to)
+  .where('status', 'in', ['failed', 'partial_success'])
+  .get()
+
+// 送信失敗
+const emailFailsSnap = await db.collection('settlementEmailLogs')
+  .where('updatedAt', '>=', from)
+  .where('updatedAt', '<=', to)
+  .where('status', '==', 'failed')
+  .get()
+
+// 二重・不整合・pending 残留
+const detections = await Promise.all([
+  db.collection('settlementDuplicateChecks').where('runAt', '>=', from).where('runAt', '<=', to).get(),
+  db.collection('settlementInconsistencyChecks').where('runAt', '>=', from).where('runAt', '<=', to).get(),
+  db.collection('settlementStalePendingLogs').where('runAt', '>=', from).where('runAt', '<=', to).get(),
+])
+```
+
+#### 月次サマリ集計
+
+```javascript
+// 月次 KPI（admin ダッシュボード用）
+async function getMonthlySummary(targetMonth) {
+  const [runLogs, emailLogs] = await Promise.all([
+    db.collection('settlementRunLogs')
+      .where('targetMonth', '==', targetMonth).get(),
+    db.collection('settlementEmailLogs')
+      .where('month', '==', targetMonth).get(),
+  ])
+
+  return {
+    targetMonth,
+    batchRunCount: runLogs.size,
+    totalCreated: runLogs.docs.reduce((s, d) => s + (d.data().createdCount || 0), 0),
+    totalFailed: runLogs.docs.reduce((s, d) => s + (d.data().failedCount || 0), 0),
+    totalSent: emailLogs.docs.filter(d => d.data().status === 'sent').length,
+    totalPending: emailLogs.docs.filter(d => d.data().status === 'pending').length,
+    totalEmailFailed: emailLogs.docs.filter(d => d.data().status === 'failed').length,
+    totalResends: emailLogs.docs.reduce((s, d) => s + (d.data().attemptCount || 1) - 1, 0),
+  }
+}
+```
+
+### §3.10 PII / 機密情報の扱い
+
+#### 記録する情報・しない情報
+
+| 情報 | 記録 | 形式 |
+|---|---|---|
+| メール本文 | ✗ | 一切残さない |
+| フル宛先メールアドレス（To） | ✅ | `toEmail` に平文（送信責任の明確化のため）|
+| CC / BCC のフルアドレス | ✗ | ドメインのみ記録 |
+| CC / BCC の件数 | ✅ | `ccCount` / `bccCount` |
+| CC / BCC のドメイン | ✅ | `ccDomains` / `bccDomains`（重複排除） |
+| 精算金額明細 | ✗ | settlementRunLogs には残さない |
+| 精算合計金額 | △ | settlement 本体にのみ記録（ログには残さない） |
+| dealerCode / dealerName | ✅ | 業務識別のため必須 |
+| SendGrid messageId | ✅ | `sesMessageId` |
+| 操作者 uid / email | ✅ | 責任追跡のため必須 |
+| 操作理由（reason） | ✅ | 最大 500 文字（切り詰め） |
+
+#### toEmail を平文で残す理由
+
+送信責任の明確化のため、**どのアドレスに送ったか** は完全な形で残す必要がある。
+ただし以下の制約：
+
+- `toEmail` は `settlementEmailLogs` のみに記録
+- 他のログ（runLogs / 検知ログ / adminNotifications）には含めない
+- admin 以外は読めない（rules で制限）
+
+#### 平文記録を最小化する工夫
+
+CC / BCC のように「多対多」になりうる項目はドメインのみ記録。
+フルアドレスが必要な障害調査は SendGrid ダッシュボード（外部システム）に委ねる。
+
+#### 誤って記録してしまった場合の対応
+
+ログに誤って PII / 機密情報が記録された場合：
+
+1. 物理削除はしない（append-only 原則）
+2. `redactedFields: [...]` に該当フィールド名を追記
+3. 元フィールドは `'<REDACTED>'` に置換（update で上書き）
+4. `adminNotifications` に `severity: warning` で記録
+5. コード側に同種の記録が発生しないよう修正
+
+### §3.11 §1〜§3 全体の整合性確認
+
+#### §3 で決まったことと §1 / §2 の対応
+
+| §3 の決定 | §1 / §2 の関連箇所 | 整合状態 |
+|---|---|---|
+| settlementRunLogs は addDoc | §1.8 | ✅ 一致 |
+| settlementEmailLogs は kickbackId 固定 | §2.2 | ✅ 一致 |
+| 5 検知コレクション | §1.10, §2.11 | ✅ 一致 |
+| append-only + 書き込み境界 | §1.4, §2.6 | ✅ 一致 |
+| notifyAdmin severity 階層 | §2.5, §2.11 | ✅ 一致（§3 で統一） |
+| 保持期間 | （§1 / §2 で未規定） | ✅ §3 で新規定義 |
+| PII 方針 | （§2 で一部明記） | ✅ §3 で統一 |
+
+#### 参照関係の整合性
+
+```
+kickbacks / invoices (本体)
+  ├─ lastSendLogId ⇔ settlementEmailLogs.docId
+  └─ sentAt ⇔ settlementEmailLogs.sentAt（3条件AND判定）
+
+settlementRunLogs
+  └─ （精算本体への直接参照は持たない；targetMonth で集約）
+
+settlementEmailLogs
+  └─ kickbackId ⇔ settlement 本体 docId（両方向）
+
+検知ログ 3 種
+  └─ 対象 kickbackId / logId を配列で保持
+```
+
+#### 事故起因時の再現性
+
+Phase 2 運用中に事故が起きた場合、以下の情報があれば **完全に時系列再構築可能**：
+
+1. `kickbackId`（事故対象の精算 ID）
+2. 発生推定時刻（±1 時間の幅）
+3. admin の uid（操作履歴を追う場合）
+
+これだけあれば §3.9 の必須クエリパターンで全経路が追跡できる。
+
+#### ログで追えないこと
+
+以下は本設計書のスコープ外。別ルートで確認する：
+
+- メール本文の実内容 → SendGrid ダッシュボード
+- 代理店の実受信状況 → 代理店への直接確認
+- Cloud Functions の stdout/stderr → Cloud Logging
+- Firestore の read/write 課金詳細 → Cloud Console Billing
+
+これらは監査ログには含めず、必要時に外部ソースと突合する運用とする。
+
+---
 
 ---
 
@@ -1927,3 +2766,4 @@ admin の認証 + reason 必須 + 詳細監査ログで厳密に管理する。
 | 2026-04-20 | v0.3 | §2 起草完了：重複送信の防止機構。docId=kickbackId 固定 / pending-first 3段階 / SES成功だけでは sent判定しない / 自動再送禁止・手動再送のみ / admin 手動 resolve / 二重送信検知2系統 / 第2段階はテスト代理店1件で1か月検証 | Claude |
 | 2026-04-20 | v0.4 | §2 本線レビュー反映 5点：(1) Stage3失敗を warning → 即停止+CRITICAL通知に変更 / (2) pending長期残留検知（10分毎 detectStalePending）追加 / (3) resendHistory.resentAt を serverTimestamp → ISO文字列に変更 / (4) sent整合性不一致検知（detectSentInconsistency）追加（パターンA/B/C）/ (5) manualResend 対象を failed + 長時間pending に拡張（SendGrid確認チェックボックス等の安全策付き）。停止条件は 5点 → 7点 に拡張。観測項目は 8点 → 10点 に拡張。 | Claude |
 | 2026-04-20 | v0.5 | §2 本線レビュー反映 2点（整合性修正）：(1) §2.8 の旧「batch失敗時 warning を返す」文言を削除し、v0.4 方針（即停止+CRITICAL+HttpsError('data-loss')）に §2.5/§2.8/§2.10 全体で統一 / (2) stale pending からの manualResend の安全策強化：UI checkbox のみでは再送不可とし、経路A（resolveSettlementEmailLog で failed 経由）または経路B（admin 専用承認フラグ manualResendApprovedAt/By）のいずれかを必須化。クライアント側の checkbox はセキュリティ境界にならないため、Cloud Functions 側で Firestore 状態を見て判定する。承認フラグは10分有効・1回消費・専用 Function で厳密管理。 | Claude |
+| 2026-04-20 | v0.6 | §3 起草完了：監査ログ仕様の集約。(1) 5つの監査コレクション責務マップ（runLogs/emailLogs/Duplicate/Inconsistency/StalePending）/ (2) settlementRunLogs 完全スキーマ + 代表クエリ4例 + 500件超のサブコレクション分割 / (3) settlementEmailLogs 完全スキーマ + 代表クエリ5例 + resendHistory 10件上限 / (4) 補助コレクション3種の共通構造 / (5) 書き込み境界と append-only 保証（2層防衛 + Cloud Functions 規約）/ (6) notifyAdmin 設計（severity 3階層 / adminNotifications fan-out / 冪等キー）/ (7) 保持期間（emailLogs 7年 / runLogs 5年 / 検知 2年）+ BigQuery/GCS アーカイブ / (8) 監査クエリと月次サマリ / (9) PII 方針（メール本文・CCフル不記録、ドメインのみ）/ (10) §1〜§3 整合性確認と事故再現性担保 | Claude |
