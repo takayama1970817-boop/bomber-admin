@@ -1,0 +1,95 @@
+name: Deploy (test)
+
+# 目的:
+#   develop / feature/phase2-stage1 ブランチへの push で
+#   Firebase Functions / Firestore rules を bomber-admin-test に自動デプロイする。
+#
+# 設計方針:
+#   - 認証は Google Cloud Service Account（google-github-actions/auth@v2）
+#     Secret 名: FIREBASE_SERVICE_ACCOUNT（JSON キー全文を登録）
+#   - deploy 対象は functions と firestore:rules のみ
+#     hosting は本フローでは扱わない（本線で別管轄）
+#   - プロジェクトは bomber-admin-test 固定
+#     production への切替は後続 PR で deploy-prod.yml を追加する想定
+#   - workflow_dispatch で手動実行も可能
+#   - Secrets（TELNYX_FAX_FROM 等）は firebase functions:secrets で別途管理
+#     本ワークフローでは触らない
+#
+# 関連:
+#   - 既存 deploy.yml は本番向けゲート込み（別スレ管轄）
+#   - 本ワークフローは Phase 2 段階1（feature/phase2-stage1）の自動デプロイ用
+
+on:
+  push:
+    branches:
+      - develop
+      - feature/phase2-stage1
+  workflow_dispatch:
+
+jobs:
+  deploy-test:
+    name: Firebase test デプロイ
+    runs-on: ubuntu-latest
+
+    # concurrency: 同一ブランチの多重デプロイを抑止
+    concurrency:
+      group: deploy-test-${{ github.ref }}
+      cancel-in-progress: false
+
+    steps:
+      - name: チェックアウト
+        uses: actions/checkout@v4
+
+      - name: Node セットアップ
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: functions/package-lock.json
+
+      - name: Functions の依存インストール
+        working-directory: functions
+        run: npm ci
+
+      - name: Firebase CLI インストール
+        run: npm install -g firebase-tools@latest
+
+      - name: Google 認証（サービスアカウント）
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+
+      - name: Firestore rules デプロイ
+        run: |
+          firebase deploy \
+            --only firestore:rules \
+            --project bomber-admin-test \
+            --non-interactive
+
+      - name: Functions デプロイ
+        run: |
+          firebase deploy \
+            --only functions \
+            --project bomber-admin-test \
+            --non-interactive
+
+      - name: デプロイ完了サマリ
+        if: success()
+        run: |
+          echo "✅ bomber-admin-test へのデプロイ成功"
+          echo "- branch: ${{ github.ref_name }}"
+          echo "- commit: ${{ github.sha }}"
+
+      - name: デプロイ失敗時のログ
+        if: failure()
+        run: |
+          echo "❌ デプロイ失敗"
+          echo "確認事項:"
+          echo "  1. GitHub Secrets FIREBASE_SERVICE_ACCOUNT が登録されているか"
+          echo "  2. Service Account に必要なロール付与されているか"
+          echo "     - Firebase Admin"
+          echo "     - Cloud Functions Admin"
+          echo "     - Service Account User"
+          echo "     - Cloud Datastore User"
+          echo "  3. Secrets（TELNYX_FAX_FROM 等）が test プロジェクトに設定済みか"
+          echo "  4. 前段の手動 deploy で Secrets 整合が取れているか"
