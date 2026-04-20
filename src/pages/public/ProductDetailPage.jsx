@@ -14,7 +14,7 @@ function FindSalonCTA({ productName }) {
         FIND A SALON
       </p>
       <h3 className="text-xl sm:text-2xl font-bold mb-3">
-        お近くの取扱サロンを探す
+        この商品を扱うサロンを探す
       </h3>
       <p className="text-slate-300 text-sm leading-relaxed max-w-xl mx-auto mb-6">
         {productName}を実際に体験いただける、お近くの取扱サロンをご案内します。
@@ -84,9 +84,9 @@ export default function ProductDetailPage() {
       <section className="py-10 sm:py-14 bg-white">
         <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-10 lg:gap-14 items-start">
-            {/* 画像 */}
+            {/* 画像 （モバイルは 4:3 でファーストビュー縦長を抑制、lg 以上は正方形） */}
             <div
-              className={`aspect-square rounded-3xl bg-gradient-to-br ${product.gradient} relative overflow-hidden`}
+              className={`aspect-[4/3] lg:aspect-square rounded-3xl bg-gradient-to-br ${product.gradient} relative overflow-hidden`}
             >
               <div className="absolute inset-0 flex items-center justify-center">
                 <svg

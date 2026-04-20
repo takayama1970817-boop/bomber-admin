@@ -318,20 +318,21 @@ export default function HomePage() {
               急成長より、確かな信頼の積み重ねを優先する——それが私たちのグローバル方針です。
             </p>
 
-            {/* 国旗ストリップ */}
-            <div className="mt-10 flex items-center justify-center gap-6 sm:gap-12">
+            {/* 国旗ストリップ（モバイルは国コード、sm 以上は国名） */}
+            <div className="mt-10 flex flex-wrap items-center justify-center gap-x-4 gap-y-3 sm:gap-x-10">
               {markets.map((m, i) => (
-                <div key={m.code} className="flex items-center gap-4">
+                <div key={m.code} className="flex items-center gap-3 sm:gap-5">
                   <div className="flex flex-col items-center">
-                    <span className="text-4xl sm:text-5xl leading-none select-none mb-2" aria-hidden="true">
+                    <span className="text-3xl sm:text-5xl leading-none select-none mb-1.5" aria-hidden="true">
                       {m.flag}
                     </span>
                     <p className="text-[10px] tracking-[0.2em] text-slate-400 font-bold">
-                      {m.country.toUpperCase()}
+                      <span className="sm:hidden">{m.code}</span>
+                      <span className="hidden sm:inline">{m.country.toUpperCase()}</span>
                     </p>
                   </div>
                   {i < markets.length - 1 && (
-                    <span className="text-slate-300 text-xl select-none" aria-hidden="true">—</span>
+                    <span className="text-slate-300 text-lg sm:text-xl select-none" aria-hidden="true">—</span>
                   )}
                 </div>
               ))}
