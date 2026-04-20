@@ -706,6 +706,46 @@ service cloud.firestore {
     }
 
     // ========================================
+    // Phase 2 段階1: 自動化監査コレクション群
+    // 設計書: docs/05_PHASE2_AUTOMATION.md §3.2 / §3.6
+    //
+    // 共通ポリシー:
+    //   - read は admin のみ
+    //   - create / update / delete はクライアントから不可
+    //     （すべて Cloud Functions Admin SDK 経由で書き込む）
+    //   - Admin SDK は rules をバイパスするため、本 rule は「クライアント遮断」が目的
+    //
+    // 注意:
+    //   今回（段階1 Step D）は以下 3 コレクションのみ追加する。
+    //   kickbacks / invoices の既存 rules は今回は変更しない（既存 UI 非破壊）。
+    //   rules 厳格化は後続段階で行う。
+    // ========================================
+
+    // settlementRunLogs: 月次バッチ実行単位の監査ログ（append-only）
+    match /settlementRunLogs/{id} {
+      allow read: if isAdmin();
+      allow create, update, delete: if false;
+    }
+
+    // settlementDuplicateChecks: 二重作成・二重送信の検知結果（append-only）
+    // kind: 'creation' | 'email' フィールドで種別を区別（§3.5 v0.8）
+    match /settlementDuplicateChecks/{id} {
+      allow read: if isAdmin();
+      allow create, update, delete: if false;
+    }
+
+    // adminNotifications: admin 通知キュー + fan-out 結果
+    // create / delete は禁止。update は readBy / acknowledged 系フィールドのみ
+    // （admin が UI 上で既読・対応済みにできるようにする）
+    match /adminNotifications/{id} {
+      allow read: if isAdmin();
+      allow create, delete: if false;
+      allow update: if isAdmin()
+                     && request.resource.data.diff(resource.data).affectedKeys()
+                         .hasOnly(['readBy', 'acknowledgedAt', 'acknowledgedBy']);
+    }
+
+    // ========================================
     // それ以外は全拒否（保険）
     // ========================================
     match /{document=**} {
