@@ -1,7 +1,7 @@
 # 05 Phase 2 自動化設計書（月次自動作成・自動送信・再実行制御）
 
 - **対象**: bomber-admin ERP / 取引精算（kickback + invoice 統合）
-- **版**: v0.7（§3 本線レビュー反映）
+- **版**: v0.8（統合レビュー反映・§1〜§3 ロック候補）
 - **起草開始日**: 2026-04-20
 - **起草者**: ロイヤルトラスト社長 + Claude Code
 - **承認フロー**: §1〜§3 完成後に社長レビュー → ChatGPT レビュー → 両承認で §4 以降着手
@@ -238,17 +238,57 @@ await db.runTransaction(async (tx) => {
 - **`tx.set(ref, data)`**: 既存ドキュメントを上書き → **絶対に使わない**
 - **`tx.set(ref, data, {merge: true})`**: 既存と新規をマージ → **絶対に使わない**
 
-#### 既存ドキュメントの状態遷移（再 create しない）
+#### 既存ドキュメントの状態遷移（再 create しない / v0.8 正式節化）
 
 一度 create 成功したドキュメントは、以降 `update` のみで状態管理する。
+**§1.3.X 状態遷移仕様として正式に固定する**。
 
-| 現状 status | 想定される次の遷移 | 遷移手段 |
-|---|---|---|
-| `draft` | `approved` / `cancelled` | admin が UI から `update` |
-| `approved` | `sent` / `failed` | 送信処理（§2）が `update` |
-| `sent` | （最終状態） | なし |
-| `failed` | `approved`（リトライ後）/ `cancelled` | admin が UI から `update` |
-| `cancelled` | （最終状態） | なし |
+#### kickbacks / invoices の状態遷移図（v0.8 追加）
+
+```
+         (なし)
+            │
+            ▼
+        [draft]
+         │  │
+  approve│  │cancel
+         ▼  ▼
+  [approved] [cancelled](最終)
+         │
+   send（§2）
+   ┌─────┴─────┐
+   ▼           ▼
+ [sent](最終)  [failed]
+                │
+                │ admin が approve に戻す or cancel
+                ▼
+         [approved] or [cancelled]
+```
+
+#### 状態遷移表（全パターン）
+
+| 現状 status | 次の遷移先 | 遷移手段 | 実行権限 |
+|---|---|---|---|
+| `draft` | `approved` | admin が UI から update | admin |
+| `draft` | `cancelled` | admin が UI から update | admin |
+| `approved` | `sent` | §2 の送信処理が update | `sendSettlementEmail` |
+| `approved` | `failed` | §2 の送信処理が update（失敗時） | `sendSettlementEmail` |
+| `approved` | `cancelled` | admin が UI から update | admin |
+| `sent` | （最終状態） | **遷移禁止** | — |
+| `failed` | `approved` | admin が UI から update（リトライ準備） | admin |
+| `failed` | `cancelled` | admin が UI から update | admin |
+| `cancelled` | （最終状態） | **遷移禁止** | — |
+
+#### settlementEmailLogs の status 遷移との関係
+
+本節は **kickbacks / invoices（精算本体）の状態遷移**。
+一方 `settlementEmailLogs` の status 遷移（pending / sent / failed）は §2.6 で別途定義する。
+両者を混同しないこと。
+
+| コレクション | status 遷移定義節 |
+|---|---|
+| kickbacks / invoices | §1.3（本節） |
+| settlementEmailLogs | §2.6 |
 
 **どの状態であっても再 create は行わない。** 必要に応じて status を update するのみ。
 
@@ -626,12 +666,22 @@ match /settlementRunLogs/{logId} {
 
 ### §1.9 段階運用上の解除条件・停止条件
 
-#### 第1段階の位置づけ
+#### 第1段階の位置づけ（v0.8 期間統一）
 
 - **目的**：作成機構のみを本番稼働させ、送信は一切行わない
-- **期間**：本番環境で 1 か月（= 1 回の月次バッチ）
+- **期間**：**本番環境で 2 か月（= 2 回の月次バッチ）**
 - **対象**：全代理店（A/B/C グループすべて）
 - **送信**：**無効化**（送信関数はデプロイしない、または `settings/settlement_automation.enabled = false`）
+
+#### 2 か月とする理由（v0.8）
+
+旧案（v0.7 以前）は §1.9 で「1 か月」、§1.10 で「2 回の月次バッチ」と矛盾していた。
+v0.8 で以下の理由により **2 か月で統一** する：
+
+- 1 回目バッチ：初回稼働の確認（全件 create 成功）
+- 2 回目バッチ：再実行耐性の確認（1 回目分が `already_exists` でスキップ、未作成分のみ create）
+- この 2 回の観察が §1.10 の観測項目 #3 の実地検証に必須
+- 1 か月では 1 回しかバッチが走らず、再実行耐性を本番で観測できない
 
 #### 解除条件（第 2 段階に進んでよい条件）
 
@@ -964,8 +1014,55 @@ const SKIP_REASONS = Object.freeze([
 ])
 ```
 
-スキップは `settlementEmailLogs` には記録しない（送信を試みていないため）。
-代わりに `settlementRunLogs`（§2 用の別バッチログ = `settlementSendRunLogs`、§3 で定義）に記録する。
+#### スキップ発生時の記録先（v0.8 明確化）
+
+送信対象判定で弾かれた（`SKIP_REASONS` のいずれかに該当した）ケースは、以下のルールで記録する：
+
+| ケース | 記録先 | 備考 |
+|---|---|---|
+| **Scheduler 自動送信**（第3段階以降）でのスキップ | `settlementRunLogs`（§1.8 と同一コレクション） | trigger に応じて `scheduler` / `manual` を記録 |
+| **手動送信** UI からの単発送信でのスキップ | Cloud Functions の HttpsError throw + Cloud Logging | Firestore には記録せず、UI のエラー表示で admin に返す |
+| **SKIP_REASONS による除外が 1 代理店でも発生した月次バッチ** | `settlementRunLogs.skipped[]` に集約 | `reason` コードを記録 |
+
+**重要**：旧案（v0.7 以前）の `settlementSendRunLogs` という独立コレクション案は
+v0.8 で撤回した。作成バッチの実行単位と送信バッチの実行単位を同一の `settlementRunLogs` に統一し、
+`trigger` フィールドと `type` フィールド（後述）で区別する。
+
+#### settlementRunLogs の trigger / type 拡張（v0.8）
+
+```javascript
+// settlementRunLogs の type フィールドを拡張
+{
+  type: 'creation' | 'email',   // v0.8 追加: 作成バッチ or 送信バッチ
+  trigger: 'scheduler' | 'manual',
+  // ... 既存フィールド
+}
+```
+
+これにより、作成バッチと送信バッチが同じコレクションに混在しても集計クエリで容易に分離できる。
+
+#### スキップ理由コードの共通化（v0.8 明記）
+
+§1.8 で定義したスキップ理由コード体系を **送信側でも同じコード体系で使用する**。
+新規コードを送信側で追加する場合は §1.8 と §2.3 の両方に反映する。
+
+```javascript
+// §1.8 と §2.3 で共通
+const SKIP_REASONS = Object.freeze([
+  // 作成側・送信側 共通
+  'already_exists',        // 作成側のみ（送信側は該当しない）
+  'no_kbGroup',            // 共通
+  'dealer_inactive',       // 共通
+  'no_target_orders',      // 作成側のみ
+  'data_inconsistency',    // 共通
+  'automation_disabled_midrun',  // 共通
+
+  // 送信側固有
+  'not_approved',          // 送信側のみ
+  'invalid_email',         // 送信側のみ
+  'document_missing',      // 送信側のみ
+])
+```
 
 #### 判定時の原則
 
@@ -1287,6 +1384,35 @@ function assertStatusTransition(from, to) {
 
 新規ログを作らず、既存ログを update する。attempt 履歴は `attemptCount` で数え、
 詳細は `resendHistory[]` 配列に追記する（肥大化防止のため最新 10 件まで）。
+
+#### resendHistory の 10 件上限の実装（v0.8 明記）
+
+arrayUnion では自動切り詰めができないため、Cloud Functions 側で明示的に slice する：
+
+```javascript
+// v0.8 追加: 10 件上限の管理ロジック
+const MAX_RESEND_HISTORY = 10
+
+const current = snap.data()?.resendHistory || []
+const updated = [...current, {
+  resentAt: new Date().toISOString(),
+  resentBy: adminUid,
+  resentByEmail: adminEmail,
+  previousStatus: 'failed',
+  previousError: prevErrorMessage,
+  fromStalePending: false,
+}].slice(-MAX_RESEND_HISTORY)  // 古い順で捨てて最新 10 件のみ残す
+
+await logRef.update({
+  status: 'pending',
+  attemptCount: FieldValue.increment(1),
+  resendHistory: updated,
+  updatedAt: FieldValue.serverTimestamp(),
+})
+```
+
+**注意**：旧 v0.3 〜 v0.4 で記載していた `FieldValue.arrayUnion()` を使った追記は
+10 件上限を自動化できないため採用しない。必ず上記の `slice(-10)` パターンで書き込む。
 
 ```javascript
 // v0.4 変更: resentAt は ISO 8601 文字列で記録する
@@ -1938,17 +2064,50 @@ Phase 2 自動化（月次自動作成・自動送信・再実行制御）で発
 3. **停止可能性**：異常検知時にログが足枷にならない（通知経路の独立性）
 4. **運用の便利さ**：監査性を犠牲にしない範囲で便利にする
 
-### §3.2 コレクション全体像
+### §3.2 コレクション全体像（v0.8 3 分類で再整理）
 
-Phase 2 で使用する監査コレクションは **5 つ**。責務・docId・起源・書き込みタイミングを一覧化する。
+Phase 2 で使用する Firestore コレクションを **3 分類** に整理する：
 
-| # | コレクション | 責務 | docId 方式 | 書き込み起源 | 参照節 |
-|---|---|---|---|---|---|
-| 1 | `settlementRunLogs` | 作成バッチ実行単位の記録 | `addDoc`（自動採番） | `createMonthlySettlement` 実行終了時 | §3.3 |
-| 2 | `settlementEmailLogs` | 送信 1 通単位の記録 | `{kickbackId}`（固定） | `sendSettlementEmail` の Stage 1〜3 | §3.4 |
-| 3 | `settlementDuplicateChecks` | 二重作成・二重送信の検知結果 | `addDoc`（自動採番） | `detectDuplicates` / `detectDuplicateEmails` | §3.5 |
-| 4 | `settlementInconsistencyChecks` | 送信整合性の不一致検知結果 | `addDoc`（自動採番） | `detectSentInconsistency` | §3.5 |
-| 5 | `settlementStalePendingLogs` | pending 長期残留の検知結果 | `addDoc`（自動採番） | `detectStalePending` | §3.5 |
+- **A. 監査コア**：実行・送信そのものを記録するログ
+- **B. 検知ログ**：自動検知関数の結果を記録するログ
+- **C. 運用ログ**：通知・パージ・アーカイブの運用記録
+
+| 分類 | # | コレクション | 責務 | docId 方式 | 書き込み起源（Cloud Functions） | 参照節 |
+|---|---|---|---|---|---|---|
+| **A** | 1 | `settlementRunLogs` | 作成バッチ・送信バッチの実行単位記録（type で区別） | `addDoc` | `createMonthlySettlement`（type=creation） / `sendSettlementEmail` 月次連続実行（type=email） | §3.3 |
+| **A** | 2 | `settlementEmailLogs` | 送信 1 通単位の記録（status 遷移の唯一の場所） | `{kickbackId}` | `sendSettlementEmail` / `manualResendSettlementEmail` / `resolveSettlementEmailLog` / `redactSettlementEmailLog` | §3.4 |
+| **B** | 3 | `settlementDuplicateChecks` | 二重作成（kind=creation）・二重送信（kind=email）の検知結果 | `addDoc` | `detectDuplicates` / `detectDuplicateEmails` | §3.5 |
+| **B** | 4 | `settlementInconsistencyChecks` | 送信整合性の不一致検知（パターン A/B/C） | `addDoc` | `detectSentInconsistency` | §3.5 |
+| **B** | 5 | `settlementStalePendingLogs` | pending 長期残留の検知結果 | `addDoc` | `detectStalePending` | §3.5 |
+| **C** | 6 | `adminNotifications` | admin への通知キュー + fan-out 結果 | `addDoc` | `notifyAdmin`（各検知・各失敗検出から呼ばれる） | §3.7 |
+| **C** | 7 | `settlementPurgeLogs` | 取引終了後の `toEmail` パージ履歴 | `addDoc` | `purgeTerminatedDealerEmails` | §3.10 |
+| **C** | 8 | `settlementArchiveAudit` | Firestore 物理削除（§3.6 の例外運用）の削除記録 | `addDoc` | `archiveOldSettlementLogs` 物理削除時のみ | §3.6 / §3.8 |
+
+#### コレクション総数
+
+**計 8 コレクション**（監査コア 2 / 検知 3 / 運用 3）
+
+旧 v0.7 までの「5つの監査コレクション」という記述は不正確だった。v0.8 で正式に 8 コレクションとして再定義する。
+
+#### 関連する Cloud Functions 一覧（v0.8 集約）
+
+本設計書で言及される Cloud Functions を用途別に一覧化する。
+
+| 用途 | 関数名 | 書き込み先 | 参照節 |
+|---|---|---|---|
+| 月次バッチ（作成） | `createMonthlySettlement` | kickbacks / invoices / settlementRunLogs | §1.3, §3.3 |
+| 日次検知（作成） | `detectDuplicates` | settlementDuplicateChecks（kind=creation） | §1.10 |
+| 単発送信 | `sendSettlementEmail` | settlementEmailLogs / kickbacks.sentAt / adminNotifications | §2.4, §3.4 |
+| 手動再送 | `manualResendSettlementEmail` | settlementEmailLogs（update） | §2.7 |
+| pending 解除 | `resolveSettlementEmailLog` | settlementEmailLogs（update） | §2.9 |
+| stale pending 承認 | `approveStalePendingResend` | settlementEmailLogs（approve フラグ） | §2.11 |
+| 誤記録訂正 | `redactSettlementEmailLog` | settlementEmailLogs（redact フィールド） | §3.6 |
+| pending 残留検知 | `detectStalePending` | settlementStalePendingLogs / adminNotifications | §2.11 |
+| 送信整合性検知 | `detectSentInconsistency` | settlementInconsistencyChecks / adminNotifications | §2.8 |
+| 送信二重検知 | `detectDuplicateEmails` | settlementDuplicateChecks（kind=email） | §2.11 |
+| admin 通知 fan-out | `notifyAdmin` | adminNotifications | §3.7 |
+| アーカイブ | `archiveOldSettlementLogs` | BigQuery / GCS + settlementArchiveAudit（物理削除時のみ） | §3.8 |
+| パージ | `purgeTerminatedDealerEmails` | settlementEmailLogs（redact） + settlementPurgeLogs | §3.10 |
 
 #### 参照関係の整理
 
@@ -2359,20 +2518,46 @@ for (const logDoc of logsSnap.docs) {
 
 #### settlementDuplicateChecks
 
-二重作成・二重送信の検知結果。
+二重作成・二重送信の検知結果。**v0.8 で `kind` フィールドを追加** し、作成系と送信系を明確に区別する。
 
 ```javascript
 {
+  // v0.8 追加: 検知種別（作成の二重 or 送信の二重）
+  kind: 'creation' | 'email',
+
   runAt: <Timestamp>,
-  triggeredBy: 'post_batch' | 'scheduled_daily',
+  triggeredBy: 'post_batch' | 'scheduled_daily' | 'post_send',
+  //   post_batch:      kind='creation' の月次バッチ直後
+  //   scheduled_daily: kind='creation' または kind='email' の日次保険
+  //   post_send:       kind='email' の送信直後
+
   targetMonth: '2026-04' | null,             // post_batch 時のみ
-  checkedCollections: ['kickbacks', 'invoices'],
+  checkedCollections: ['kickbacks', 'invoices'] | ['settlementEmailLogs'],
   duplicatesFound: 0,
   duplicates: [
-    // 0件なら空配列
+    // kind='creation' の場合
     { collection: 'kickbacks', key: 'J0015|2026-04', docIds: ['kb_J0015_2026-04', 'duplicate_xxx'] },
+
+    // kind='email' の場合
+    // { kickbackId: 'kb_J0015_2026-04', logIds: ['...', '...'] },
   ],
 }
+```
+
+#### 代表クエリ例（作成系・送信系の分離集計）
+
+```javascript
+// 作成の二重検知のみ（月次バッチ直後と日次保険）
+const creationDupes = await db.collection('settlementDuplicateChecks')
+  .where('kind', '==', 'creation')
+  .where('runAt', '>=', oneMonthAgo)
+  .get()
+
+// 送信の二重検知のみ
+const emailDupes = await db.collection('settlementDuplicateChecks')
+  .where('kind', '==', 'email')
+  .where('runAt', '>=', oneMonthAgo)
+  .get()
 ```
 
 #### settlementInconsistencyChecks
@@ -2564,13 +2749,39 @@ emailLogs 以外の 4 コレクションは Cloud Functions からも update し
 
 監査ログに記録されたイベントのうち、**即時の admin 判断が必要なもの** を人が気付ける形で届ける。
 
-#### severity 階層
+#### severity 階層（v0.8 info の扱い明確化）
 
 | severity | 意味 | 通知手段 | 例 |
 |---|---|---|---|
-| `info` | 参考情報。即対応不要 | Firestore `adminNotifications` コレクションのみ | バッチ正常終了 |
-| `warning` | 要注意。24 時間以内の確認推奨 | 上記 + メール（admin のみ） | 部分成功（failed 1 件） |
+| `info` | 参考情報。admin 画面で閲覧可能。**通知手段なし**（メールもSMSも送らない） | Firestore `adminNotifications` コレクションのみ | 月次バッチの正常終了サマリ |
+| `warning` | 要注意。24 時間以内の確認推奨 | Firestore `adminNotifications` + メール（admin のみ） | 部分成功（failed 1 件） |
 | `critical` | 緊急。即時対応必須 | 上記 + 即時メール + SMS（将来）| Stage3 失敗・二重送信検知・pending 残留 |
+
+#### info レベルの運用指針（v0.8 追加）
+
+`info` は **adminNotifications に書き込むだけ** で、メール送信・SMS 送信は **一切行わない**。
+目的は以下 2 点に限定：
+
+1. admin UI で「過去の正常実行履歴」を時系列で確認できるようにする
+2. バッチ集計時に「通知手段別の件数」を集計できるようにする
+
+#### info で何を通知するか（v0.8 明示）
+
+| 通知事象 | severity | 理由 |
+|---|---|---|
+| 月次バッチ正常終了（failedCount === 0） | `info` | 通常運用の記録。adminNotifications で可視化可能だが受信箱を埋めない |
+| 月次バッチ部分成功（failedCount ≥ 1） | `warning` | 要対応（§2.10 停止条件と連動） |
+| Stage3 失敗 | `critical` | §2.5 で定義 |
+| 二重作成・二重送信検知 | `critical` | §1.10 / §2.11 で定義 |
+| pending 長期残留 | `critical` | §2.11 で定義 |
+| 整合性不一致検知 | `critical` | §2.8 で定義 |
+
+**注意**：`settlementRunLogs` と `adminNotifications` の使い分けは以下：
+
+- `settlementRunLogs` = バッチ実行自体の事実記録（成功でも失敗でも毎回残る）
+- `adminNotifications` = admin が気付くべきイベントの通知（info レベルは記録のみで通知しない）
+
+両方に同じ情報が書かれることは許容する（冗長性で監査性を高める）。
 
 #### notifyAdmin 関数の契約
 
@@ -2934,3 +3145,4 @@ Phase 2 運用中に事故が起きた場合、以下の情報があれば **完
 | 2026-04-20 | v0.5 | §2 本線レビュー反映 2点（整合性修正）：(1) §2.8 の旧「batch失敗時 warning を返す」文言を削除し、v0.4 方針（即停止+CRITICAL+HttpsError('data-loss')）に §2.5/§2.8/§2.10 全体で統一 / (2) stale pending からの manualResend の安全策強化：UI checkbox のみでは再送不可とし、経路A（resolveSettlementEmailLog で failed 経由）または経路B（admin 専用承認フラグ manualResendApprovedAt/By）のいずれかを必須化。クライアント側の checkbox はセキュリティ境界にならないため、Cloud Functions 側で Firestore 状態を見て判定する。承認フラグは10分有効・1回消費・専用 Function で厳密管理。 | Claude |
 | 2026-04-20 | v0.6 | §3 起草完了：監査ログ仕様の集約。(1) 5つの監査コレクション責務マップ（runLogs/emailLogs/Duplicate/Inconsistency/StalePending）/ (2) settlementRunLogs 完全スキーマ + 代表クエリ4例 + 500件超のサブコレクション分割 / (3) settlementEmailLogs 完全スキーマ + 代表クエリ5例 + resendHistory 10件上限 / (4) 補助コレクション3種の共通構造 / (5) 書き込み境界と append-only 保証（2層防衛 + Cloud Functions 規約）/ (6) notifyAdmin 設計（severity 3階層 / adminNotifications fan-out / 冪等キー）/ (7) 保持期間（emailLogs 7年 / runLogs 5年 / 検知 2年）+ BigQuery/GCS アーカイブ / (8) 監査クエリと月次サマリ / (9) PII 方針（メール本文・CCフル不記録、ドメインのみ）/ (10) §1〜§3 整合性確認と事故再現性担保 | Claude |
 | 2026-04-20 | v0.7 | §3 本線レビュー反映 4点：(1) emailLogs update フィールドの allowlist を明示列挙し、実装側ガード関数 assertEmailLogUpdateAllowed を定義。更新禁止フィールドも明記 / (2) settlementRunLogs の overflow/ サブコレクション設計を撤回。500件で頭打ち + critical 通知 + Cloud Logging 参照に簡素化 / (3) toEmail 平文保存の目的を3点に限定明記。目的外利用禁止 + 取引終了+1年で自動パージ手順（purgeTerminatedDealerEmails）追加 + 個人情報保護法関連条文との整合コメント / (4) 保持期間の根拠を「法的要件（仮置き）」と「業務判断」に分離。runLogs を 5年→7年に変更し emailLogs と統一。法務レビュー保留事項4点を明示 | Claude |
+| 2026-04-20 | v0.8 | §1〜§3 統合レビュー反映（重大4点 + 軽微6点）：【重大】(1) 架空コレクション settlementSendRunLogs を削除し settlementRunLogs に統一。type='creation'｜'email' フィールドで作成・送信を区別 / (2) settlementDuplicateChecks に kind='creation'｜'email' を追加し作成の二重・送信の二重を同一コレクション内で明示区別 / (3) §3.2 を3分類（A監査コア2 / B検知3 / C運用3）で再整理し全8コレクションを正式定義。Cloud Functions 13種を §3.2 に一覧集約 / (4) §1.9 の期間「1か月」を「2か月（= 2回の月次バッチ）」に訂正し §1.10 と統一。理由明記【軽微】§2.3 スキップ記録先を scheduler/manual/UIエラー別に明示 + 共通コード体系 SKIP_REASONS を §1.8 と §2.3 で統一 / resendHistory の slice(-10) 実装を §2.7 に明記（arrayUnion 案を正式撤回）/ §1.3 に状態遷移図を追加（kickbacks/invoices）+ settlementEmailLogs は §2.6 との区別明示 / info 通知の運用指針を §3.7 に明記（通知手段なし、月次正常終了の可視化用） | Claude |
