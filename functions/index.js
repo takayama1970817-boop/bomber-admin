@@ -43,6 +43,16 @@ const {
 exports.createMonthlySettlement = createMonthlySettlement
 exports.createMonthlySettlementScheduled = createMonthlySettlementScheduled
 
+// Phase 2 段階1: 二重作成検知（日次保険 + post_batch 即検知）
+// 段階1 では structured docId 同士の衝突のみ検知対象。
+// 既存の addDoc 自動採番データは検知対象から除外される。
+const {
+  detectDuplicates,
+  detectDuplicatesScheduled,
+} = require('./detectDuplicates')
+exports.detectDuplicates = detectDuplicates
+exports.detectDuplicatesScheduled = detectDuplicatesScheduled
+
 /**
  * 管理者がFirebase Authユーザーを削除する
  * クライアントからは他人のAuthアカウントを削除できないため、
