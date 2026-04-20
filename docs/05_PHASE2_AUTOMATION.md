@@ -1,7 +1,7 @@
 # 05 Phase 2 自動化設計書（月次自動作成・自動送信・再実行制御）
 
 - **対象**: bomber-admin ERP / 取引精算（kickback + invoice 統合）
-- **版**: v0.4（§2 本線レビュー反映）
+- **版**: v0.5（§2 本線レビュー反映・整合性修正）
 - **起草開始日**: 2026-04-20
 - **起草者**: ロイヤルトラスト社長 + Claude Code
 - **承認フロー**: §1〜§3 完成後に社長レビュー → ChatGPT レビュー → 両承認で §4 以降着手
@@ -1364,7 +1364,15 @@ await batch.commit()
 ```
 
 batch 失敗時は §2.5 の 3 回リトライで復旧を試みる。
-リトライ失敗時は warning を返し、admin が resolveSettlementEmailLog で手動確定。
+**リトライ失敗時は v0.4 方針に従い以下を実行する**（v0.5 整合性修正）：
+
+1. `settings/settlement_automation.enabled = false` で即停止
+2. admin へ CRITICAL 通知（notifyAdmin severity: 'critical'）
+3. 呼び出し元には `HttpsError('data-loss')` で throw（warning 扱いにしない）
+4. admin が SendGrid ダッシュボードで実送信確認後、`resolveSettlementEmailLog` で手動確定
+
+**注意**：旧 v0.3 の「warning を返す」挙動は v0.4 で撤回済み。
+§2.5 / §2.8 / §2.10 のすべての記述は「Stage3 リトライ失敗 = 即停止 + CRITICAL」で統一されている。
 
 #### 「送信済み判定」関数の共通化
 
@@ -1720,13 +1728,66 @@ async function detectStalePending() {
 4. 実送信未済 → `resolveSettlementEmailLog({ targetStatus: 'failed', reason })` で failed 確定
 5. 全件処理後 `settings/settlement_automation.enabled = true` に戻して再開
 
-#### manualResend の対象拡張（v0.4 追加 / 推奨5）
+#### manualResend の対象拡張（v0.4 追加 / v0.5 安全策強化）
 
 旧案（v0.3）では manualResend の対象は `status === 'failed'` のみだった。
 本線レビュー指摘により、**「長時間 pending（10分超）」も手動再送対象に含める** ように拡張する。
 
+#### 原則：未確認 pending に直接 resend はしない（v0.5 強化）
+
+**重要**：UI のチェックボックスだけでは再送を許可しない。
+
+長時間 pending からの再送は、以下 **2 経路のいずれか** を事前に通過している必要がある。
+これに満たないリクエストは Cloud Functions 側で throw する。
+
+| 経路 | 事前条件 | 判定フィールド |
+|---|---|---|
+| **A. failed 経由** | `resolveSettlementEmailLog({ targetStatus: 'failed', reason })` 済み | `status === 'failed'` に遷移済み |
+| **B. admin 専用承認** | admin が明示承認フラグを記録済み | `manualResendApprovedAt` / `manualResendApprovedBy` が存在 |
+
+UI のチェックボックスは「admin の注意喚起」として残すが、それ **だけ** では再送許可の根拠にならない。
+Cloud Functions 側は Firestore ドキュメントの状態を見て判定する。
+
+#### 2 経路の違い
+
+**経路 A（failed 経由・推奨）**
+
+長時間 pending を `resolveSettlementEmailLog` でいったん `failed` に落としてから、通常の failed 再送として扱う。
+
+```
+長時間 pending 検知
+  ↓
+admin が SendGrid ダッシュボードで実送信を確認
+  ↓ 未送信と判定
+resolveSettlementEmailLog({ targetStatus: 'failed', reason: '...' })
+  ↓ status が failed に遷移
+manualResend（通常フロー）
+```
+
+この経路は「一度 failed に落とす」という明示的な状態変化を経るため、監査ログが明瞭。
+
+**経路 B（admin 専用承認・緊急時のみ）**
+
+`resolveSettlementEmailLog` を経由せず、admin が直接「承認フラグ」を立てる経路。
+緊急時や、resolveSettlementEmailLog に何らかの不具合がある場合のフォールバック。
+
 ```javascript
-// Cloud Functions: manualResendSettlementEmail
+// admin 専用承認の記録
+await logRef.update({
+  manualResendApprovedAt: FieldValue.serverTimestamp(),
+  manualResendApprovedBy: adminUid,
+  manualResendApprovedByEmail: adminEmail,
+  manualResendApprovalReason: reason,  // 必須・詳細必須
+})
+```
+
+承認フラグは **1 回の manualResend につき 1 回有効**（再送完了時にクリアされる）。
+承認フラグが残った状態で複数回再送できないようにする。
+
+#### Cloud Functions 側の実装
+
+```javascript
+// Cloud Functions: manualResendSettlementEmail（v0.5 強化版）
 async function manualResend({ kickbackId, reason }) {
   const logRef = db.collection('settlementEmailLogs').doc(kickbackId)
   const snap = await logRef.get()
@@ -1735,38 +1796,99 @@ async function manualResend({ kickbackId, reason }) {
   const log = snap.data()
   const now = Date.now()
   const updatedAtMs = log.updatedAt?.toMillis?.() || 0
+
+  // === ケース1: 通常の failed からの再送 ===
+  if (log.status === 'failed') {
+    // 60 秒クールダウンのみ
+    if (log.lastResendAttemptAt && now - log.lastResendAttemptAt.toMillis() < 60 * 1000) {
+      throw new HttpsError('resource-exhausted', '60秒クールダウン中')
+    }
+    // 通常フロー（Stage 1 → 2 → 3）
+    return await runResendStages({ log, logRef, reason, fromStalePending: false })
+  }
+
+  // === ケース2: 長時間 pending（10分超）からの再送 ===
   const isStalePending =
     log.status === 'pending' && now - updatedAtMs > 10 * 60 * 1000
 
-  // 再送対象は「failed」または「長時間 pending」のみ
-  if (log.status !== 'failed' && !isStalePending) {
+  if (!isStalePending) {
     throw new HttpsError(
       'failed-precondition',
-      `再送不可: status=${log.status}（failed または 10分超 pending のみ対象）`,
+      `再送不可: status=${log.status}${log.status === 'pending' ? '（10分未経過）' : ''}`,
     )
   }
 
-  // 長時間 pending からの再送は特別扱い
-  //   - SendGrid ダッシュボードで実送信確認していない場合、二重送信リスクあり
-  //   - UI 側で「SendGrid で未送信を確認しましたか」の確認 checkbox を必須にする
-  //   - ログに resendFromStalePending: true を記録
+  // v0.5 追加: 未確認 pending への直接 resend は禁止
+  //   経路A（failed 経由）または 経路B（admin 専用承認）のいずれかが必須
+  const hasAdminApproval =
+    log.manualResendApprovedAt &&
+    log.manualResendApprovedBy &&
+    (now - log.manualResendApprovedAt.toMillis() < 10 * 60 * 1000)  // 承認は10分有効
 
-  // 以下は §2.7 と同じ Stage 1〜3 の処理を呼び出し
-  // ...
+  if (!hasAdminApproval) {
+    throw new HttpsError(
+      'failed-precondition',
+      '長時間 pending からの直接再送は不可です。' +
+      '先に resolveSettlementEmailLog({ targetStatus: "failed" }) で failed に落とすか、' +
+      'admin 専用承認フラグ（manualResendApprovedAt）を記録してください。',
+    )
+  }
+
+  // 5 分クールダウン（stale pending は通常より厳しい）
+  if (log.lastResendAttemptAt && now - log.lastResendAttemptAt.toMillis() < 5 * 60 * 1000) {
+    throw new HttpsError('resource-exhausted', '5分クールダウン中')
+  }
+
+  // 承認フラグは 1 回きりで消費（再送完了後にクリア、または失敗時もクリア）
+  return await runResendStages({
+    log,
+    logRef,
+    reason,
+    fromStalePending: true,
+    clearApprovalOnComplete: true,
+  })
 }
 ```
 
-#### 長時間 pending からの再送の安全策
+#### 長時間 pending からの再送の安全策（v0.5 更新）
 
 | 安全策 | 内容 |
 |---|---|
-| UI 確認必須 | 「SendGrid ダッシュボードで実送信されていないことを確認しましたか」のチェックボックス |
+| **直接 resend 禁止（v0.5 強化）** | UI チェックボックスだけでは不可。経路 A（failed 経由）または 経路 B（admin 専用承認）必須 |
+| 承認フラグの有効期限 | `manualResendApprovedAt` から 10 分以内のみ有効（古い承認の再利用を防ぐ） |
+| 承認フラグは 1 回消費 | 再送完了（成功・失敗どちらも）で自動クリア |
 | reason 必須 | 通常の再送より詳細な理由を要求（文字数下限を設ける） |
 | 監査強化 | `resendFromStalePending: true` フラグを `resendHistory[]` に記録 |
-| cool-down | 長時間 pending からの再送は 5 分のクールダウン（通常の 60 秒より長い） |
+| cool-down | stale pending からの再送は 5 分（通常 failed 再送は 60 秒） |
+
+#### なぜ UI checkbox だけでは不可なのか
+
+| 観点 | UI checkbox のみ | Firestore 状態判定（v0.5） |
+|---|---|---|
+| Cloud Functions の判定根拠 | クライアント申告（信頼できない） | サーバ側 Firestore ドキュメント |
+| 回避経路 | DevTools で checkbox 強制 ON にできる | Firestore rules + Cloud Functions で遮断 |
+| 監査性 | ログ残すが根拠薄弱 | 明示的な状態遷移（failed 経由）または承認記録 |
+
+クライアント側の UI 制約は「admin の注意喚起」にはなるが、**セキュリティ境界にはならない**。
+Cloud Functions 側で Firestore の実状態を見て判定することで、物理的に不可能な経路にする。
+
+#### 承認フラグの rules
+
+```javascript
+// firestore.rules
+match /settlementEmailLogs/{docId} {
+  // manualResendApprovedAt / ApprovedBy の書き込みは Cloud Functions のみ
+  // クライアントからは設定不可
+  allow read: if hasValidAdminRole();
+  allow create, update, delete: if false;
+}
+```
+
+admin 専用承認フラグを立てる専用 Cloud Function `approveStalePendingResend` を用意し、
+admin の認証 + reason 必須 + 詳細監査ログで厳密に管理する。
 
 長時間 pending は「SES では既に送信済み」の可能性が現実的にある。
-確認せず再送すると二重送信事故になるため、通常の failed 再送より厳しい安全策を課す。
+**確認せず再送すると二重送信事故になる** ため、通常の failed 再送より厳しい安全策を課す。
 
 #### 検証成功条件
 
@@ -1804,3 +1926,4 @@ async function manualResend({ kickbackId, reason }) {
 | 2026-04-20 | v0.2 | §1 軽微修正（ChatGPT レビュー反映 9点）：type enum 固定 / dealerCode 正規化 / Admin SDK bypass 明文化 / runLogs docId addDoc 採用 / エラー率条件修正 / 部分成功シナリオ追加 / 再生成しない思想統一 / enabled 途中停止挙動 / 二重作成検知方法具体化 | Claude |
 | 2026-04-20 | v0.3 | §2 起草完了：重複送信の防止機構。docId=kickbackId 固定 / pending-first 3段階 / SES成功だけでは sent判定しない / 自動再送禁止・手動再送のみ / admin 手動 resolve / 二重送信検知2系統 / 第2段階はテスト代理店1件で1か月検証 | Claude |
 | 2026-04-20 | v0.4 | §2 本線レビュー反映 5点：(1) Stage3失敗を warning → 即停止+CRITICAL通知に変更 / (2) pending長期残留検知（10分毎 detectStalePending）追加 / (3) resendHistory.resentAt を serverTimestamp → ISO文字列に変更 / (4) sent整合性不一致検知（detectSentInconsistency）追加（パターンA/B/C）/ (5) manualResend 対象を failed + 長時間pending に拡張（SendGrid確認チェックボックス等の安全策付き）。停止条件は 5点 → 7点 に拡張。観測項目は 8点 → 10点 に拡張。 | Claude |
+| 2026-04-20 | v0.5 | §2 本線レビュー反映 2点（整合性修正）：(1) §2.8 の旧「batch失敗時 warning を返す」文言を削除し、v0.4 方針（即停止+CRITICAL+HttpsError('data-loss')）に §2.5/§2.8/§2.10 全体で統一 / (2) stale pending からの manualResend の安全策強化：UI checkbox のみでは再送不可とし、経路A（resolveSettlementEmailLog で failed 経由）または経路B（admin 専用承認フラグ manualResendApprovedAt/By）のいずれかを必須化。クライアント側の checkbox はセキュリティ境界にならないため、Cloud Functions 側で Firestore 状態を見て判定する。承認フラグは10分有効・1回消費・専用 Function で厳密管理。 | Claude |
