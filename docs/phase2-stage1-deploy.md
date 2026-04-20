@@ -3,7 +3,7 @@
 - **対象**: feature/phase2-stage1 ブランチ
 - **設計書**: docs/05_PHASE2_AUTOMATION.md §1
 - **作成日**: 2026-04-20
-- **版**: v1（Step E 明文化）
+- **版**: v1.1（レビュー反映）
 
 ## 0. 本手順の前提
 
@@ -176,6 +176,55 @@ console.log(r.data)
 3. `isSkeleton: true` フラグが入っているか確認
 4. detectDuplicates が post_batch で呼ばれ、0 件検知だったことを確認
 
+## 4.6 1 ヶ月目 → 2 ヶ月目の観測フロー（v1.1 追加 / 軽微3）
+
+段階2 進行判定（§7）には **2 回の月次バッチ観測** が必須。
+初回デプロイ後、以下の時間軸チェックリストに沿って運用する。
+
+### タイムライン
+
+```
+[T0]   feature/phase2-stage1 を main にマージ + 本番デプロイ（enabled=false）
+         ↓
+[T0+Δ] 社長判断で settings/settlement_automation.enabled = true に切替
+         ↓
+[T+1d] detectDuplicatesScheduled が日次保険で 1 回走ることを確認
+         ↓
+[T+月初] 1 ヶ月目の createMonthlySettlementScheduled 実行（前月分作成）
+         ↓
+[観測] 1 ヶ月間：settlementRunLogs / settlementDuplicateChecks / adminNotifications を監視
+         ↓
+[T+月初×2] 2 ヶ月目の createMonthlySettlementScheduled 実行
+           1 ヶ月目分がすべて already_exists でスキップされることが観測の目的
+         ↓
+[判定] §7 解除条件 3 点を満たしたら段階2 進行
+```
+
+### 1 ヶ月目観測後の追加確認
+
+2 回目のバッチ実行前に以下を確認する：
+
+| # | 項目 | 確認先 |
+|---|---|---|
+| 1 | 1 ヶ月目の作成件数 = 代理店数 | `settlementRunLogs.createdCount` |
+| 2 | 1 ヶ月目以降に手動 addDoc が混在していないか | `kickbacks` / `invoices` の件数 |
+| 3 | detectDuplicates の日次保険が 30 日で 30 回走ったか | `settlementDuplicateChecks` |
+| 4 | adminNotifications に critical が出ていないか | `adminNotifications` where severity='critical' |
+| 5 | enabled が意図せず false に落ちていないか | `settings/settlement_automation.enabled` |
+
+### 2 ヶ月目バッチ実行後の確認
+
+| # | 項目 | 期待 |
+|---|---|---|
+| 1 | 2 ヶ月目 runLogs に 1 ヶ月目分の `already_exists` スキップが全代理店分記録 | skipped[].reason === 'already_exists' |
+| 2 | 2 ヶ月目 runLogs の createdCount が 1 ヶ月目と同数 | 新規月分のみ作成成功 |
+| 3 | 二重作成検知 0 件維持 | settlementDuplicateChecks.duplicatesFound === 0 |
+
+### 次回 Scheduler 実行予定日を記録
+
+運用担当が次回実行日を把握できるよう、`docs/phase2-stage1-observation.md`（別途作成）に
+観測ログを記録する運用とする。
+
 ## 5. 停止方法（緊急時）
 
 問題があれば即座に停止:
@@ -240,3 +289,4 @@ Scheduler は次回起動時に enabled=false を検知して即 return する�
 | 日付 | 版 | 変更内容 | 担当 |
 |---|---|---|---|
 | 2026-04-20 | v1 | Step E 完了時点の初版 | Claude |
+| 2026-04-20 | v1.1 | レビュー反映: (重大1) FORCE_OVERWRITE 時の enabled=true 誤上書き対策として ACKNOWLEDGE_ENABLED_OVERRIDE 必須化 / (軽微1) init payload に disabledAt 追加 / (軽微3) §4.6 に 2 ヶ月観測フロー追記 / (軽微5) rules コメントに初期配備時の完全静止状態を補足 | Claude |

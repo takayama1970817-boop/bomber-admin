@@ -20,6 +20,12 @@
  *   # 既存を強制上書き（通常は使わない）
  *   DRY_RUN=false FORCE_OVERWRITE=true node scripts/init-settlement-automation.mjs
  *
+ *   # 運用中 (enabled=true) を強制停止する場合 (v1.1 追加)
+ *   # FORCE_OVERWRITE だけでは enabled=true → false の誤落としを防ぐため、
+ *   # 以下を追加承認として指定する必要がある
+ *   DRY_RUN=false FORCE_OVERWRITE=true ACKNOWLEDGE_ENABLED_OVERRIDE=true \
+ *     node scripts/init-settlement-automation.mjs
+ *
  * 安全策:
  *   1. 既存ドキュメントがある場合はデフォルトで上書きしない（FORCE_OVERWRITE=true で明示承認）
  *   2. dry-run をデフォルトにして誤実行を防ぐ
@@ -63,11 +69,18 @@ const db = getFirestore()
 
 const DRY_RUN = process.env.DRY_RUN !== 'false'
 const FORCE_OVERWRITE = process.env.FORCE_OVERWRITE === 'true'
+// v1.1 追加: 運用中 (enabled=true) を強制初期化する時の追加承認フラグ
+//   FORCE_OVERWRITE=true だけでは enabled=true → false の誤落としを許さない。
+//   運用中を強制初期化するには ACKNOWLEDGE_ENABLED_OVERRIDE=true も必須。
+const ACKNOWLEDGE_ENABLED_OVERRIDE = process.env.ACKNOWLEDGE_ENABLED_OVERRIDE === 'true'
+
 const DOC_PATH = 'settings/settlement_automation'
-const SCRIPT_VERSION = '2026-04-20.phase2-1.v1'
+const SCRIPT_VERSION = '2026-04-20.phase2-1.v1.1'
 
 const INITIAL_PAYLOAD = {
   enabled: false,
+  // 軽微1 (v1.1): disabledAt を追加して §1.9 スキーマに一致させる
+  // disabledAt は呼び出し時に FieldValue.serverTimestamp() を挿入
   disabledReason: 'initial safe default',
   disabledBy: 'init-script',
   updatedBy: 'init-script',
@@ -94,8 +107,11 @@ async function main() {
   const existing = await ref.get()
 
   if (existing.exists) {
+    const existingData = existing.data() || {}
+    const existingEnabled = existingData.enabled === true
+
     console.log('📄 既存ドキュメントが存在します:')
-    console.log(JSON.stringify(existing.data(), null, 2))
+    console.log(JSON.stringify(existingData, null, 2))
     console.log('')
 
     if (!FORCE_OVERWRITE) {
@@ -109,8 +125,28 @@ async function main() {
       }
       process.exit(0)
     }
-    console.log('⚠️  FORCE_OVERWRITE=true のため上書きします。')
-    console.log('')
+
+    // 重大1 (v1.1): FORCE_OVERWRITE=true でも運用中 (enabled=true) を
+    //               無条件に false へ上書きさせない二段階承認
+    if (existingEnabled && !ACKNOWLEDGE_ENABLED_OVERRIDE) {
+      console.error('❌ 既存の enabled=true を FORCE_OVERWRITE で false に上書きしようとしています。')
+      console.error('')
+      console.error('   これは運用中の自動化を強制停止する操作になります。')
+      console.error('   本当に停止する意図があるなら、以下の環境変数も併用してください:')
+      console.error('')
+      console.error('     ACKNOWLEDGE_ENABLED_OVERRIDE=true')
+      console.error('')
+      console.error('   未設定の場合は安全のため中断します。')
+      process.exit(2)
+    }
+    if (existingEnabled && ACKNOWLEDGE_ENABLED_OVERRIDE) {
+      console.log('⚠️  FORCE_OVERWRITE=true + ACKNOWLEDGE_ENABLED_OVERRIDE=true')
+      console.log('    運用中 (enabled=true) を強制停止 (enabled=false) に落とします。')
+      console.log('')
+    } else {
+      console.log('⚠️  FORCE_OVERWRITE=true のため上書きします。')
+      console.log('')
+    }
   }
 
   // 書き込み内容の表示
@@ -132,9 +168,10 @@ async function main() {
     process.exit(0)
   }
 
-  // 本番書き込み
+  // 本番書き込み（軽微1: disabledAt を追加 / §1.9 スキーマ一致）
   const payload = {
     ...INITIAL_PAYLOAD,
+    disabledAt: FieldValue.serverTimestamp(),
     updatedAt: FieldValue.serverTimestamp(),
     initializedAt: FieldValue.serverTimestamp(),
   }
