@@ -1,0 +1,137 @@
+name: Deploy (production)
+
+# 目的:
+#   bomber-admin（本番）への Firebase Functions / Firestore rules を
+#   明示的な手動トリガー（workflow_dispatch）でのみデプロイする。
+#
+# 設計方針:
+#   - **main push では絶対に発火しない**（workflow_dispatch のみ）
+#   - test デプロイ（deploy-test.yml）とは完全に分離
+#   - Secret は FIREBASE_SERVICE_ACCOUNT_PROD（test 用とは別）
+#   - プロジェクトは bomber-admin 固定
+#   - デプロイ対象は functions と firestore:rules のみ（hosting は本線スコープ外）
+#
+# 実行前の必須確認:
+#   1. FIREBASE_SERVICE_ACCOUNT_PROD が GitHub Secrets に登録されている
+#   2. bomber-admin プロジェクトの Service Account にロール付与済み
+#   3. settings/settlement_automation を bomber-admin 側で enabled=false で初期化済み
+#   4. TELNYX_FAX_FROM / SLACK_WEBHOOK_URL 等の Secrets が bomber-admin 側に設定済み
+#
+# 既存 deploy.yml との関係:
+#   既存 .github/workflows/deploy.yml は別スレ（backup drill gate 付き）管轄。
+#   このブランチでは触らない。本ワークフロー deploy-prod.yml とは役割を分離して並走する。
+#
+# 関連ドキュメント:
+#   - docs/ci-cd-setup-test.md §5（production 切替手順）
+#   - docs/phase2-stage1-deploy.md
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_production:
+        description: '本番にデプロイすることを理解しています（production と入力）'
+        required: true
+        type: string
+        default: ''
+
+jobs:
+  guard:
+    name: 🛡 本番デプロイ確認ガード
+    runs-on: ubuntu-latest
+    steps:
+      - name: confirm_production 入力チェック
+        run: |
+          if [ "${{ inputs.confirm_production }}" != "production" ]; then
+            echo "❌ confirm_production に 'production' と入力してください。"
+            echo "  本番デプロイは明示確認を必要とします。"
+            exit 1
+          fi
+          echo "✅ 本番デプロイ確認 OK"
+
+  deploy-prod:
+    name: Firebase production デプロイ
+    needs: guard
+    runs-on: ubuntu-latest
+
+    # 多重実行を抑止（本番は 1 実行のみ）
+    concurrency:
+      group: deploy-prod
+      cancel-in-progress: false
+
+    steps:
+      - name: チェックアウト
+        uses: actions/checkout@v4
+
+      - name: Node セットアップ
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: functions/package-lock.json
+
+      - name: Functions の依存インストール
+        working-directory: functions
+        run: npm ci
+
+      - name: Firebase CLI インストール
+        run: npm install -g firebase-tools@latest
+
+      - name: Google 認証（本番サービスアカウント）
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_PROD }}
+
+      - name: プロジェクト ID 確認（bomber-admin 固定ガード）
+        run: |
+          SA_PROJECT=$(cat "${GOOGLE_APPLICATION_CREDENTIALS}" | grep -o '"project_id":[^,]*' | head -1)
+          echo "Service Account project: ${SA_PROJECT}"
+          if ! echo "${SA_PROJECT}" | grep -q '"bomber-admin"'; then
+            echo "❌ Service Account が bomber-admin（本番）以外を指しています。"
+            echo "   想定: bomber-admin"
+            echo "   検知: ${SA_PROJECT}"
+            echo "   FIREBASE_SERVICE_ACCOUNT_PROD が test 用 JSON になっていないか確認してください。"
+            exit 1
+          fi
+
+      - name: Firestore rules デプロイ（本番）
+        run: |
+          firebase deploy \
+            --only firestore:rules \
+            --project bomber-admin \
+            --non-interactive
+
+      - name: Functions デプロイ（本番）
+        run: |
+          firebase deploy \
+            --only functions \
+            --project bomber-admin \
+            --non-interactive
+
+      - name: デプロイ完了サマリ
+        if: success()
+        run: |
+          echo "✅ bomber-admin（本番）へのデプロイ成功"
+          echo "- trigger: workflow_dispatch"
+          echo "- commit: ${{ github.sha }}"
+          echo ""
+          echo "次のアクション:"
+          echo "  1. settings/settlement_automation.enabled は false のまま維持"
+          echo "  2. 社長判断で 5/1 直前に enabled=true 切替"
+          echo "  3. 2 ヶ月観測開始"
+
+      - name: デプロイ失敗時のガイド
+        if: failure()
+        run: |
+          echo "❌ 本番デプロイ失敗"
+          echo ""
+          echo "想定原因と対応:"
+          echo "  1. FIREBASE_SERVICE_ACCOUNT_PROD 未登録 or test 用"
+          echo "     → GitHub Secrets を確認"
+          echo "  2. サービスアカウントのロール不足"
+          echo "     → bomber-admin の IAM で 編集者 or 3点セット付与"
+          echo "  3. Cloud Build 権限不足"
+          echo "     → <PROJECT_NUMBER>@cloudbuild.gserviceaccount.com に Cloud Build Service Account"
+          echo "  4. Secrets（TELNYX_FAX_FROM 等）が bomber-admin に未設定"
+          echo "     → firebase functions:secrets:set を bomber-admin プロジェクトで実施"
+          echo ""
+          echo "関連: docs/phase2-stage1-deploy.md §8 ロールバック手順"
