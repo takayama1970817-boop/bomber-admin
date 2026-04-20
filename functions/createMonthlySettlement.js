@@ -258,6 +258,11 @@ async function createOneSettlementInTx(db, { type, dealerCode, dealerName, month
       grandTotal: 0,
 
       // メタデータ
+      // isSkeleton: true は段階1 骨組み識別用フラグ（本線指示）
+      //   - 将来 useDealerKickbacks 等で非表示フィルタする目印
+      //   - migrate / cleanup / 監査時の切り分けに使う
+      //   - createdSource とセットで保持
+      isSkeleton: true,
       createdBy: 'scheduler',
       createdSource: 'createMonthlySettlement',
       scriptVersion: SCRIPT_VERSION,
