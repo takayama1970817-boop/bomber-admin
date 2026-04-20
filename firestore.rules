@@ -715,6 +715,13 @@ service cloud.firestore {
     //     （すべて Cloud Functions Admin SDK 経由で書き込む）
     //   - Admin SDK は rules をバイパスするため、本 rule は「クライアント遮断」が目的
     //
+    // 段階1 初期配備時の挙動（v1.1 軽微5 補足）:
+    //   settings/settlement_automation.enabled = false の間は、
+    //   Cloud Functions 側も実質的に書き込みを行わない（関数冒頭の enabled チェックで
+    //   即 return するため）。結果として本 rule の 3 コレクションは
+    //   「クライアントも Cloud Functions も書き込めない完全静止状態」から始まる。
+    //   enabled=true に社長判断で切り替えて初めて Cloud Functions 経由の書き込みが始まる。
+    //
     // 注意:
     //   今回（段階1 Step D）は以下 3 コレクションのみ追加する。
     //   kickbacks / invoices の既存 rules は今回は変更しない（既存 UI 非破壊）。
