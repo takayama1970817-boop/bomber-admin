@@ -576,6 +576,31 @@ service cloud.firestore {
     }
 
     // ========================================
+    // reservations コレクション（Square予約連動）
+    // - 予約の正本は Square、これは取り込み用の閲覧コピー
+    // - read: salon は自社（salonCompanyName 一致）のみ、admin/staff/master は全件
+    // - write: admin/staff のみ（同期スクリプト経由の書き込みも Admin SDK でバイパスする想定）
+    //   salon からは直接書き込み不可（Square が正本のため）
+    // ========================================
+    match /reservations/{reservationId} {
+      allow read:  if isSignedIn()
+                    && (isAdmin() || isStaff()
+                        || (isSalon()
+                            && resource.data.salonCompanyName == userDoc().companyName));
+      allow write: if isAdmin() || isStaff();
+    }
+
+    // ========================================
+    // squareSyncLogs コレクション（Square予約同期スクリプトの監査ログ）
+    // - write: 完全禁止（scripts/sync-square-bookings.mjs が Admin SDK で書き込む）
+    // - read: 本社 admin のみ（社内の監査目的）
+    // ========================================
+    match /squareSyncLogs/{logId} {
+      allow read:  if isAdmin();
+      allow write: if false;
+    }
+
+    // ========================================
     // subRoleBackfillLogs コレクション（subRole 一括付与スクリプトの監査ログ）
     // - write: 完全禁止（scripts/backfill-subrole.mjs が Admin SDK で直接書き込む）
     // - read: 本社 admin のみ（社内の監査目的でのみ参照可）

@@ -36,6 +36,7 @@ import SalonDashboard from './pages/SalonDashboard.jsx'
 import SalonChat from './pages/SalonChat.jsx'
 import SalonDocuments from './pages/SalonDocuments.jsx'
 import SalonCustomers from './pages/SalonCustomers.jsx'
+import SalonReservations from './pages/SalonReservations.jsx'
 import SalonProductsAdmin from './pages/SalonProductsAdmin.jsx'
 import SalonManage from './pages/SalonManage.jsx'
 import SalonSales from './pages/SalonSales.jsx'
@@ -123,6 +124,7 @@ export default function App() {
       >
         <Route index element={<SalonDashboard />} />
         <Route path="customers" element={<SalonCustomers />} />
+        <Route path="reservations" element={<SalonReservations />} />
         <Route path="chat" element={<SalonChat />} />
         <Route path="documents" element={<SalonDocuments />} />
       </Route>
