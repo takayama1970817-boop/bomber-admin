@@ -825,6 +825,32 @@ service cloud.firestore {
     }
 
     // ========================================
+    // dealerMonthlySnapshots コレクション（代理店ダッシュボード用 日次スナップショット）
+    // docId = {dealerCode}_{YYYY-MM}
+    // - write: 完全禁止（scripts/aggregate-dealer-monthly.mjs が Admin SDK で直接書き込む）
+    // - read: admin/staff は全件、dealer は自社 dealerCode のみ
+    //         （docId ベース判定。resource.data ベースだと評価タイミング差で
+    //          PERMISSION_DENIED が出るケースがあるため避ける）
+    // ========================================
+    match /dealerMonthlySnapshots/{docId} {
+      allow read:  if isAdmin() || isStaff()
+                    || (isDealer()
+                        && userDoc().get('dealerCode', '') != ''
+                        && docId.matches('^' + userDoc().dealerCode + '_.*$'));
+      allow write: if false;
+    }
+
+    // ========================================
+    // dealerAggregationLogs コレクション（代理店スナップショット集計スクリプトの監査ログ）
+    // - write: 完全禁止（aggregate-dealer-monthly.mjs のみ）
+    // - read: 本社 admin のみ
+    // ========================================
+    match /dealerAggregationLogs/{logId} {
+      allow read:  if isAdmin();
+      allow write: if false;
+    }
+
+    // ========================================
     // それ以外は全拒否（保険）
     // ========================================
     match /{document=**} {
