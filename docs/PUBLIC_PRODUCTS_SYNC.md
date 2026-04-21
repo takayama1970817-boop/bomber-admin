@@ -132,6 +132,72 @@ CSV 列仕様: `docs/bcart-products-sample.csv` 参照（14列、UTF-8、ヘッ�
 
 Bカート側で「主力商品を先頭、次に価格帯高い順」等を表現したい場合は `display_order` に 10, 20, 30 … のように間隔を空けて設定すると後からの差し込みが容易。
 
+## レート制限対策（Bカート API 429 / 503）
+
+Bカートは大量リクエスト時にレート制限をかけてきます。本スクリプトは以下で耐性を持たせています。
+
+### 自動動作（`bcart-sync.mjs` 全モード共通）
+- **指数バックオフ**: 5 / 10 / 20 / 40 / 60 / 120 / 180 / 240 / 300 秒、最大 10 回再試行
+- **Retry-After ヘッダ尊重**: API が返してきた秒数を優先
+- **成功後の throttle**: 既定 250ms（`--throttle-ms=500` 等で調整可）
+- **checkpoint 自動保存**（受注明細取得のみ）:
+  - 25 ページ（= 500 件）ごとに `.bcart-sync-checkpoint-<yearLabel>.json` を保存
+  - 中断後の再実行で**自動再開**（`--fresh` を付けない限り）
+  - 完走すると自動削除
+
+### 詰まったときの手順
+
+1. **30分〜1時間あける**（Bカート側のレート制限は時間経過でリセット）
+2. 同じコマンドを**そのまま再実行**（checkpoint から自動で続きを取得）
+
+```bash
+# 例: 受注同期が途中で止まった場合
+node scripts/bcart-sync.mjs --year=2026
+# ↑ このまま再実行すれば checkpoint から再開
+```
+
+### throttle を強めに
+
+```bash
+# 500ms に緩めて再実行（約 2rps）
+node scripts/bcart-sync.mjs --year=2026 --throttle-ms=500
+```
+
+### 受注明細をスキップして高速化
+
+受注明細（order_products）はレート制限の主な原因。ホームページ公開には不要なので、
+下記フラグで一次同期を先に済ませる手もあります。
+
+```bash
+node scripts/bcart-sync.mjs --year=2026 --skip-products
+```
+
+### checkpoint を無視して最初から
+
+CSV 仕様変更等で取り直したいときのみ：
+
+```bash
+node scripts/bcart-sync.mjs --year=2026 --fresh
+```
+
+### DRY-RUN（書き込みなしでAPIだけ叩く）
+
+```bash
+node scripts/bcart-sync.mjs --year=2026 --dry-run
+```
+
+### ⚠️ ホームページ公開だけなら受注同期は不要
+
+ホームページ（`/products`, `/products/:slug`）は `publicProducts` のみ参照します。
+受注同期（order_products のフェーズ）はダッシュボード系の機能が使うもので、
+**公開デプロイだけなら `--products-master` を使えば受注・明細フェーズは通りません**。
+
+```bash
+# これだけで公開ページは最新化される
+node scripts/bcart-sync.mjs --products-master --dry-run
+node scripts/bcart-sync.mjs --products-master
+```
+
 ## トラブルシュート
 
 ### Q. サイトで商品が古いまま更新されない

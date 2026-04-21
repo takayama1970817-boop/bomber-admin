@@ -56,3 +56,6 @@ skip_body.json
 # Python キャッシュ（.github/scripts/ のローカルテスト時に生成される）
 __pycache__/
 *.pyc
+
+# bcart-sync.mjs の checkpoint（受注明細取得の中断再開用）
+.bcart-sync-checkpoint-*.json
