@@ -53,18 +53,44 @@
  */
 
 import { readFileSync, existsSync } from 'fs'
-import { initializeApp, cert } from 'firebase-admin/app'
+import { initializeApp, cert, applicationDefault, getApps } from 'firebase-admin/app'
 import { getFirestore, FieldValue } from 'firebase-admin/firestore'
 
-const SERVICE_ACCOUNT_PATH = new URL('./service-account.json', import.meta.url)
-if (!existsSync(SERVICE_ACCOUNT_PATH)) {
-  console.error('❌ scripts/service-account.json が見つかりません。')
-  console.error('   Firebase Console → プロジェクト設定 → サービスアカウント → 新しい秘密鍵 で取得してください。')
-  process.exit(1)
+/**
+ * 認証情報の優先順位（v1.2 追加 / CI 対応）:
+ *   1. GOOGLE_APPLICATION_CREDENTIALS 環境変数（CI・ADC）
+ *   2. scripts/service-account.json（ローカル実行）
+ *
+ * GitHub Actions で google-github-actions/auth@v2 を使った場合は
+ * GOOGLE_APPLICATION_CREDENTIALS が自動設定されるため、
+ * scripts/service-account.json がなくても動く。
+ */
+let serviceAccount = null
+if (getApps().length === 0) {
+  const adcPath = process.env.GOOGLE_APPLICATION_CREDENTIALS
+  if (adcPath && existsSync(adcPath)) {
+    // CI / ADC 経路
+    initializeApp({ credential: applicationDefault() })
+    try {
+      serviceAccount = JSON.parse(readFileSync(adcPath, 'utf8'))
+    } catch (_e) {
+      // project_id 読み取り用の補助。失敗しても続行可
+      serviceAccount = { project_id: '(unknown)' }
+    }
+  } else {
+    // ローカル実行経路
+    const LOCAL_SA_PATH = new URL('./service-account.json', import.meta.url)
+    if (!existsSync(LOCAL_SA_PATH)) {
+      console.error('❌ 認証情報が見つかりません。')
+      console.error('   以下のいずれかを満たしてください:')
+      console.error('   1. GOOGLE_APPLICATION_CREDENTIALS 環境変数を設定（CI）')
+      console.error('   2. scripts/service-account.json を配置（ローカル）')
+      process.exit(1)
+    }
+    serviceAccount = JSON.parse(readFileSync(LOCAL_SA_PATH, 'utf8'))
+    initializeApp({ credential: cert(serviceAccount) })
+  }
 }
-
-const serviceAccount = JSON.parse(readFileSync(SERVICE_ACCOUNT_PATH, 'utf8'))
-initializeApp({ credential: cert(serviceAccount) })
 const db = getFirestore()
 
 const DRY_RUN = process.env.DRY_RUN !== 'false'
@@ -75,7 +101,7 @@ const FORCE_OVERWRITE = process.env.FORCE_OVERWRITE === 'true'
 const ACKNOWLEDGE_ENABLED_OVERRIDE = process.env.ACKNOWLEDGE_ENABLED_OVERRIDE === 'true'
 
 const DOC_PATH = 'settings/settlement_automation'
-const SCRIPT_VERSION = '2026-04-20.phase2-1.v1.1'
+const SCRIPT_VERSION = '2026-04-20.phase2-1.v1.2'
 
 const INITIAL_PAYLOAD = {
   enabled: false,
