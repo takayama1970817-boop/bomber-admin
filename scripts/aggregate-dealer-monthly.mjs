@@ -479,8 +479,14 @@ async function main() {
   const allCustomers = await fetchAllBcartCustomers()
   console.log(`  総会員数: ${allCustomers.length} 件`)
   const customersByParent = new Map()
+  // 注文の帰属解決用: customer_id → current parent_id （会員マスタの現在値が source of truth）
+  //   V→J の代理店コード変更のように会員マスタが更新されても、
+  //   注文時点の customer_parent_id では解決できない問題を回避する。
+  const parentByCustomerId = new Map()
   for (const c of allCustomers) {
     const parent = parentIdOf(c)
+    const cid = String(c.id ?? '')
+    if (cid) parentByCustomerId.set(cid, parent)
     if (!parent) continue
     if (!customersByParent.has(parent)) customersByParent.set(parent, [])
     customersByParent.get(parent).push(c)
@@ -495,14 +501,41 @@ async function main() {
     console.log(`  ${ym}: ${list.length} 件`)
     allOrdersRaw.push(...list)
   }
+  // 帰属解決ロジック:
+  //   1st: customer_id → parentByCustomerId（会員マスタの現在値・推奨）
+  //   2nd: 注文の captured parent_id（会員マスタで解決できなかった時のフォールバック）
+  //   カウンタで両経路の件数を可視化し、乖離が増えたら通知できるようにする。
   const ordersByParent = new Map()
+  let resolvedByMember = 0
+  let resolvedByCaptured = 0
+  let resolvedUnchanged = 0
+  let diffFromCaptured = 0
   for (const o of allOrdersRaw) {
-    const parent = parentIdOf(o)
-    if (!parent) continue
-    if (!ordersByParent.has(parent)) ordersByParent.set(parent, [])
-    ordersByParent.get(parent).push(o)
+    const captured = parentIdOf(o)
+    const cid = String(o.customer_id ?? '')
+    const fromMember = cid ? parentByCustomerId.get(cid) : null
+    const resolved = fromMember || captured
+    if (!resolved) continue
+    if (fromMember) {
+      resolvedByMember += 1
+      if (captured && captured !== fromMember) diffFromCaptured += 1
+      else resolvedUnchanged += 1
+    } else {
+      resolvedByCaptured += 1
+    }
+    if (!ordersByParent.has(resolved)) ordersByParent.set(resolved, [])
+    ordersByParent.get(resolved).push(o)
   }
-  console.log(`  合計: ${allOrdersRaw.length} 件（parent_id 付き: ${[...ordersByParent.values()].reduce((s, a) => s + a.length, 0)} 件）`)
+  const ordersWithParent = [...ordersByParent.values()].reduce((s, a) => s + a.length, 0)
+  console.log(
+    `  合計: ${allOrdersRaw.length} 件（帰属解決: ${ordersWithParent} 件 / ` +
+      `会員マスタ経由 ${resolvedByMember} / captured fallback ${resolvedByCaptured}）`,
+  )
+  if (diffFromCaptured > 0) {
+    console.log(
+      `  ℹ️  ${diffFromCaptured} 件は注文の captured parent_id と会員マスタの現在値が不一致（会員マスタ優先で解決済み）`,
+    )
+  }
   console.log('')
 
   const results = []
