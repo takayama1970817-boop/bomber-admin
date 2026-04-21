@@ -146,6 +146,12 @@ export default function Layout() {
       )}
       {isAdmin && <Item to="/admin/dealer-docs" label="代理店資料管理" onClick={closeMenu} />}
       {isAdmin && (
+        <MenuGroup label="研修管理">
+          <SubItem to="/admin/training-applications" label="研修案件" onClick={closeMenu} />
+          <SubItem to="/admin/training-types" label="研修種別マスタ" onClick={closeMenu} />
+        </MenuGroup>
+      )}
+      {isAdmin && (
         <MenuGroup label="設定">
           <SubItem to="/admin/general-settings" label="基本設定" onClick={closeMenu} />
           <SubItem to="/admin/kickback-settings" label="キックバック設定" onClick={closeMenu} />
