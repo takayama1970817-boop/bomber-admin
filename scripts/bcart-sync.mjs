@@ -179,6 +179,9 @@ async function main() {
   // 速報 (bcart-email) 行を昇格更新できるよう、id と source を保持する
   console.log('3. Firestore既存データ確認中...')
   const existingSnap = await getDocs(collection(db, 'orders'))
+  // bcartCode と bcartOrderNumber は同値のことが多いが、旧データで異なる
+  // ケースがあるため両方を Map キーに入れて dedup 判定の取りこぼしを防ぐ。
+  // どちらか一方しか入っていない古い行も同じ既存 entry を指すよう冗長登録する。
   const existingByCode = new Map()
   let emailCount = 0
   let apiCount = 0
