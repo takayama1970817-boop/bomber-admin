@@ -269,6 +269,14 @@ export default function TrainingApplications() {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-2xl font-bold">研修案件管理</h1>
         <div className="flex gap-2">
+          <a
+            href="/docs/training-manual.pdf"
+            download="VAVITTE研修管理_操作マニュアル.pdf"
+            className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
+            title="研修管理 操作マニュアル（PDF をダウンロードします）"
+          >
+            説明書（DL）
+          </a>
           <Link
             to="/admin/training-types"
             className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
