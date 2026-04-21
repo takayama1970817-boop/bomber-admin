@@ -49,6 +49,9 @@ const serviceAccount = JSON.parse(readFileSync(SERVICE_ACCOUNT_PATH, 'utf8'))
 initializeApp({ credential: cert(serviceAccount) })
 const db = getFirestore()
 
+const SERVICE_ACCOUNT_PROJECT_ID = serviceAccount.project_id || '(unknown)'
+const SERVICE_ACCOUNT_EMAIL = serviceAccount.client_email || '(unknown)'
+
 const BCART_TOKEN = getBcartToken()
 const DRY_RUN = process.env.DRY_RUN !== 'false'
 const OPERATOR = process.env.OPERATOR || 'unknown'
@@ -164,6 +167,29 @@ async function main() {
   console.log(`対象期間 : ${FROM_DATE} 〜 ${TO_DATE}`)
   console.log(`対象Jコード: ${[...TARGET_JCODES].join(', ')}`)
   console.log('')
+  console.log('▶ Firebase 接続診断')
+  console.log(`  service-account.json projectId : ${SERVICE_ACCOUNT_PROJECT_ID}`)
+  console.log(`  service-account.json client_email: ${SERVICE_ACCOUNT_EMAIL}`)
+  console.log(`  Firestore app projectId        : ${db.app?.options?.projectId || '(unknown)'}`)
+
+  // Firestore 接続診断: 既知コレクションの件数を取得して接続が活きていることを確認
+  const probeCollections = ['orders', 'allowedEmails', 'dealerSalons', 'dealerMonthlySnapshots']
+  for (const name of probeCollections) {
+    try {
+      const aggSnap = await db.collection(name).count().get()
+      const count = aggSnap.data().count
+      console.log(`  collection '${name}': ${count} 件`)
+    } catch (err) {
+      // count() が使えない環境向けのフォールバック
+      try {
+        const sampleSnap = await db.collection(name).limit(1).get()
+        console.log(`  collection '${name}': 件数取得失敗 / sample ${sampleSnap.size} 件 (count error: ${err.message})`)
+      } catch (innerErr) {
+        console.log(`  collection '${name}': 取得不能 (${innerErr.message})`)
+      }
+    }
+  }
+  console.log('')
 
   // 1. Bcart 会員マスタ取得 → customerId → current parent_id マップ
   console.log('▶ Bカート 会員一覧取得中...')
@@ -182,16 +208,42 @@ async function main() {
   console.log('')
 
   // 2. Firestore orders 取得 → bcartOrderId / bcartOrderNumber でルックアップマップ構築
+  //    Admin SDK は Firestore の rules を bypass するため、コレクションが存在し
+  //    ドキュメントがあれば必ず取得できる。0 件なら project 違いか rules ではなく
+  //    実際にコレクションが空であることを意味する。
   console.log('▶ Firestore orders 取得中...')
   const fsSnap = await db.collection('orders').get()
   const fsById = new Map()
   const fsByCode = new Map()
+  let withBcartId = 0
+  let withBcartCode = 0
+  let withDealerCode = 0
   fsSnap.forEach((d) => {
     const data = d.data()
-    if (data.bcartOrderId != null) fsById.set(String(data.bcartOrderId), { docId: d.id, data })
-    if (data.bcartOrderNumber) fsByCode.set(String(data.bcartOrderNumber), { docId: d.id, data })
+    if (data.bcartOrderId != null) {
+      fsById.set(String(data.bcartOrderId), { docId: d.id, data })
+      withBcartId += 1
+    }
+    if (data.bcartOrderNumber) {
+      fsByCode.set(String(data.bcartOrderNumber), { docId: d.id, data })
+      withBcartCode += 1
+    }
+    if (data.dealerCode !== undefined) withDealerCode += 1
   })
   console.log(`  Firestore orders 総件数: ${fsSnap.size} 件`)
+  console.log(`    bcartOrderId 付き  : ${withBcartId} 件`)
+  console.log(`    bcartOrderNumber 付き: ${withBcartCode} 件`)
+  console.log(`    dealerCode フィールド付き: ${withDealerCode} 件`)
+
+  if (fsSnap.size === 0) {
+    console.log('')
+    console.error('❌ Firestore の orders コレクションが 0 件です。以下を確認してください:')
+    console.error(`   1) service-account.json の projectId は本番と一致しているか? (${SERVICE_ACCOUNT_PROJECT_ID})`)
+    console.error('   2) Firebase Console → Firestore で orders コレクションが見えるか?')
+    console.error('   3) backfill-dealer-code.mjs と同じ scripts/service-account.json を使っているか?')
+    console.error('   この状態では復旧対象を特定できないため終了します。')
+    process.exit(1)
+  }
   console.log('')
 
   // 3. Bcart 受注取得（対象期間）
