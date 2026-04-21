@@ -766,11 +766,12 @@ service cloud.firestore {
 
     // ========================================
     // trainingApplications コレクション（研修案件本体）
-    // PR-1 導入（2026-04-21）。
+    // PR-1 導入（2026-04-21）。PR-2 で documents / documentHistory を追加。
     // - admin のみ読み書き可
     // - 物理削除は禁止（cancelled ステータスで運用）
-    // - history サブコレクション: ステータス変更履歴（追記型）
-    // - documents サブコレクション は PR-2 で追加予定
+    // - history              : ステータス変更履歴（追記型）
+    // - documents            : 発行物（PR-2 追加、採番フィールド不変チェック付き）
+    // - documentHistory      : 発行・再印刷の追記型履歴
     // ========================================
     match /trainingApplications/{appId} {
       allow read:  if isAdmin();
@@ -784,6 +785,43 @@ service cloud.firestore {
                        && request.resource.data.actorUid == request.auth.uid;
         allow update, delete: if false;
       }
+
+      // 発行物サブコレクション（PR-2）
+      // create で採番フィールドを含めて固定、update では採番系を不変に保つ
+      match /documents/{docId} {
+        allow read:   if isAdmin();
+        allow create: if isAdmin();
+        // 採番系（documentType / documentNumber / numberYear / numberSeq / issuedAt）は不変
+        allow update: if isAdmin()
+                       && resource.data.documentType == request.resource.data.documentType
+                       && resource.data.documentNumber == request.resource.data.documentNumber
+                       && resource.data.numberYear == request.resource.data.numberYear
+                       && resource.data.numberSeq == request.resource.data.numberSeq
+                       && resource.data.issuedAt == request.resource.data.issuedAt;
+        allow delete: if false;
+      }
+
+      // 発行・再印刷の履歴（追記型・PR-2）
+      // history と同じく actorUid スプーフィング対策付き
+      match /documentHistory/{historyId} {
+        allow read:   if isAdmin();
+        allow create: if isAdmin()
+                       && request.resource.data.actorUid == request.auth.uid;
+        allow update, delete: if false;
+      }
+    }
+
+    // ========================================
+    // counters コレクション（研修発行物の採番カウンタ・PR-2）
+    // docId は `trainingDocuments_{diploma|certified_salon_award}_YYYY` 限定。
+    // クライアント側 transaction で +1 する前提のため admin に write を許可。
+    // 将来、他用途の counters を追加する場合は別の正規表現で個別に許可する。
+    // ========================================
+    match /counters/{docId} {
+      allow read:  if isAdmin()
+                    && docId.matches('^trainingDocuments_(diploma|certified_salon_award)_[0-9]{4}$');
+      allow write: if isAdmin()
+                    && docId.matches('^trainingDocuments_(diploma|certified_salon_award)_[0-9]{4}$');
     }
 
     // ========================================
