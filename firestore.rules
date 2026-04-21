@@ -603,6 +603,16 @@ service cloud.firestore {
     }
 
     // ========================================
+    // dealerSalonsRebuildLogs コレクション（dealerSalons 再構築スクリプトの監査ログ）
+    // - write: 完全禁止（rebuild-dealer-salons.mjs のみ）
+    // - read: 本社 admin のみ
+    // ========================================
+    match /dealerSalonsRebuildLogs/{logId} {
+      allow read:  if isAdmin();
+      allow write: if false;
+    }
+
+    // ========================================
     // salonProducts コレクション（サロン管理：店販レコメンド用商品マスタ）
     // 全サロンが共有するカタログ。読み取りはログイン済み全員、書き込みは admin/staff のみ
     // ========================================
