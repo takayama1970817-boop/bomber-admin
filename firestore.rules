@@ -613,6 +613,16 @@ service cloud.firestore {
     }
 
     // ========================================
+    // dealerRegistrationLogs コレクション（代理店 allowedEmails 自動登録スクリプトの監査ログ）
+    // - write: 完全禁止（register-missing-dealers.mjs のみ）
+    // - read: 本社 admin のみ
+    // ========================================
+    match /dealerRegistrationLogs/{logId} {
+      allow read:  if isAdmin();
+      allow write: if false;
+    }
+
+    // ========================================
     // salonProducts コレクション（サロン管理：店販レコメンド用商品マスタ）
     // 全サロンが共有するカタログ。読み取りはログイン済み全員、書き込みは admin/staff のみ
     // ========================================
