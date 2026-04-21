@@ -120,3 +120,19 @@ bomber-admin/
 ## 開発支援
 
 - AI 自動 PR レビュー → [docs/ai-pr-review.md](docs/ai-pr-review.md)
+
+## 本番デプロイ（自動）
+
+- `main` ブランチへの push で、GitHub Actions（`.github/workflows/deploy-production.yml`）が自動起動
+- 対象は **Firestore rules + Hosting のみ**（functions / storage.rules / 各種 scripts は対象外）
+- 認証は GitHub Secret `FIREBASE_SERVICE_ACCOUNT_BOMBER_ADMIN`（Firebase service account JSON 全文）を使用
+- 手動での `firebase deploy` は原則不要。緊急時は `scripts/ops/deploy-prod.ps1` を社長手元で実行可能
+
+### GitHub Secrets の初回設定
+
+1. Firebase Console → プロジェクト設定 → サービスアカウント → 「新しい秘密鍵を生成」で JSON ダウンロード
+2. GitHub → リポジトリ → Settings → Secrets and variables → Actions → New repository secret
+3. Name: `FIREBASE_SERVICE_ACCOUNT_BOMBER_ADMIN`、Value: JSON 全文をそのまま貼る
+4. 該当 service account に Firebase Hosting Admin / Cloud Datastore Owner 等の roles を付与
+
+詳細なデプロイ運用 → [scripts/ops/README.md](scripts/ops/README.md)

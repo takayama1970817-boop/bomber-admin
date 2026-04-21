@@ -1,0 +1,121 @@
+name: Deploy production (rules + hosting)
+
+# 目的:
+#   main への push で、本番（bomber-admin）の Firestore rules と Hosting を
+#   自動デプロイする。社長がローカルで `firebase deploy` を叩く運用をやめ、
+#   GitHub Actions に寄せることが目的。
+#
+# 方針転換の文脈:
+#   「AI はもう本番操作を叩かない」「人が判断するのではなく、仕組みが自動で
+#   止まる or 完走する状態を正とする」に基づく Step 2。
+#   Step 1（scripts/ops/*.ps1）とあわせて、本番反映の手段は
+#   (a) main マージで自動 / (b) scripts/ops で手動 の2通りに集約される。
+#
+# スコープ:
+#   - 対象: Firestore rules + Hosting のみ
+#   - 非対象: functions / storage.rules / extensions / backfill スクリプト
+#     （仕様書「今回やらないこと」に準拠。広げない）
+#   - トリガー: main ブランチへの push のみ（PR 作成では本番反映しない）
+#     ただし手動実行も許容（workflow_dispatch）
+#
+# 認証:
+#   - GitHub Secret: FIREBASE_SERVICE_ACCOUNT_BOMBER_ADMIN（service account JSON 全文）
+#   - google-github-actions/auth@v2 を使用（既存 deploy-test.yml と同じ方式）
+#   - JSON 鍵ファイルを repo に置かない
+#
+# 既存 workflow との関係（重要な注意点）:
+#   - `.github/workflows/deploy.yml` が既に main push で functions+rules+hosting を
+#     bomber-admin-prod にデプロイしている（drill-log-gate 付き）
+#   - 本ワークフローは bomber-admin（プロジェクト名が違う点に注意）への
+#     rules + hosting のみを対象とする軽量版
+#   - 同時起動する場合は、社長が既存 deploy.yml 側の発火条件を調整する想定
+#     （本 PR のスコープ外、別途判断）
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# 同じブランチへの連続 push は後続のジョブで置き換える（無駄なデプロイを減らす）
+concurrency:
+  group: deploy-production-${{ github.ref }}
+  cancel-in-progress: false # デプロイ中断は避ける。後続は順番待ち
+
+jobs:
+  deploy:
+    name: Deploy rules + hosting to production
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      # google-github-actions/auth がトークンを発行するために必要
+      id-token: write
+
+    steps:
+      # -----------------------------------------------
+      # 1. Checkout
+      # -----------------------------------------------
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      # -----------------------------------------------
+      # 2. Setup Node (20 LTS)
+      # -----------------------------------------------
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      # -----------------------------------------------
+      # 3. Install dependencies (frontend)
+      # -----------------------------------------------
+      - name: Install dependencies
+        run: npm ci
+
+      # -----------------------------------------------
+      # 4. Build app (失敗したら後続 deploy はスキップ)
+      # -----------------------------------------------
+      - name: Build app
+        run: npm run build
+
+      # -----------------------------------------------
+      # 5. Authenticate with Firebase (service account JSON)
+      # -----------------------------------------------
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_BOMBER_ADMIN }}
+
+      # -----------------------------------------------
+      # 6. Install Firebase CLI
+      # -----------------------------------------------
+      - name: Install Firebase CLI
+        run: npm install -g firebase-tools@latest
+
+      # -----------------------------------------------
+      # 7. Deploy Firestore rules
+      #    失敗したら後続 hosting に進まない（needs 指定不要、step 失敗で job が止まる）
+      # -----------------------------------------------
+      - name: Deploy Firestore rules
+        run: firebase deploy --only firestore:rules --project bomber-admin --non-interactive
+
+      # -----------------------------------------------
+      # 8. Deploy Hosting
+      # -----------------------------------------------
+      - name: Deploy Hosting
+        run: firebase deploy --only hosting --project bomber-admin --non-interactive
+
+      # -----------------------------------------------
+      # 9. 完了サマリー（GitHub Actions ログで見やすく）
+      # -----------------------------------------------
+      - name: Summary
+        run: |
+          echo "## ✅ 本番デプロイ完了" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- Project: bomber-admin" >> $GITHUB_STEP_SUMMARY
+          echo "- Deployed: Firestore rules + Hosting" >> $GITHUB_STEP_SUMMARY
+          echo "- Hosting URL: https://bomber-admin.web.app" >> $GITHUB_STEP_SUMMARY
+          echo "- Console: https://console.firebase.google.com/project/bomber-admin/overview" >> $GITHUB_STEP_SUMMARY
