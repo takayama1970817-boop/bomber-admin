@@ -1,0 +1,137 @@
+name: Init settlement_automation (production)
+
+# 目的:
+#   bomber-admin（本番）の settings/settlement_automation ドキュメントを
+#   enabled=false で初期化する。明示的な手動トリガー専用。
+#
+# 設計方針:
+#   - workflow_dispatch のみ（push では絶対に発火しない）
+#   - confirm_production 入力で 'production' 必須（誤爆防止）
+#   - デフォルトは DRY RUN（書き込みしない）
+#   - 本番書き込みするには apply=true を明示指定
+#   - SA project_id が bomber-admin 以外なら即中断
+#   - FIREBASE_SERVICE_ACCOUNT_PROD（test と別 Secret）
+#
+# 関連:
+#   - scripts/init-settlement-automation.mjs（v1.2 以降 ADC 対応）
+#   - docs/05_PHASE2_AUTOMATION.md §1.9
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_production:
+        description: '本番初期化であることを理解しています（production と入力）'
+        required: true
+        type: string
+        default: ''
+      apply:
+        description: 'true で実書き込み / false は DRY RUN（デフォルト）'
+        required: true
+        type: choice
+        default: 'false'
+        options:
+          - 'false'
+          - 'true'
+      force_overwrite:
+        description: '既存ドキュメントを上書きする場合のみ true（通常は false）'
+        required: true
+        type: choice
+        default: 'false'
+        options:
+          - 'false'
+          - 'true'
+      acknowledge_enabled_override:
+        description: '運用中 (enabled=true) を false に落とす場合のみ true'
+        required: true
+        type: choice
+        default: 'false'
+        options:
+          - 'false'
+          - 'true'
+
+jobs:
+  guard:
+    name: 🛡 本番初期化確認ガード
+    runs-on: ubuntu-latest
+    steps:
+      - name: confirm_production 入力チェック
+        run: |
+          if [ "${{ inputs.confirm_production }}" != "production" ]; then
+            echo "❌ confirm_production に 'production' と入力してください。"
+            exit 1
+          fi
+          echo "✅ 本番初期化確認 OK"
+          echo "- apply: ${{ inputs.apply }}"
+          echo "- force_overwrite: ${{ inputs.force_overwrite }}"
+          echo "- acknowledge_enabled_override: ${{ inputs.acknowledge_enabled_override }}"
+
+  init-prod:
+    name: settings/settlement_automation 初期化
+    needs: guard
+    runs-on: ubuntu-latest
+
+    concurrency:
+      group: init-prod
+      cancel-in-progress: false
+
+    steps:
+      - name: チェックアウト
+        uses: actions/checkout@v4
+
+      - name: Node セットアップ
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: firebase-admin インストール
+        run: |
+          npm init -y
+          npm install firebase-admin
+
+      - name: Google 認証（本番サービスアカウント）
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_PROD }}
+
+      - name: プロジェクト ID 確認（bomber-admin 固定ガード）
+        run: |
+          SA_PROJECT=$(cat "${GOOGLE_APPLICATION_CREDENTIALS}" | grep -o '"project_id":[^,]*' | head -1)
+          echo "Service Account project: ${SA_PROJECT}"
+          if ! echo "${SA_PROJECT}" | grep -q '"bomber-admin"'; then
+            echo "❌ Service Account が bomber-admin（本番）以外を指しています。"
+            echo "   想定: bomber-admin / 検知: ${SA_PROJECT}"
+            echo "   FIREBASE_SERVICE_ACCOUNT_PROD が test 用になっていないか確認してください。"
+            exit 1
+          fi
+
+      - name: 初期化スクリプト実行
+        env:
+          DRY_RUN: ${{ inputs.apply == 'true' && 'false' || 'true' }}
+          FORCE_OVERWRITE: ${{ inputs.force_overwrite }}
+          ACKNOWLEDGE_ENABLED_OVERRIDE: ${{ inputs.acknowledge_enabled_override }}
+        run: |
+          node scripts/init-settlement-automation.mjs
+
+      - name: 実行完了サマリ
+        if: success()
+        run: |
+          echo "✅ 実行完了"
+          echo "- apply: ${{ inputs.apply }}（true=実書き込み / false=DRY RUN）"
+          echo ""
+          if [ "${{ inputs.apply }}" = "false" ]; then
+            echo "次ステップ候補:"
+            echo "  - apply=true で再実行（実書き込み）"
+          else
+            echo "次ステップ候補:"
+            echo "  - dryrun-prod.yml で createMonthlySettlement / detectDuplicates を検証"
+          fi
+
+      - name: 失敗時のガイド
+        if: failure()
+        run: |
+          echo "❌ 失敗"
+          echo "想定原因:"
+          echo "  1. FIREBASE_SERVICE_ACCOUNT_PROD が未登録または test 用"
+          echo "  2. SA ロール不足（Cloud Datastore ユーザー以上）"
+          echo "  3. 既存ドキュメントが enabled=true で ACKNOWLEDGE_ENABLED_OVERRIDE なし"
+          echo "  4. force_overwrite なしで既存ドキュメント検出（スキップ=exit 0 のはずなので稀）"

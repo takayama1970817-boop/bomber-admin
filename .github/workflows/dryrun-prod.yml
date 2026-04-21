@@ -1,0 +1,121 @@
+name: DryRun Verify (production)
+
+# 目的:
+#   bomber-admin（本番）で Phase 2 段階1 の関数を dryRun 相当で検証する。
+#   書き込みは一切発生しない（Admin SDK 読み取り走査のみ）。
+#
+# 設計方針:
+#   - workflow_dispatch のみ（push では絶対に発火しない）
+#   - confirm_production 入力で 'production' 必須
+#   - SA project_id が bomber-admin 以外なら即中断
+#   - FIREBASE_SERVICE_ACCOUNT_PROD（test と別 Secret）
+#   - dryrun-test.yml と関数・入力・出力の仕様を揃え、プロジェクト切替のみ差分
+#
+# 関連:
+#   - scripts/ci-dryrun.mjs（test / prod 共通）
+#   - .github/workflows/dryrun-test.yml（test 版）
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_production:
+        description: '本番 DryRun 検証であることを理解しています（production と入力）'
+        required: true
+        type: string
+        default: ''
+      function_name:
+        description: '検証対象の関数'
+        required: true
+        default: 'createMonthlySettlement'
+        type: choice
+        options:
+          - createMonthlySettlement
+          - detectDuplicates
+      target_month:
+        description: '対象月 (YYYY-MM 形式、省略時は前月)'
+        required: false
+        type: string
+        default: ''
+
+jobs:
+  guard:
+    name: 🛡 本番 DryRun 確認ガード
+    runs-on: ubuntu-latest
+    steps:
+      - name: confirm_production 入力チェック
+        run: |
+          if [ "${{ inputs.confirm_production }}" != "production" ]; then
+            echo "❌ confirm_production に 'production' と入力してください。"
+            exit 1
+          fi
+          echo "✅ 本番 DryRun 確認 OK"
+
+  dryrun-prod:
+    name: DryRun 検証（production）
+    needs: guard
+    runs-on: ubuntu-latest
+
+    concurrency:
+      group: dryrun-prod-${{ inputs.function_name }}
+      cancel-in-progress: false
+
+    steps:
+      - name: チェックアウト
+        uses: actions/checkout@v4
+
+      - name: Node セットアップ
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: firebase-admin インストール
+        run: |
+          # scripts/ci-dryrun.mjs は firebase-admin のみ使用
+          npm init -y
+          npm install firebase-admin
+
+      - name: Google 認証（本番サービスアカウント）
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_PROD }}
+
+      - name: プロジェクト ID 確認（bomber-admin 固定ガード）
+        run: |
+          SA_PROJECT=$(cat "${GOOGLE_APPLICATION_CREDENTIALS}" | grep -o '"project_id":[^,]*' | head -1)
+          echo "Service Account project: ${SA_PROJECT}"
+          if ! echo "${SA_PROJECT}" | grep -q '"bomber-admin"'; then
+            echo "❌ Service Account が bomber-admin（本番）以外を指しています。"
+            echo "   想定: bomber-admin / 検知: ${SA_PROJECT}"
+            exit 1
+          fi
+
+      - name: DryRun 実行
+        run: |
+          node scripts/ci-dryrun.mjs \
+            "${{ inputs.function_name }}" \
+            "${{ inputs.target_month }}"
+
+      - name: 実行完了
+        if: success()
+        run: |
+          echo "✅ 本番 DryRun 完了"
+          echo "- 関数: ${{ inputs.function_name }}"
+          echo "- 対象月: ${{ inputs.target_month }} (空なら前月)"
+          echo "- 結果は Step Summary を参照"
+          echo ""
+          echo "注意:"
+          echo "  - 本番データへの書き込みは発生していません（Admin SDK 読み取りのみ）"
+          echo "  - 実関数の呼び出しではなく予測走査です"
+
+      - name: 失敗時のガイド
+        if: failure()
+        run: |
+          echo "❌ 本番 DryRun 失敗"
+          echo ""
+          echo "想定原因と対応:"
+          echo "  1. FIREBASE_SERVICE_ACCOUNT_PROD 未登録 or test 用"
+          echo "  2. SA のロール不足（Cloud Datastore ユーザー以上が必要）"
+          echo "  3. settings/settlement_automation が未初期化"
+          echo "     → init-prod.yml を先に実行"
+          echo "  4. dealers コレクションに active==true の代理店が 0 件"
+          echo "     → 本番代理店データを確認"
