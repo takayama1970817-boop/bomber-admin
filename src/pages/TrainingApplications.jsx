@@ -1,0 +1,555 @@
+import { useEffect, useMemo, useState } from 'react'
+import { Link, useNavigate } from 'react-router-dom'
+import {
+  addDoc,
+  collection,
+  getDocs,
+  orderBy,
+  query,
+  serverTimestamp,
+  where,
+} from 'firebase/firestore'
+import { db } from '../lib/firebase.js'
+import { useAuth } from '../contexts/AuthContext.jsx'
+import { assertCan, canManageTraining } from '../lib/permissions.js'
+import {
+  APPLICATION_TYPE,
+  APPLICATION_TYPE_LABEL,
+  TRAINER_TYPE,
+  TRAINING_STATUS,
+  TRAINING_STATUS_LABEL,
+  TRAINING_STATUS_COLOR,
+  generateApplicationNumber,
+} from '../lib/trainingStatus.js'
+
+/**
+ * 研修案件 一覧（PR-1）
+ * - コレクション: trainingApplications
+ * - 新規作成はモーダルから最小項目だけで登録
+ * - 絞り込み: 申込区分 / ステータス / 研修種別 / フリーテキスト
+ * - 本格的な絞り込み（日付レンジ / 未発行 / 未発送 / 未受取）は PR-4
+ */
+
+function fmtDate(ts) {
+  if (!ts) return '—'
+  const d = ts.toDate ? ts.toDate() : new Date(ts)
+  return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`
+}
+
+const EMPTY_NEW = {
+  applicationType: 'head_office_direct',
+  trainerType: 'head_office',
+  attendeeName: '',
+  attendeeContact: '',
+  attendeeAffiliation: '',
+  salonId: '',
+  salonName: '',
+  salonRepresentativeName: '',
+  dealerCode: '',
+  dealerName: '',
+  dealerPersonName: '',
+  trainingTypeId: '',
+  trainingScheduledDate: '',
+  note: '',
+}
+
+export default function TrainingApplications() {
+  const { profile } = useAuth()
+  const navigate = useNavigate()
+  const [rows, setRows] = useState([])
+  const [types, setTypes] = useState([])
+  const [dealers, setDealers] = useState([])
+  const [salons, setSalons] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [message, setMessage] = useState('')
+  const [showNew, setShowNew] = useState(false)
+  const [newForm, setNewForm] = useState(EMPTY_NEW)
+  const [busy, setBusy] = useState(false)
+
+  const [fType, setFType] = useState('all')
+  const [fStatus, setFStatus] = useState('all')
+  const [fTrainingType, setFTrainingType] = useState('all')
+  const [fKeyword, setFKeyword] = useState('')
+
+  const canEdit = canManageTraining(profile)
+
+  async function loadAll() {
+    setLoading(true)
+    try {
+      const [appsSnap, typesSnap, dealersSnap, salonsSnap] = await Promise.all([
+        getDocs(query(collection(db, 'trainingApplications'), orderBy('applicationDate', 'desc'))),
+        getDocs(query(collection(db, 'trainingTypes'), orderBy('sortOrder', 'asc'))),
+        getDocs(collection(db, 'dealers')).catch(() => ({ docs: [] })),
+        getDocs(collection(db, 'salons')).catch(() => ({ docs: [] })),
+      ])
+      setRows(appsSnap.docs.map((d) => ({ id: d.id, ...d.data() })))
+      setTypes(typesSnap.docs.map((d) => ({ id: d.id, ...d.data() })))
+      setDealers(dealersSnap.docs.map((d) => ({ id: d.id, ...d.data() })))
+      setSalons(salonsSnap.docs.map((d) => ({ id: d.id, ...d.data() })))
+    } catch (e) {
+      console.error(e)
+      setMessage(`読み込みエラー: ${e.message}`)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => { loadAll() }, [])
+
+  const typeById = useMemo(() => {
+    const m = {}
+    types.forEach((t) => { m[t.id] = t })
+    return m
+  }, [types])
+
+  const filtered = useMemo(() => {
+    const k = fKeyword.trim().toLowerCase()
+    return rows.filter((r) => {
+      if (fType !== 'all' && r.applicationType !== fType) return false
+      if (fStatus !== 'all' && r.status !== fStatus) return false
+      if (fTrainingType !== 'all' && r.trainingTypeId !== fTrainingType) return false
+      if (!k) return true
+      const hay = [
+        r.applicationNumber, r.attendeeName, r.salonName,
+        r.dealerName, r.dealerCode, r.trainingName,
+      ].filter(Boolean).join(' ').toLowerCase()
+      return hay.includes(k)
+    })
+  }, [rows, fType, fStatus, fTrainingType, fKeyword])
+
+  function openNew() {
+    setNewForm(EMPTY_NEW)
+    setShowNew(true)
+    setMessage('')
+  }
+
+  function onSelectSalon(salonId) {
+    const s = salons.find((x) => x.id === salonId)
+    setNewForm((prev) => ({
+      ...prev,
+      salonId,
+      salonName: s?.companyName || prev.salonName,
+      salonRepresentativeName: s?.representativeName || prev.salonRepresentativeName,
+    }))
+  }
+
+  function onSelectDealer(dealerCode) {
+    const d = dealers.find((x) => x.dealerCode === dealerCode || x.id === dealerCode)
+    setNewForm((prev) => ({
+      ...prev,
+      dealerCode: d?.dealerCode || dealerCode,
+      dealerName: d?.name || d?.dealerName || prev.dealerName,
+    }))
+  }
+
+  async function createApplication() {
+    try {
+      assertCan(canManageTraining, profile, {
+        userMessage: '研修案件の作成権限がありません',
+      })
+      if (!newForm.attendeeName.trim()) {
+        setMessage('受講者名は必須です')
+        return
+      }
+      if (!newForm.trainingTypeId) {
+        setMessage('研修種別を選択してください')
+        return
+      }
+      if (newForm.applicationType === 'dealer' && !newForm.dealerName.trim()) {
+        setMessage('代理店経由の申込では代理店名が必須です')
+        return
+      }
+      setBusy(true)
+      const selectedType = typeById[newForm.trainingTypeId]
+      const scheduled = newForm.trainingScheduledDate
+        ? new Date(newForm.trainingScheduledDate)
+        : null
+      const initialStatus = scheduled
+        ? TRAINING_STATUS.TRAINING_SCHEDULED
+        : TRAINING_STATUS.APPLICATION_RECEIVED
+
+      const payload = {
+        applicationNumber: generateApplicationNumber(),
+        applicationDate: serverTimestamp(),
+        applicationType: newForm.applicationType,
+        trainerType: newForm.trainerType,
+        attendeeName: newForm.attendeeName.trim(),
+        attendeeContact: newForm.attendeeContact || '',
+        attendeeAffiliation: newForm.attendeeAffiliation || '',
+        salonId: newForm.salonId || null,
+        salonName: newForm.salonName || '',
+        salonRepresentativeName: newForm.salonRepresentativeName || '',
+        dealerCode: newForm.applicationType === 'dealer' ? (newForm.dealerCode || '') : '',
+        dealerName: newForm.applicationType === 'dealer' ? (newForm.dealerName || '') : '',
+        dealerPersonName: newForm.applicationType === 'dealer' ? (newForm.dealerPersonName || '') : '',
+        dealerReportConfirmed: false,
+        dealerReportConfirmedAt: null,
+        trainingTypeId: newForm.trainingTypeId,
+        trainingTypeCode: selectedType?.code || '',
+        trainingName: selectedType?.name || '',
+        trainingScheduledDate: scheduled,
+        trainingCompletedDate: null,
+        status: initialStatus,
+        note: newForm.note || '',
+        shippedAt: null,
+        shippedMethod: '',
+        trackingNumber: '',
+        receivedAt: null,
+        createdAt: serverTimestamp(),
+        createdBy: profile?.uid || null,
+        updatedAt: serverTimestamp(),
+        updatedBy: profile?.uid || null,
+      }
+      const ref = await addDoc(collection(db, 'trainingApplications'), payload)
+      // 初期ステータスを履歴に記録
+      await addDoc(collection(db, 'trainingApplications', ref.id, 'history'), {
+        from: null,
+        to: initialStatus,
+        actorUid: profile?.uid || null,
+        actorName: profile?.name || profile?.email || '',
+        comment: '申込登録',
+        createdAt: serverTimestamp(),
+      })
+      setShowNew(false)
+      setMessage(`申込を登録しました: ${payload.applicationNumber}`)
+      navigate(`/admin/training-applications/${ref.id}`)
+    } catch (e) {
+      console.error(e)
+      setMessage(`登録エラー: ${e.message}`)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (!canEdit) {
+    return <div className="p-6 text-sm text-red-600">この画面の閲覧権限がありません。</div>
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h1 className="text-2xl font-bold">研修案件管理</h1>
+        <div className="flex gap-2">
+          <Link
+            to="/admin/training-types"
+            className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
+          >
+            研修種別マスタ
+          </Link>
+          <button
+            onClick={openNew}
+            className="rounded-lg bg-indigo-600 px-3 py-2 text-sm font-semibold text-white hover:bg-indigo-700"
+          >
+            + 新規申込
+          </button>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 gap-2 rounded-lg border border-gray-200 bg-white p-3 md:grid-cols-4">
+        <label className="block text-sm">
+          <span className="text-xs text-gray-500">申込区分</span>
+          <select
+            value={fType}
+            onChange={(e) => setFType(e.target.value)}
+            className="mt-1 w-full rounded border border-gray-300 px-2 py-1.5 text-sm"
+          >
+            <option value="all">すべて</option>
+            <option value={APPLICATION_TYPE.HEAD_OFFICE_DIRECT}>本社直</option>
+            <option value={APPLICATION_TYPE.DEALER}>代理店経由</option>
+          </select>
+        </label>
+        <label className="block text-sm">
+          <span className="text-xs text-gray-500">ステータス</span>
+          <select
+            value={fStatus}
+            onChange={(e) => setFStatus(e.target.value)}
+            className="mt-1 w-full rounded border border-gray-300 px-2 py-1.5 text-sm"
+          >
+            <option value="all">すべて</option>
+            {Object.entries(TRAINING_STATUS_LABEL).map(([k, v]) => (
+              <option key={k} value={k}>{v}</option>
+            ))}
+          </select>
+        </label>
+        <label className="block text-sm">
+          <span className="text-xs text-gray-500">研修種別</span>
+          <select
+            value={fTrainingType}
+            onChange={(e) => setFTrainingType(e.target.value)}
+            className="mt-1 w-full rounded border border-gray-300 px-2 py-1.5 text-sm"
+          >
+            <option value="all">すべて</option>
+            {types.map((t) => (
+              <option key={t.id} value={t.id}>{t.name}</option>
+            ))}
+          </select>
+        </label>
+        <label className="block text-sm">
+          <span className="text-xs text-gray-500">キーワード（受講者 / サロン / 代理店 / 申込番号）</span>
+          <input
+            type="text"
+            value={fKeyword}
+            onChange={(e) => setFKeyword(e.target.value)}
+            className="mt-1 w-full rounded border border-gray-300 px-2 py-1.5 text-sm"
+            placeholder="氏名や会社名で検索"
+          />
+        </label>
+      </div>
+
+      {message && (
+        <div className="rounded border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-800">
+          {message}
+        </div>
+      )}
+
+      <div className="overflow-auto rounded-lg border border-gray-200 bg-white">
+        <table className="min-w-full text-sm">
+          <thead className="bg-gray-50 text-left text-gray-600">
+            <tr>
+              <th className="px-3 py-2">申込番号</th>
+              <th className="px-3 py-2">申込日</th>
+              <th className="px-3 py-2">区分</th>
+              <th className="px-3 py-2">研修種別</th>
+              <th className="px-3 py-2">受講者</th>
+              <th className="px-3 py-2">サロン</th>
+              <th className="px-3 py-2">代理店</th>
+              <th className="px-3 py-2">研修日</th>
+              <th className="px-3 py-2">ステータス</th>
+            </tr>
+          </thead>
+          <tbody>
+            {loading && (
+              <tr><td colSpan={9} className="px-3 py-6 text-center text-gray-400">読み込み中...</td></tr>
+            )}
+            {!loading && filtered.length === 0 && (
+              <tr>
+                <td colSpan={9} className="px-3 py-8 text-center text-gray-400">
+                  {rows.length === 0
+                    ? 'まだ研修案件がありません。「+ 新規申込」から登録してください。'
+                    : '条件に一致する案件がありません。'}
+                </td>
+              </tr>
+            )}
+            {filtered.map((r) => (
+              <tr
+                key={r.id}
+                onClick={() => navigate(`/admin/training-applications/${r.id}`)}
+                className="cursor-pointer border-t border-gray-100 hover:bg-gray-50"
+              >
+                <td className="px-3 py-2 font-mono text-xs">{r.applicationNumber || r.id.slice(0, 8)}</td>
+                <td className="px-3 py-2 text-xs text-gray-500">{fmtDate(r.applicationDate)}</td>
+                <td className="px-3 py-2">{APPLICATION_TYPE_LABEL[r.applicationType] || '—'}</td>
+                <td className="px-3 py-2">{r.trainingName || '—'}</td>
+                <td className="px-3 py-2">{r.attendeeName || '—'}</td>
+                <td className="px-3 py-2">{r.salonName || '—'}</td>
+                <td className="px-3 py-2">{r.dealerName || '—'}</td>
+                <td className="px-3 py-2 text-xs text-gray-500">
+                  {r.trainingCompletedDate
+                    ? `完了 ${fmtDate(r.trainingCompletedDate)}`
+                    : r.trainingScheduledDate
+                      ? `予定 ${fmtDate(r.trainingScheduledDate)}`
+                      : '—'}
+                </td>
+                <td className="px-3 py-2">
+                  <span className={`rounded px-2 py-0.5 text-xs ${TRAINING_STATUS_COLOR[r.status] || 'bg-gray-100 text-gray-600'}`}>
+                    {TRAINING_STATUS_LABEL[r.status] || r.status || '—'}
+                  </span>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {showNew && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4">
+          <div className="w-full max-w-2xl rounded-xl bg-white p-5 shadow-xl">
+            <h2 className="mb-3 text-lg font-bold">新規 研修申込</h2>
+
+            <div className="grid grid-cols-2 gap-3">
+              <label className="block text-sm">
+                <span className="text-xs text-gray-500">申込区分</span>
+                <select
+                  value={newForm.applicationType}
+                  onChange={(e) => setNewForm({
+                    ...newForm,
+                    applicationType: e.target.value,
+                    trainerType: e.target.value === 'dealer' ? TRAINER_TYPE.DEALER : TRAINER_TYPE.HEAD_OFFICE,
+                  })}
+                  className="mt-1 w-full rounded border border-gray-300 px-2 py-2 text-sm"
+                >
+                  <option value={APPLICATION_TYPE.HEAD_OFFICE_DIRECT}>本社直</option>
+                  <option value={APPLICATION_TYPE.DEALER}>代理店経由</option>
+                </select>
+              </label>
+              <label className="block text-sm">
+                <span className="text-xs text-gray-500">研修実施主体</span>
+                <select
+                  value={newForm.trainerType}
+                  onChange={(e) => setNewForm({ ...newForm, trainerType: e.target.value })}
+                  className="mt-1 w-full rounded border border-gray-300 px-2 py-2 text-sm"
+                >
+                  <option value={TRAINER_TYPE.HEAD_OFFICE}>本社</option>
+                  <option value={TRAINER_TYPE.DEALER}>代理店</option>
+                </select>
+              </label>
+
+              <label className="block text-sm">
+                <span className="text-xs text-gray-500">研修種別</span>
+                <select
+                  value={newForm.trainingTypeId}
+                  onChange={(e) => setNewForm({ ...newForm, trainingTypeId: e.target.value })}
+                  className="mt-1 w-full rounded border border-gray-300 px-2 py-2 text-sm"
+                >
+                  <option value="">選択してください</option>
+                  {types.filter((t) => t.isActive !== false).map((t) => (
+                    <option key={t.id} value={t.id}>{t.name}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="block text-sm">
+                <span className="text-xs text-gray-500">研修予定日（任意）</span>
+                <input
+                  type="date"
+                  value={newForm.trainingScheduledDate}
+                  onChange={(e) => setNewForm({ ...newForm, trainingScheduledDate: e.target.value })}
+                  className="mt-1 w-full rounded border border-gray-300 px-2 py-2 text-sm"
+                />
+              </label>
+
+              <label className="block text-sm">
+                <span className="text-xs text-gray-500">受講者名（必須）</span>
+                <input
+                  type="text"
+                  value={newForm.attendeeName}
+                  onChange={(e) => setNewForm({ ...newForm, attendeeName: e.target.value })}
+                  className="mt-1 w-full rounded border border-gray-300 px-2 py-2 text-sm"
+                />
+              </label>
+              <label className="block text-sm">
+                <span className="text-xs text-gray-500">受講者 連絡先</span>
+                <input
+                  type="text"
+                  value={newForm.attendeeContact}
+                  onChange={(e) => setNewForm({ ...newForm, attendeeContact: e.target.value })}
+                  className="mt-1 w-full rounded border border-gray-300 px-2 py-2 text-sm"
+                  placeholder="メール / 電話"
+                />
+              </label>
+              <label className="col-span-2 block text-sm">
+                <span className="text-xs text-gray-500">所属</span>
+                <input
+                  type="text"
+                  value={newForm.attendeeAffiliation}
+                  onChange={(e) => setNewForm({ ...newForm, attendeeAffiliation: e.target.value })}
+                  className="mt-1 w-full rounded border border-gray-300 px-2 py-2 text-sm"
+                />
+              </label>
+
+              <div className="col-span-2 mt-1 border-t border-gray-100 pt-2 text-sm font-semibold text-gray-700">サロン情報</div>
+              <label className="block text-sm">
+                <span className="text-xs text-gray-500">サロンを選択（任意）</span>
+                <select
+                  value={newForm.salonId}
+                  onChange={(e) => onSelectSalon(e.target.value)}
+                  className="mt-1 w-full rounded border border-gray-300 px-2 py-2 text-sm"
+                >
+                  <option value="">（未選択・手入力）</option>
+                  {salons.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.companyName || s.name || s.id}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="block text-sm">
+                <span className="text-xs text-gray-500">サロン名</span>
+                <input
+                  type="text"
+                  value={newForm.salonName}
+                  onChange={(e) => setNewForm({ ...newForm, salonName: e.target.value, salonId: '' })}
+                  className="mt-1 w-full rounded border border-gray-300 px-2 py-2 text-sm"
+                />
+              </label>
+              <label className="col-span-2 block text-sm">
+                <span className="text-xs text-gray-500">代表者名</span>
+                <input
+                  type="text"
+                  value={newForm.salonRepresentativeName}
+                  onChange={(e) => setNewForm({ ...newForm, salonRepresentativeName: e.target.value })}
+                  className="mt-1 w-full rounded border border-gray-300 px-2 py-2 text-sm"
+                />
+              </label>
+
+              {newForm.applicationType === 'dealer' && (
+                <>
+                  <div className="col-span-2 mt-1 border-t border-gray-100 pt-2 text-sm font-semibold text-gray-700">代理店情報</div>
+                  <label className="block text-sm">
+                    <span className="text-xs text-gray-500">代理店を選択（任意）</span>
+                    <select
+                      value={newForm.dealerCode}
+                      onChange={(e) => onSelectDealer(e.target.value)}
+                      className="mt-1 w-full rounded border border-gray-300 px-2 py-2 text-sm"
+                    >
+                      <option value="">（未選択・手入力）</option>
+                      {dealers.map((d) => (
+                        <option key={d.id} value={d.dealerCode || d.id}>
+                          {(d.dealerCode ? `[${d.dealerCode}] ` : '') + (d.name || d.dealerName || d.id)}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="block text-sm">
+                    <span className="text-xs text-gray-500">代理店名</span>
+                    <input
+                      type="text"
+                      value={newForm.dealerName}
+                      onChange={(e) => setNewForm({ ...newForm, dealerName: e.target.value })}
+                      className="mt-1 w-full rounded border border-gray-300 px-2 py-2 text-sm"
+                    />
+                  </label>
+                  <label className="col-span-2 block text-sm">
+                    <span className="text-xs text-gray-500">代理店担当者名</span>
+                    <input
+                      type="text"
+                      value={newForm.dealerPersonName}
+                      onChange={(e) => setNewForm({ ...newForm, dealerPersonName: e.target.value })}
+                      className="mt-1 w-full rounded border border-gray-300 px-2 py-2 text-sm"
+                    />
+                  </label>
+                </>
+              )}
+
+              <label className="col-span-2 block text-sm">
+                <span className="text-xs text-gray-500">備考</span>
+                <textarea
+                  value={newForm.note}
+                  onChange={(e) => setNewForm({ ...newForm, note: e.target.value })}
+                  rows={2}
+                  className="mt-1 w-full rounded border border-gray-300 px-2 py-2 text-sm"
+                />
+              </label>
+            </div>
+
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                onClick={() => setShowNew(false)}
+                disabled={busy}
+                className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
+              >
+                キャンセル
+              </button>
+              <button
+                onClick={createApplication}
+                disabled={busy}
+                className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-700 disabled:opacity-50"
+              >
+                登録
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}

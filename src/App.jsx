@@ -60,6 +60,9 @@ import KickbackSettings from './pages/KickbackSettings.jsx'
 import PermissionSettings from './pages/PermissionSettings.jsx'
 import NewsletterManage from './pages/NewsletterManage.jsx'
 import ReaderManage from './pages/ReaderManage.jsx'
+import TrainingTypesAdmin from './pages/TrainingTypesAdmin.jsx'
+import TrainingApplications from './pages/TrainingApplications.jsx'
+import TrainingApplicationDetail from './pages/TrainingApplicationDetail.jsx'
 import ProtectedRoute from './components/ProtectedRoute.jsx'
 import Layout from './components/Layout.jsx'
 import { CompanyProvider } from './contexts/CompanyContext.jsx'
@@ -197,6 +200,9 @@ export default function App() {
         <Route path="/admin/settings" element={<ProtectedRoute requireRole="admin"><PermissionSettings /></ProtectedRoute>} />
         <Route path="/admin/newsletter" element={<ProtectedRoute requireRole="admin"><NewsletterManage /></ProtectedRoute>} />
         <Route path="/admin/readers" element={<ProtectedRoute requireRole="admin"><ReaderManage /></ProtectedRoute>} />
+        <Route path="/admin/training-types" element={<ProtectedRoute requireRole="admin"><TrainingTypesAdmin /></ProtectedRoute>} />
+        <Route path="/admin/training-applications" element={<ProtectedRoute requireRole="admin"><TrainingApplications /></ProtectedRoute>} />
+        <Route path="/admin/training-applications/:id" element={<ProtectedRoute requireRole="admin"><TrainingApplicationDetail /></ProtectedRoute>} />
       </Route>
 
       <Route path="*" element={<Navigate to="/" replace />} />

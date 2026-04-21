@@ -283,6 +283,14 @@ export function canApproveInvoice(p) { return isAdmin(p) }
 /** TODO(Phase 2+): 入金記録 */
 export function canRecordPayment(p) { return isAdmin(p) }
 
+// ====== 研修管理（PR-1 導入）======================
+// 設計: 研修申込〜発行〜発送〜受取の一元管理。
+// PR-1 時点では RT（admin/master）のみ。RS(staff) / 代理店 / サロン公開は今回スコープ外。
+// 将来、RS 公開時は isAdmin() || isStaff() に緩める。その際は firestore.rules も同時に更新。
+
+/** 研修種別マスタ・研修案件の閲覧・作成・編集（RT のみ） */
+export function canManageTraining(p) { return isAdmin(p) }
+
 // ====== assertCan（保存処理側のガード） ======
 /**
  * 実行前に呼び、false なら throw する。
