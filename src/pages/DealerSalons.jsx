@@ -5,6 +5,7 @@ import { db } from '../lib/firebase.js'
 import { useAuth } from '../contexts/AuthContext.jsx'
 import { fetchDealerSalonNamesFromBcart } from '../lib/dashboardAggregator.js'
 import { fetchOrdersByMonth } from '../lib/bcartApi.js'
+import { fetchCustomerParentMap, isOrderForDealer } from '../lib/bcartResolver.js'
 
 function fmtDate(ts) {
   if (!ts) return '—'
@@ -87,6 +88,12 @@ export default function DealerSalons() {
       })
       setSalons(combinedSalons)
 
+      // 受注の帰属解決用に会員マスタの current parent_id を取得
+      //   V→J コード変更後、注文の captured parent_id は stale なため
+      //   customer_id → 会員マスタの current parent_id で帰属判定する。
+      setProgress('Bカート 会員マスタ取得中...')
+      const parentMap = await fetchCustomerParentMap({ forceRefresh, onProgress: setProgress })
+
       // Bカートから直近12ヶ月の受注を取得
       const months = 12
       const nowDate = new Date()
@@ -100,7 +107,7 @@ export default function DealerSalons() {
         try {
           const raw = await fetchOrdersByMonth(ymStr)
           for (const o of raw) {
-            if (String(o.customer_parent_id || '') !== String(dealerCode)) continue
+            if (!isOrderForDealer(o, dealerCode, parentMap)) continue
             allBcart.push({
               id: o.id,
               companyName: (o.customer_comp_name || o.comp_name || o.customer_name || '').trim(),

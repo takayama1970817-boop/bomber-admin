@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useAuth } from '../contexts/AuthContext.jsx'
 import { fetchOrdersByMonth, fetchOrderProducts } from '../lib/bcartApi.js'
+import { fetchCustomerParentMap, isOrderForDealer } from '../lib/bcartResolver.js'
 import DateTimeWithDow from '../components/DateTimeWithDow.jsx'
 
 /**
@@ -13,7 +14,8 @@ import DateTimeWithDow from '../components/DateTimeWithDow.jsx'
  *
  * 仕様:
  *   - データソースは Bカート受注API（fetchOrdersByMonth を月単位で集約）
- *   - customer_parent_id == dealerCode で絞り込み
+ *   - 代理店帰属は会員マスタ (customers) の current parent_id で解決
+ *     （V→J コード変更で captured customer_parent_id が stale になっても拾えるように）
  *   - Firestore orders は本画面では一切使わない
  *   - フィルタ・件数・合計は API取得結果に対してクライアント側で実施
  *   - localStorage で1日キャッシュ（同日中は即時表示、再取得ボタンで強制更新可）
@@ -315,6 +317,11 @@ export default function DealerOrders() {
     setLoading(true)
     setErr(null)
     try {
+      // 受注の帰属解決用に会員マスタの current parent_id を取得
+      // V→J コード変更後の captured parent_id 問題に対処
+      setProgress('Bカート 会員マスタ取得中...')
+      const parentMap = await fetchCustomerParentMap({ onProgress: setProgress })
+
       const months = generateRecentMonths(FETCH_MONTHS)
       const all = []
       for (let i = 0; i < months.length; i += 1) {
@@ -323,7 +330,7 @@ export default function DealerOrders() {
         try {
           const raw = await fetchOrdersByMonth(ym)
           for (const o of raw) {
-            if (String(o.customer_parent_id ?? '') !== String(dealerCode)) continue
+            if (!isOrderForDealer(o, dealerCode, parentMap)) continue
             all.push({
               id: String(o.id || o.code || ''),
               orderDate: parseBcartDate(o.ordered_at),
