@@ -32,20 +32,24 @@
  * 必要ファイル:
  *   scripts/service-account.json — Firebase Admin SDK 秘密鍵
  */
-import { readFileSync, existsSync } from 'fs'
+import { dirname } from 'path'
+import { fileURLToPath } from 'url'
 import { initializeApp, cert } from 'firebase-admin/app'
 import { getFirestore, FieldValue, Timestamp } from 'firebase-admin/firestore'
-import { BCART_BASE, getBcartToken } from './_env.mjs'
+import { BCART_BASE, getBcartToken, loadAdminCredential } from './_env.mjs'
 
-const SERVICE_ACCOUNT_PATH = new URL('./service-account.json', import.meta.url)
+// scripts ディレクトリ絶対パス（_env.mjs に渡す）
+const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url))
 
-if (!existsSync(SERVICE_ACCOUNT_PATH)) {
-  console.error('❌ scripts/service-account.json が見つかりません。')
-  process.exit(1)
-}
+// 本番 projectId 検証付きで service account を読み込み
+// （test 用 credential で本番想定スクリプトが動く事故を防ぐ）
+const { serviceAccount, projectId, credentialPath } = loadAdminCredential(SCRIPTS_DIR)
+console.log(`📌 Firebase: ${projectId} (${credentialPath})`)
 
-const serviceAccount = JSON.parse(readFileSync(SERVICE_ACCOUNT_PATH, 'utf8'))
-initializeApp({ credential: cert(serviceAccount) })
+initializeApp({
+  credential: cert(serviceAccount),
+  projectId,
+})
 const db = getFirestore()
 
 const BCART_TOKEN = getBcartToken()

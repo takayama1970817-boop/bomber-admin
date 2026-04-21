@@ -31,26 +31,29 @@
  *   - scripts/logs/rescue-v-to-j-<timestamp>.json: 全件詳細（reason / willUpdate 付き）
  *   - Firestore ordersBackfillLogs/{auto-id} （production 時のみ、type: 'v-to-j-rescue'）
  */
-import { readFileSync, existsSync, mkdirSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, writeFileSync } from 'fs'
 import { dirname } from 'path'
 import { fileURLToPath } from 'url'
 import { initializeApp, cert } from 'firebase-admin/app'
 import { getFirestore, FieldValue } from 'firebase-admin/firestore'
-import { BCART_BASE, getBcartToken } from './_env.mjs'
+import { BCART_BASE, getBcartToken, loadAdminCredential } from './_env.mjs'
 
-const SERVICE_ACCOUNT_PATH = new URL('./service-account.json', import.meta.url)
+// scripts ディレクトリ絶対パス（_env.mjs に渡す）
+const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url))
 
-if (!existsSync(SERVICE_ACCOUNT_PATH)) {
-  console.error('❌ scripts/service-account.json が見つかりません。')
-  process.exit(1)
-}
+// 本番 projectId 検証付きで service account を読み込み
+// （test 用 credential で本番想定スクリプトが動く事故を防ぐ）
+const { serviceAccount, projectId, credentialPath } = loadAdminCredential(SCRIPTS_DIR)
 
-const serviceAccount = JSON.parse(readFileSync(SERVICE_ACCOUNT_PATH, 'utf8'))
-initializeApp({ credential: cert(serviceAccount) })
+initializeApp({
+  credential: cert(serviceAccount),
+  projectId, // 明示指定で db.app.options.projectId にも反映
+})
 const db = getFirestore()
 
-const SERVICE_ACCOUNT_PROJECT_ID = serviceAccount.project_id || '(unknown)'
+const SERVICE_ACCOUNT_PROJECT_ID = projectId
 const SERVICE_ACCOUNT_EMAIL = serviceAccount.client_email || '(unknown)'
+const CREDENTIAL_PATH_DISPLAY = credentialPath
 
 const BCART_TOKEN = getBcartToken()
 const DRY_RUN = process.env.DRY_RUN !== 'false'
@@ -168,6 +171,7 @@ async function main() {
   console.log(`対象Jコード: ${[...TARGET_JCODES].join(', ')}`)
   console.log('')
   console.log('▶ Firebase 接続診断')
+  console.log(`  credential path                : ${CREDENTIAL_PATH_DISPLAY}`)
   console.log(`  service-account.json projectId : ${SERVICE_ACCOUNT_PROJECT_ID}`)
   console.log(`  service-account.json client_email: ${SERVICE_ACCOUNT_EMAIL}`)
   console.log(`  Firestore app projectId        : ${db.app?.options?.projectId || '(unknown)'}`)
