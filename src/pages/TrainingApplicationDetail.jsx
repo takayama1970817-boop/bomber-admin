@@ -20,8 +20,10 @@ import {
   TRAINING_STATUS,
   TRAINING_STATUS_LABEL,
   TRAINING_STATUS_COLOR,
+  SHIPPING_METHODS,
   canTransition,
   getPr1Transitions,
+  getShippingMethodLabel,
 } from '../lib/trainingStatus.js'
 import {
   DOCUMENT_STATUS,
@@ -84,6 +86,14 @@ export default function TrainingApplicationDetail() {
   const [message, setMessage] = useState('')
   const [busy, setBusy] = useState(false)
   const [edit, setEdit] = useState(null)
+  // PR-4: 発送・受取フォーム
+  const [shipForm, setShipForm] = useState({
+    shippedAt: '',
+    shippedMethod: '',
+    shippedMethodOther: '',
+    trackingNumber: '',
+    receivedAt: '',
+  })
 
   const canEdit = canManageTraining(profile)
 
@@ -112,6 +122,19 @@ export default function TrainingApplicationDetail() {
         trainingScheduledDate: toInputDate(d.trainingScheduledDate),
         trainingCompletedDate: toInputDate(d.trainingCompletedDate),
         note: d.note || '',
+      })
+
+      // PR-4: 発送・受取フォーム初期化
+      // 保存された shippedMethod がプリセットラベルと一致すれば select にそのまま、
+      // 一致しなければ 'other' として扱い、フリーテキスト欄に復元する
+      const shippedMethodSaved = d.shippedMethod || ''
+      const presetHit = SHIPPING_METHODS.find((m) => m.label === shippedMethodSaved && m.value !== 'other')
+      setShipForm({
+        shippedAt: toInputDate(d.shippedAt),
+        shippedMethod: shippedMethodSaved ? (presetHit ? presetHit.value : 'other') : '',
+        shippedMethodOther: presetHit || !shippedMethodSaved ? '' : shippedMethodSaved,
+        trackingNumber: d.trackingNumber || '',
+        receivedAt: toInputDate(d.receivedAt),
       })
 
       const [histSnap, typesSnap, docsSnap, docHistSnap, companySnap, stampSnap] = await Promise.all([
@@ -357,6 +380,159 @@ export default function TrainingApplicationDetail() {
     const res = openPdfWindow(pdfUrl, { autoPrint: false })
     if (!res.ok) {
       setMessage('ポップアップがブロックされました。ブラウザのブロック解除後に再度お試しください。')
+    }
+  }
+
+  // PR-4: 発送・受取ハンドラ
+  function resolveShippingMethodForSave() {
+    if (shipForm.shippedMethod === 'other') {
+      return (shipForm.shippedMethodOther || '').trim()
+    }
+    const hit = SHIPPING_METHODS.find((m) => m.value === shipForm.shippedMethod)
+    return hit ? hit.label : ''
+  }
+
+  async function handleShip() {
+    try {
+      assertCan(canManageTraining, profile)
+      if (!canTransition(data.status, TRAINING_STATUS.DOCUMENTS_SHIPPED)) {
+        setMessage('このステータスからは発送を記録できません（先に発行を完了してください）')
+        return
+      }
+      const finalMethod = resolveShippingMethodForSave()
+      if (!finalMethod) {
+        setMessage('発送方法を選択してください（その他選択時はテキスト入力も必須）')
+        return
+      }
+      const confirmMsg = [
+        'この案件を「発行物発送済み」に記録します。よろしいですか？',
+        `発送方法: ${finalMethod}`,
+        `追跡番号: ${shipForm.trackingNumber || '（なし）'}`,
+      ].join('\n')
+      if (!confirm(confirmMsg)) return
+      setBusy(true)
+      const shippedAt = shipForm.shippedAt ? new Date(shipForm.shippedAt) : new Date()
+      await updateDoc(doc(db, 'trainingApplications', id), {
+        shippedAt,
+        shippedMethod: finalMethod,
+        trackingNumber: shipForm.trackingNumber || '',
+        status: TRAINING_STATUS.DOCUMENTS_SHIPPED,
+        updatedAt: serverTimestamp(),
+        updatedBy: profile?.uid || null,
+      })
+      await addDoc(collection(db, 'trainingApplications', id, 'history'), {
+        from: data.status,
+        to: TRAINING_STATUS.DOCUMENTS_SHIPPED,
+        actorUid: profile?.uid || null,
+        actorName: profile?.name || profile?.email || '',
+        comment: `発送を記録（${finalMethod}${shipForm.trackingNumber ? ' / 追跡番号 ' + shipForm.trackingNumber : ''}）`,
+        createdAt: serverTimestamp(),
+      })
+      setMessage('発送を記録しました')
+      await load()
+    } catch (e) {
+      console.error(e)
+      setMessage(`発送記録エラー: ${e.message}`)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function handleUnship() {
+    try {
+      assertCan(canManageTraining, profile)
+      if (!canTransition(data.status, TRAINING_STATUS.DOCUMENTS_ISSUED)) {
+        setMessage('このステータスからは発送の取り消しができません')
+        return
+      }
+      if (!confirm('発送の記録を取り消します。\n（発送日・発送方法・追跡番号の値は残しますが、ステータスを「発行物発行済み」に戻します）\nよろしいですか？')) return
+      setBusy(true)
+      await updateDoc(doc(db, 'trainingApplications', id), {
+        status: TRAINING_STATUS.DOCUMENTS_ISSUED,
+        updatedAt: serverTimestamp(),
+        updatedBy: profile?.uid || null,
+      })
+      await addDoc(collection(db, 'trainingApplications', id, 'history'), {
+        from: data.status,
+        to: TRAINING_STATUS.DOCUMENTS_ISSUED,
+        actorUid: profile?.uid || null,
+        actorName: profile?.name || profile?.email || '',
+        comment: '発送の記録を取り消し',
+        createdAt: serverTimestamp(),
+      })
+      setMessage('発送の記録を取り消しました')
+      await load()
+    } catch (e) {
+      console.error(e)
+      setMessage(`取り消しエラー: ${e.message}`)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function handleReceive() {
+    try {
+      assertCan(canManageTraining, profile)
+      if (!canTransition(data.status, TRAINING_STATUS.RECEIVED_COMPLETED)) {
+        setMessage('このステータスからは受取確認できません（先に発送を記録してください）')
+        return
+      }
+      if (!confirm('この案件を「受取完了」に記録します。よろしいですか？')) return
+      setBusy(true)
+      const receivedAt = shipForm.receivedAt ? new Date(shipForm.receivedAt) : new Date()
+      await updateDoc(doc(db, 'trainingApplications', id), {
+        receivedAt,
+        status: TRAINING_STATUS.RECEIVED_COMPLETED,
+        updatedAt: serverTimestamp(),
+        updatedBy: profile?.uid || null,
+      })
+      await addDoc(collection(db, 'trainingApplications', id, 'history'), {
+        from: data.status,
+        to: TRAINING_STATUS.RECEIVED_COMPLETED,
+        actorUid: profile?.uid || null,
+        actorName: profile?.name || profile?.email || '',
+        comment: '受取を確認',
+        createdAt: serverTimestamp(),
+      })
+      setMessage('受取を確認しました')
+      await load()
+    } catch (e) {
+      console.error(e)
+      setMessage(`受取確認エラー: ${e.message}`)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function handleUnreceive() {
+    try {
+      assertCan(canManageTraining, profile)
+      if (!canTransition(data.status, TRAINING_STATUS.DOCUMENTS_SHIPPED)) {
+        setMessage('このステータスからは受取の取り消しができません')
+        return
+      }
+      if (!confirm('受取の確認を取り消します。\n（受取日の値は残しますが、ステータスを「発行物発送済み」に戻します）\nよろしいですか？')) return
+      setBusy(true)
+      await updateDoc(doc(db, 'trainingApplications', id), {
+        status: TRAINING_STATUS.DOCUMENTS_SHIPPED,
+        updatedAt: serverTimestamp(),
+        updatedBy: profile?.uid || null,
+      })
+      await addDoc(collection(db, 'trainingApplications', id, 'history'), {
+        from: data.status,
+        to: TRAINING_STATUS.DOCUMENTS_SHIPPED,
+        actorUid: profile?.uid || null,
+        actorName: profile?.name || profile?.email || '',
+        comment: '受取の確認を取り消し',
+        createdAt: serverTimestamp(),
+      })
+      setMessage('受取の確認を取り消しました')
+      await load()
+    } catch (e) {
+      console.error(e)
+      setMessage(`取り消しエラー: ${e.message}`)
+    } finally {
+      setBusy(false)
     }
   }
 
@@ -738,16 +914,121 @@ export default function TrainingApplicationDetail() {
             )}
           </section>
 
-          <section className="rounded-lg border border-dashed border-gray-300 bg-white p-4">
-            <h2 className="text-sm font-bold text-gray-700">発送・受取</h2>
-            <p className="mt-2 text-xs text-gray-500">
-              PR-4 で実装予定。発送日 / 発送方法 / 追跡番号 / 受取確認日 を管理します。
-            </p>
-            <div className="mt-3 space-y-1 text-xs text-gray-600">
-              <div>発送日: {fmtDateTime(data.shippedAt)}</div>
-              <div>発送方法: {data.shippedMethod || '—'}</div>
-              <div>追跡番号: {data.trackingNumber || '—'}</div>
-              <div>受取日: {fmtDateTime(data.receivedAt)}</div>
+          <section className="rounded-lg border border-gray-200 bg-white p-4">
+            <h2 className="mb-3 text-sm font-bold text-gray-700">発送</h2>
+            <div className="space-y-2">
+              <label className="block text-sm">
+                <span className="text-xs text-gray-500">発送日</span>
+                <input
+                  type="date"
+                  value={shipForm.shippedAt}
+                  onChange={(e) => setShipForm({ ...shipForm, shippedAt: e.target.value })}
+                  className="mt-1 w-full rounded border border-gray-300 px-2 py-2 text-sm"
+                />
+              </label>
+              <label className="block text-sm">
+                <span className="text-xs text-gray-500">発送方法</span>
+                <select
+                  value={shipForm.shippedMethod}
+                  onChange={(e) => setShipForm({ ...shipForm, shippedMethod: e.target.value })}
+                  className="mt-1 w-full rounded border border-gray-300 px-2 py-2 text-sm"
+                >
+                  <option value="">選択してください</option>
+                  {SHIPPING_METHODS.map((m) => (
+                    <option key={m.value} value={m.value}>{m.label}</option>
+                  ))}
+                </select>
+              </label>
+              {shipForm.shippedMethod === 'other' && (
+                <label className="block text-sm">
+                  <span className="text-xs text-gray-500">発送方法（手入力）</span>
+                  <input
+                    type="text"
+                    value={shipForm.shippedMethodOther}
+                    onChange={(e) => setShipForm({ ...shipForm, shippedMethodOther: e.target.value })}
+                    className="mt-1 w-full rounded border border-gray-300 px-2 py-2 text-sm"
+                    placeholder="例: クロネコDM便 / バイク便 など"
+                  />
+                </label>
+              )}
+              <label className="block text-sm">
+                <span className="text-xs text-gray-500">追跡番号</span>
+                <input
+                  type="text"
+                  value={shipForm.trackingNumber}
+                  onChange={(e) => setShipForm({ ...shipForm, trackingNumber: e.target.value })}
+                  className="mt-1 w-full rounded border border-gray-300 px-2 py-2 font-mono text-sm"
+                  placeholder="配送業者のトラッキング番号"
+                />
+              </label>
+              <div className="flex flex-wrap gap-2 pt-1">
+                {canTransition(data.status, TRAINING_STATUS.DOCUMENTS_SHIPPED) && (
+                  <button
+                    onClick={handleShip}
+                    disabled={busy}
+                    className="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"
+                  >
+                    発送を記録
+                  </button>
+                )}
+                {(data.status === TRAINING_STATUS.DOCUMENTS_SHIPPED
+                  || data.status === TRAINING_STATUS.RECEIVED_COMPLETED) && (
+                  <button
+                    onClick={handleUnship}
+                    disabled={busy}
+                    className="rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-xs text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+                  >
+                    発送を取り消す
+                  </button>
+                )}
+              </div>
+              {data.shippedAt && (
+                <div className="mt-2 rounded bg-emerald-50 p-2 text-xs text-emerald-800">
+                  発送済み: {fmtDate(data.shippedAt)}
+                  {data.shippedMethod ? ` / ${data.shippedMethod}` : ''}
+                  {data.trackingNumber ? ` / 追跡 ${data.trackingNumber}` : ''}
+                </div>
+              )}
+            </div>
+          </section>
+
+          <section className="rounded-lg border border-gray-200 bg-white p-4">
+            <h2 className="mb-3 text-sm font-bold text-gray-700">受取</h2>
+            <div className="space-y-2">
+              <label className="block text-sm">
+                <span className="text-xs text-gray-500">受取確認日</span>
+                <input
+                  type="date"
+                  value={shipForm.receivedAt}
+                  onChange={(e) => setShipForm({ ...shipForm, receivedAt: e.target.value })}
+                  className="mt-1 w-full rounded border border-gray-300 px-2 py-2 text-sm"
+                />
+              </label>
+              <div className="flex flex-wrap gap-2 pt-1">
+                {canTransition(data.status, TRAINING_STATUS.RECEIVED_COMPLETED) && (
+                  <button
+                    onClick={handleReceive}
+                    disabled={busy}
+                    className="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"
+                  >
+                    受取を確認
+                  </button>
+                )}
+                {data.status === TRAINING_STATUS.RECEIVED_COMPLETED && (
+                  <button
+                    onClick={handleUnreceive}
+                    disabled={busy}
+                    className="rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-xs text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+                  >
+                    受取を取り消す
+                  </button>
+                )}
+              </div>
+              {data.receivedAt && (
+                <div className="mt-2 rounded bg-emerald-50 p-2 text-xs text-emerald-800">
+                  受取確認済み: {fmtDate(data.receivedAt)}
+                </div>
+              )}
             </div>
           </section>
 

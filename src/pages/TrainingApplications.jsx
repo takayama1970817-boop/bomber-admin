@@ -19,7 +19,9 @@ import {
   TRAINING_STATUS,
   TRAINING_STATUS_LABEL,
   TRAINING_STATUS_COLOR,
+  QUICK_FILTERS,
   generateApplicationNumber,
+  matchQuickFilter,
 } from '../lib/trainingStatus.js'
 
 /**
@@ -70,6 +72,12 @@ export default function TrainingApplications() {
   const [fStatus, setFStatus] = useState('all')
   const [fTrainingType, setFTrainingType] = useState('all')
   const [fKeyword, setFKeyword] = useState('')
+  // PR-4: クイックフィルタ + 日付レンジ
+  const [fQuick, setFQuick] = useState('all')
+  const [fAppDateFrom, setFAppDateFrom] = useState('')
+  const [fAppDateTo, setFAppDateTo] = useState('')
+  const [fTrDateFrom, setFTrDateFrom] = useState('')
+  const [fTrDateTo, setFTrDateTo] = useState('')
 
   const canEdit = canManageTraining(profile)
 
@@ -102,12 +110,43 @@ export default function TrainingApplications() {
     return m
   }, [types])
 
+  // 日付比較ヘルパー（Firestore Timestamp / Date / string を吸収して yyyy-mm-dd 前提で比較）
+  function toYmd(ts) {
+    if (!ts) return ''
+    const d = ts.toDate ? ts.toDate() : new Date(ts)
+    if (isNaN(d.getTime())) return ''
+    const y = d.getFullYear()
+    const m = String(d.getMonth() + 1).padStart(2, '0')
+    const day = String(d.getDate()).padStart(2, '0')
+    return `${y}-${m}-${day}`
+  }
+
   const filtered = useMemo(() => {
     const k = fKeyword.trim().toLowerCase()
     return rows.filter((r) => {
+      // PR-4: クイックフィルタ優先適用（「すべて」なら素通り）
+      if (!matchQuickFilter(fQuick, r.status)) return false
+
       if (fType !== 'all' && r.applicationType !== fType) return false
       if (fStatus !== 'all' && r.status !== fStatus) return false
       if (fTrainingType !== 'all' && r.trainingTypeId !== fTrainingType) return false
+
+      // PR-4: 日付レンジ（申込日）
+      if (fAppDateFrom || fAppDateTo) {
+        const ymd = toYmd(r.applicationDate)
+        if (!ymd) return false
+        if (fAppDateFrom && ymd < fAppDateFrom) return false
+        if (fAppDateTo && ymd > fAppDateTo) return false
+      }
+
+      // PR-4: 日付レンジ（研修日 = 実施日優先、なければ予定日で判定）
+      if (fTrDateFrom || fTrDateTo) {
+        const ymd = toYmd(r.trainingCompletedDate) || toYmd(r.trainingScheduledDate)
+        if (!ymd) return false
+        if (fTrDateFrom && ymd < fTrDateFrom) return false
+        if (fTrDateTo && ymd > fTrDateTo) return false
+      }
+
       if (!k) return true
       const hay = [
         r.applicationNumber, r.attendeeName, r.salonName,
@@ -115,7 +154,7 @@ export default function TrainingApplications() {
       ].filter(Boolean).join(' ').toLowerCase()
       return hay.includes(k)
     })
-  }, [rows, fType, fStatus, fTrainingType, fKeyword])
+  }, [rows, fType, fStatus, fTrainingType, fKeyword, fQuick, fAppDateFrom, fAppDateTo, fTrDateFrom, fTrDateTo])
 
   function openNew() {
     setNewForm(EMPTY_NEW)
@@ -243,6 +282,69 @@ export default function TrainingApplications() {
             + 新規申込
           </button>
         </div>
+      </div>
+
+      {/* PR-4: クイックフィルタ（ピル式） */}
+      <div className="flex flex-wrap gap-2">
+        {QUICK_FILTERS.map((q) => {
+          const count = q.key === 'all'
+            ? rows.length
+            : rows.filter((r) => matchQuickFilter(q.key, r.status)).length
+          const isActive = fQuick === q.key
+          return (
+            <button
+              key={q.key}
+              onClick={() => setFQuick(q.key)}
+              className={`rounded-full border px-3 py-1 text-xs ${
+                isActive
+                  ? 'border-indigo-600 bg-indigo-600 text-white'
+                  : 'border-gray-300 bg-white text-gray-700 hover:bg-gray-50'
+              }`}
+            >
+              {q.label} <span className={`ml-1 ${isActive ? 'text-indigo-100' : 'text-gray-400'}`}>{count}</span>
+            </button>
+          )
+        })}
+      </div>
+
+      {/* PR-4: 日付レンジフィルタ */}
+      <div className="grid grid-cols-2 gap-2 rounded-lg border border-gray-200 bg-white p-3 md:grid-cols-4">
+        <label className="block text-sm">
+          <span className="text-xs text-gray-500">申込日 From</span>
+          <input
+            type="date"
+            value={fAppDateFrom}
+            onChange={(e) => setFAppDateFrom(e.target.value)}
+            className="mt-1 w-full rounded border border-gray-300 px-2 py-1.5 text-sm"
+          />
+        </label>
+        <label className="block text-sm">
+          <span className="text-xs text-gray-500">申込日 To</span>
+          <input
+            type="date"
+            value={fAppDateTo}
+            onChange={(e) => setFAppDateTo(e.target.value)}
+            className="mt-1 w-full rounded border border-gray-300 px-2 py-1.5 text-sm"
+          />
+        </label>
+        <label className="block text-sm">
+          <span className="text-xs text-gray-500">研修日 From（実施日→予定日の順で判定）</span>
+          <input
+            type="date"
+            value={fTrDateFrom}
+            onChange={(e) => setFTrDateFrom(e.target.value)}
+            className="mt-1 w-full rounded border border-gray-300 px-2 py-1.5 text-sm"
+          />
+        </label>
+        <label className="block text-sm">
+          <span className="text-xs text-gray-500">研修日 To</span>
+          <input
+            type="date"
+            value={fTrDateTo}
+            onChange={(e) => setFTrDateTo(e.target.value)}
+            className="mt-1 w-full rounded border border-gray-300 px-2 py-1.5 text-sm"
+          />
+        </label>
       </div>
 
       <div className="grid grid-cols-1 gap-2 rounded-lg border border-gray-200 bg-white p-3 md:grid-cols-4">

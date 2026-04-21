@@ -73,6 +73,49 @@ export const DOCUMENT_TYPE_LABEL = {
   certified_salon_award: '認定サロン賞',
 }
 
+// 発送方法（PR-4 導入）
+// `value` は保存値。`other` を選んだ場合はフォームのフリーテキストを shippedMethod に保存する。
+// 新しい業者が増えたら配列を追加するだけでよい（マスタ化は不要）。
+export const SHIPPING_METHODS = [
+  { value: 'yamato', label: 'ヤマト運輸（宅急便）' },
+  { value: 'sagawa', label: '佐川急便' },
+  { value: 'yupack', label: '日本郵便（ゆうパック）' },
+  { value: 'letterpack', label: 'レターパック' },
+  { value: 'mailbin', label: 'メール便' },
+  { value: 'hand_delivery', label: '持参' },
+  { value: 'other', label: 'その他（手入力）' },
+]
+
+// shippedMethod の保存値から表示ラベルに変換（表示用）。
+// マッチしない値は素のまま返す（`other` で保存されたフリーテキストもそのまま）。
+export function getShippingMethodLabel(value) {
+  if (!value) return ''
+  const hit = SHIPPING_METHODS.find((m) => m.value === value)
+  return hit ? hit.label : value
+}
+
+// 一覧画面のクイックフィルタ項目（PR-4 導入）。
+// ラベル/コード/マッチ条件を1箇所に集約し、UI は並べるだけで済むようにする。
+export const QUICK_FILTERS = [
+  { key: 'all', label: 'すべて', statuses: null },
+  { key: 'pending_issue', label: '未発行', statuses: [TRAINING_STATUS.TRAINING_COMPLETED_WAITING_ISSUE] },
+  { key: 'pending_ship', label: '未発送', statuses: [TRAINING_STATUS.DOCUMENTS_ISSUED] },
+  { key: 'pending_receive', label: '未受取', statuses: [TRAINING_STATUS.DOCUMENTS_SHIPPED] },
+  { key: 'completed', label: '完了', statuses: [TRAINING_STATUS.RECEIVED_COMPLETED] },
+  { key: 'cancelled', label: 'キャンセル', statuses: [TRAINING_STATUS.CANCELLED] },
+]
+
+/**
+ * クイックフィルタが案件にマッチするか判定。
+ * key='all' のときは常に true。
+ */
+export function matchQuickFilter(key, status) {
+  if (!key || key === 'all') return true
+  const hit = QUICK_FILTERS.find((f) => f.key === key)
+  if (!hit || !hit.statuses) return true
+  return hit.statuses.includes(status)
+}
+
 /**
  * 許可される遷移マップ。
  * from: [...to]
@@ -101,9 +144,12 @@ const TRANSITIONS = {
   ],
   documents_shipped: [
     'received_completed',
+    'documents_issued', // PR-4: 発送取り消し
     'cancelled',
   ],
-  received_completed: [],
+  received_completed: [
+    'documents_shipped', // PR-4: 受取取り消し
+  ],
   cancelled: [
     'application_received',
   ],
