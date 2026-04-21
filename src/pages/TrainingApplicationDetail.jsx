@@ -28,7 +28,11 @@ import {
   DOCUMENT_HISTORY_ACTION,
   checkDocumentIssuable,
   getAllDocumentTypesForTraining,
+  getTargetDocumentTypes,
+  issueAndPrintAll,
+  reprintAndOpen,
 } from '../lib/trainingDocuments.js'
+import { openPdfWindow } from '../lib/generateTrainingDocumentPdf.js'
 
 /**
  * 研修案件 詳細（PR-1 骨組み）
@@ -75,6 +79,7 @@ export default function TrainingApplicationDetail() {
   const [documents, setDocuments] = useState([])
   const [docHistory, setDocHistory] = useState([])
   const [types, setTypes] = useState([])
+  const [companySettings, setCompanySettings] = useState(null)
   const [loading, setLoading] = useState(true)
   const [message, setMessage] = useState('')
   const [busy, setBusy] = useState(false)
@@ -109,7 +114,7 @@ export default function TrainingApplicationDetail() {
         note: d.note || '',
       })
 
-      const [histSnap, typesSnap, docsSnap, docHistSnap] = await Promise.all([
+      const [histSnap, typesSnap, docsSnap, docHistSnap, companySnap, stampSnap] = await Promise.all([
         getDocs(query(
           collection(db, 'trainingApplications', id, 'history'),
           orderBy('createdAt', 'desc'),
@@ -120,11 +125,23 @@ export default function TrainingApplicationDetail() {
           collection(db, 'trainingApplications', id, 'documentHistory'),
           orderBy('createdAt', 'desc'),
         )),
+        // 発行者情報は RT（ロイヤルトラスト）固定で読み取り。請求書・見積書と同じ設定元を流用。
+        getDoc(doc(db, 'settings', 'rt_company')).catch(() => null),
+        getDoc(doc(db, 'settings', 'rt_companyStamp')).catch(() => null),
       ])
       setHistory(histSnap.docs.map((h) => ({ id: h.id, ...h.data() })))
       setTypes(typesSnap.docs.map((t) => ({ id: t.id, ...t.data() })))
       setDocuments(docsSnap.docs.map((d) => ({ id: d.id, ...d.data() })))
       setDocHistory(docHistSnap.docs.map((h) => ({ id: h.id, ...h.data() })))
+
+      const companyData = companySnap?.exists() ? companySnap.data() : {}
+      const stampData = stampSnap?.exists() ? stampSnap.data() : {}
+      setCompanySettings({
+        companyName: companyData.companyName || 'ロイヤルトラスト株式会社',
+        issuerName: companyData.representativeName || companyData.issuerName || '',
+        representativeName: companyData.representativeName || '',
+        stampUrl: stampData.dataUrl || '',
+      })
     } catch (e) {
       console.error(e)
       setMessage(`読み込みエラー: ${e.message}`)
@@ -139,6 +156,12 @@ export default function TrainingApplicationDetail() {
     () => types.find((t) => t.id === (edit?.trainingTypeId || data?.trainingTypeId)),
     [types, edit?.trainingTypeId, data?.trainingTypeId],
   )
+
+  // PR-3: 新規発行対象（研修種別の発行対象 − 既発行）
+  const targetDocTypes = useMemo(() => {
+    if (!selectedType) return []
+    return getTargetDocumentTypes(selectedType, documents)
+  }, [selectedType, documents])
 
   async function saveEdit() {
     try {
@@ -253,6 +276,88 @@ export default function TrainingApplicationDetail() {
     if (!confirm(`この案件を${label}します。よろしいですか？`)) return
     const comment = toCancel ? '案件をキャンセル' : 'キャンセルを解除'
     await changeStatus(next, comment)
+  }
+
+  // PR-3: 「発行して印刷」ハンドラ
+  async function handleIssueAndPrintAll() {
+    try {
+      assertCan(canManageTraining, profile)
+      const targets = getTargetDocumentTypes(selectedType, documents)
+      if (targets.length === 0) {
+        setMessage('新規発行する対象がありません（研修種別が対象を持たない、または全て発行済み）')
+        return
+      }
+      const blocked = targets.filter((t) => !checkDocumentIssuable(data, t).ok)
+      if (blocked.length > 0) {
+        const labels = blocked.map((t) => DOCUMENT_TYPE_LABEL[t] || t).join(' / ')
+        setMessage(`発行条件を満たしていない発行物があります: ${labels}。詳細は各発行物のブロックを確認してください。`)
+        return
+      }
+      if (!confirm(`${targets.map((t) => DOCUMENT_TYPE_LABEL[t] || t).join(' と ')} を発行・印刷します。よろしいですか？`)) return
+      setBusy(true)
+      const { results, statusTransitioned } = await issueAndPrintAll({
+        app: data,
+        targets,
+        profile,
+        trainingType: selectedType,
+        companySettings,
+      })
+      const ok = results.filter((r) => r.ok)
+      const ng = results.filter((r) => !r.ok)
+      if (ok.length > 0 && ok[0].pdfUrl) {
+        const res = openPdfWindow(ok[0].pdfUrl, { autoPrint: true })
+        if (!res.ok) {
+          setMessage('発行は成功しましたが、ポップアップがブロックされました。「PDF確認」から手動で開いてください。')
+        }
+      }
+      const parts = [`発行: 成功 ${ok.length} / 失敗 ${ng.length}`]
+      if (statusTransitioned) parts.push('案件ステータスを「発行物発行済み」に更新')
+      if (ok.length >= 2) parts.push('2件目以降は「PDF確認」ボタンから開いてください')
+      setMessage(parts.join(' / '))
+      await load()
+    } catch (e) {
+      console.error(e)
+      setMessage(`発行エラー: ${e.message}`)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  // PR-3: 再印刷
+  async function handleReprint(docRecord) {
+    if (!docRecord?.pdfUrl) {
+      setMessage('この発行物には PDF が紐付いていません。「発行して印刷」で再生成してください。')
+      return
+    }
+    try {
+      assertCan(canManageTraining, profile)
+      setBusy(true)
+      await reprintAndOpen({
+        appId: id,
+        docId: docRecord.id,
+        pdfUrl: docRecord.pdfUrl,
+        profile,
+      })
+      setMessage(`「${DOCUMENT_TYPE_LABEL[docRecord.documentType] || docRecord.documentType}」を再印刷しました（印刷回数 +1）`)
+      await load()
+    } catch (e) {
+      console.error(e)
+      setMessage(`再印刷エラー: ${e.message}`)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  // PR-3: PDF確認（印刷ダイアログは自動起動しない）
+  function handleViewPdf(pdfUrl) {
+    if (!pdfUrl) {
+      setMessage('PDF が見つかりません')
+      return
+    }
+    const res = openPdfWindow(pdfUrl, { autoPrint: false })
+    if (!res.ok) {
+      setMessage('ポップアップがブロックされました。ブラウザのブロック解除後に再度お試しください。')
+    }
   }
 
   if (!canEdit) {
@@ -502,7 +607,20 @@ export default function TrainingApplicationDetail() {
           <section className="rounded-lg border border-gray-200 bg-white p-4">
             <div className="flex items-center justify-between">
               <h2 className="text-sm font-bold text-gray-700">発行物</h2>
-              <span className="text-[10px] text-gray-400">発行ボタンは PR-3 で実装予定</span>
+              {targetDocTypes.length > 0 ? (
+                <button
+                  onClick={handleIssueAndPrintAll}
+                  disabled={busy || !companySettings}
+                  className="rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-700 disabled:opacity-50"
+                  title={targetDocTypes.map((t) => DOCUMENT_TYPE_LABEL[t] || t).join(' + ')}
+                >
+                  発行して印刷（{targetDocTypes.length}件）
+                </button>
+              ) : (
+                <span className="text-[10px] text-gray-400">
+                  {selectedType ? '全て発行済み' : '研修種別未選択'}
+                </span>
+              )}
             </div>
             {!selectedType && (
               <p className="mt-2 text-xs text-gray-400">研修種別が未選択です。</p>
@@ -532,30 +650,46 @@ export default function TrainingApplicationDetail() {
                       </div>
 
                       {isIssued && (
-                        <dl className="mt-2 space-y-1 text-xs text-gray-600">
-                          <div className="flex justify-between">
-                            <dt>発行番号</dt>
-                            <dd className="font-mono text-gray-800">{existing.documentNumber || '—'}</dd>
+                        <>
+                          <dl className="mt-2 space-y-1 text-xs text-gray-600">
+                            <div className="flex justify-between">
+                              <dt>発行番号</dt>
+                              <dd className="font-mono text-gray-800">{existing.documentNumber || '—'}</dd>
+                            </div>
+                            <div className="flex justify-between">
+                              <dt>発行日時</dt>
+                              <dd>{fmtDateTime(existing.issuedAt)}</dd>
+                            </div>
+                            <div className="flex justify-between">
+                              <dt>印刷回数</dt>
+                              <dd>{existing.printCount ?? 0} 回</dd>
+                            </div>
+                          </dl>
+                          <div className="mt-3 flex flex-wrap gap-2">
+                            {existing.pdfUrl ? (
+                              <>
+                                <button
+                                  onClick={() => handleViewPdf(existing.pdfUrl)}
+                                  disabled={busy}
+                                  className="rounded border border-indigo-300 bg-white px-2.5 py-1 text-[11px] font-semibold text-indigo-700 hover:bg-indigo-50 disabled:opacity-50"
+                                >
+                                  PDF確認
+                                </button>
+                                <button
+                                  onClick={() => handleReprint(existing)}
+                                  disabled={busy}
+                                  className="rounded bg-indigo-600 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-indigo-700 disabled:opacity-50"
+                                >
+                                  再印刷
+                                </button>
+                              </>
+                            ) : (
+                              <span className="text-[11px] text-amber-600">
+                                PDF 未紐付け（発行後のアップロードで失敗した可能性）。Storage 側でのリカバリーが必要です。
+                              </span>
+                            )}
                           </div>
-                          <div className="flex justify-between">
-                            <dt>発行日時</dt>
-                            <dd>{fmtDateTime(existing.issuedAt)}</dd>
-                          </div>
-                          <div className="flex justify-between">
-                            <dt>印刷回数</dt>
-                            <dd>{existing.printCount ?? 0} 回</dd>
-                          </div>
-                          <div className="flex justify-between">
-                            <dt>PDF</dt>
-                            <dd>
-                              {existing.pdfUrl ? (
-                                <a href={existing.pdfUrl} target="_blank" rel="noreferrer" className="text-indigo-600 hover:underline">開く</a>
-                              ) : (
-                                <span className="text-amber-600">未生成（PR-3 で生成）</span>
-                              )}
-                            </dd>
-                          </div>
-                        </dl>
+                        </>
                       )}
 
                       {!isIssued && !check.ok && (

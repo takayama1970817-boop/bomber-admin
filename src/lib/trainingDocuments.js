@@ -26,7 +26,12 @@ import {
   updateDoc,
 } from 'firebase/firestore'
 import { db } from './firebase.js'
-import { DOCUMENT_TYPE, TRAINING_STATUS } from './trainingStatus.js'
+import { DOCUMENT_TYPE, TRAINING_STATUS, canTransition } from './trainingStatus.js'
+import {
+  generateTrainingDocumentBlob,
+  uploadTrainingPdf,
+  openPdfWindow,
+} from './generateTrainingDocumentPdf.js'
 
 // ====== 定数 ======
 
@@ -363,4 +368,142 @@ export async function recordReprint({ appId, docId, profile }) {
     })
     return { printCount: next }
   })
+}
+
+// ====== PR-3: 「発行して印刷」高レベルフロー =============================
+
+/**
+ * 対象発行物を一括発行し、PDF を生成して Storage にアップロード、documents レコードに紐付け、
+ * 全成功なら案件ステータスを documents_issued に遷移する。
+ *
+ * 部分失敗は許容（各発行物を独立処理）。失敗したものは documentHistory に `pdf_fail` を残し、
+ * documents レコードは採番・作成だけ成功済み（pdfUrl=null）の状態で残る → 後で再試行可能。
+ *
+ * @param {object} params
+ * @param {object} params.app - trainingApplications のレコード（id, status, ... 必須）
+ * @param {string[]} params.targets - 対象 documentType（呼び出し元が getTargetDocumentTypes で算出）
+ * @param {object} params.profile
+ * @param {object} [params.trainingType] - 研修種別マスタ（templateId 決定用）
+ * @param {object} [params.companySettings] - 発行者情報（snapshot 用）
+ * @returns {Promise<{
+ *   results: Array<{ documentType, ok, docId, documentNumber, pdfUrl, snapshot, error }>,
+ *   statusTransitioned: boolean,
+ *   nextStatus: string|null
+ * }>}
+ */
+export async function issueAndPrintAll({ app, targets, profile, trainingType, companySettings }) {
+  if (!app?.id) throw new Error('app.id が必要です')
+  if (!Array.isArray(targets) || targets.length === 0) {
+    return { results: [], statusTransitioned: false, nextStatus: null }
+  }
+
+  const results = []
+
+  for (const docType of targets) {
+    const result = {
+      documentType: docType,
+      ok: false,
+      docId: null,
+      documentNumber: null,
+      pdfUrl: null,
+      snapshot: null,
+      error: null,
+    }
+    try {
+      // 1. 発行（採番 + documents 作成 + 履歴）
+      const issued = await issueDocument({
+        app,
+        documentType: docType,
+        profile,
+        trainingType,
+        companySettings,
+      })
+      result.docId = issued.docId
+      result.documentNumber = issued.documentNumber
+      result.snapshot = issued.snapshot
+
+      // 2. PDF 生成（html2canvas + jsPDF）
+      const blob = await generateTrainingDocumentBlob({
+        documentType: docType,
+        documentNumber: issued.documentNumber,
+        snapshot: issued.snapshot,
+        issuedAt: new Date(),
+      })
+
+      // 3. Storage アップロード
+      const { pdfUrl, pdfStoragePath } = await uploadTrainingPdf({
+        appId: app.id,
+        documentType: docType,
+        documentNumber: issued.documentNumber,
+        blob,
+      })
+      result.pdfUrl = pdfUrl
+
+      // 4. documents レコードに PDF 情報を紐付け + 履歴記録
+      await attachPdf({
+        appId: app.id,
+        docId: issued.docId,
+        documentType: docType,
+        documentNumber: issued.documentNumber,
+        pdfUrl,
+        pdfStoragePath,
+        profile,
+      })
+
+      result.ok = true
+    } catch (e) {
+      console.error('[issueAndPrintAll]', docType, e)
+      result.error = String(e?.message || e)
+      if (result.docId) {
+        try {
+          await recordPdfFailure({
+            appId: app.id,
+            docId: result.docId,
+            documentType: docType,
+            documentNumber: result.documentNumber,
+            error: e,
+            profile,
+          })
+        } catch (_) { /* noop */ }
+      }
+    }
+    results.push(result)
+  }
+
+  // 5. 全て成功していて、案件ステータスが遷移可能なら自動で documents_issued に進める
+  let statusTransitioned = false
+  let nextStatus = null
+  const allSucceeded = results.length > 0 && results.every((r) => r.ok)
+  if (allSucceeded && canTransition(app.status, TRAINING_STATUS.DOCUMENTS_ISSUED)) {
+    try {
+      await updateDoc(doc(db, 'trainingApplications', app.id), {
+        status: TRAINING_STATUS.DOCUMENTS_ISSUED,
+        updatedAt: serverTimestamp(),
+        updatedBy: profile?.uid || null,
+      })
+      await addDoc(collection(db, 'trainingApplications', app.id, 'history'), {
+        from: app.status,
+        to: TRAINING_STATUS.DOCUMENTS_ISSUED,
+        actorUid: profile?.uid || null,
+        actorName: profile?.name || profile?.email || '',
+        comment: '発行物を全件発行済みにしたため自動遷移',
+        createdAt: serverTimestamp(),
+      })
+      statusTransitioned = true
+      nextStatus = TRAINING_STATUS.DOCUMENTS_ISSUED
+    } catch (e) {
+      console.warn('[issueAndPrintAll] status transition failed', e)
+    }
+  }
+
+  return { results, statusTransitioned, nextStatus }
+}
+
+/**
+ * 再印刷を記録し、ポップアップで PDF を開いて印刷ダイアログを起動する高レベル関数。
+ */
+export async function reprintAndOpen({ appId, docId, pdfUrl, profile }) {
+  const { printCount } = await recordReprint({ appId, docId, profile })
+  const opened = openPdfWindow(pdfUrl)
+  return { printCount, opened }
 }
