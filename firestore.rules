@@ -836,7 +836,7 @@ service cloud.firestore {
       allow read:  if isAdmin() || isStaff()
                     || (isDealer()
                         && userDoc().get('dealerCode', '') != ''
-                        && docId.matches('^' + userDoc().dealerCode + '_.*$'));
+                        && docId.split('_')[0] == userDoc().dealerCode);
       allow write: if false;
     }
 
