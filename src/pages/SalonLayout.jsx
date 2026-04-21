@@ -33,7 +33,6 @@ export default function SalonLayout() {
     <>
       <Item to="/salon" label="ダッシュボード" onClick={closeMenu} end />
       <Item to="/salon/customers" label="顧客管理" onClick={closeMenu} />
-      <Item to="/salon/reservations" label="予約" onClick={closeMenu} />
       <Item to="/salon/chat" label="チャット" onClick={closeMenu} />
       <Item to="/salon/documents" label="資料ダウンロード" onClick={closeMenu} />
     </>

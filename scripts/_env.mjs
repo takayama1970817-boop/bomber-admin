@@ -24,7 +24,7 @@
  *   BCART_BASE                    (既定: https://api.bcart.jp/api/v1)
  */
 
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 
 // .env.local を優先して自動ロード（Node 22+ の組み込み API）
@@ -91,3 +91,68 @@ export function getBcartToken() {
 }
 
 export const BCART_BASE = process.env.BCART_BASE || 'https://api.bcart.jp/api/v1'
+
+/**
+ * Admin SDK 用 service account を読み込み、本番 projectId と一致するかを検証する。
+ *
+ * 環境変数:
+ *   SERVICE_ACCOUNT_PATH  scripts/ からの相対パス（既定: service-account.json）
+ *                          例: SERVICE_ACCOUNT_PATH=service-account.prod.json
+ *   EXPECTED_PROJECT_ID   想定 projectId（既定: bomber-admin）
+ *                          test 環境を意図的に使うときは
+ *                          EXPECTED_PROJECT_ID=bomber-admin-test
+ *                          を明示する。
+ *
+ * 戻り値:
+ *   { serviceAccount, projectId, credentialPath }
+ *
+ * project 不一致の場合は明示的なエラーメッセージを出して exit する。
+ * これにより test 用 service-account.json で本番想定スクリプトが動く事故を防ぐ。
+ */
+export function loadAdminCredential(scriptsDir) {
+  const fileName = process.env.SERVICE_ACCOUNT_PATH || 'service-account.json'
+  // scriptsDir は呼び出し側から import.meta.url の dir を渡してもらう想定
+  const credentialPath = resolve(scriptsDir, fileName)
+
+  if (!existsSync(credentialPath)) {
+    console.error(`\n❌ service account ファイルが見つかりません: ${credentialPath}`)
+    console.error('   Firebase Console → プロジェクト設定 → サービスアカウント')
+    console.error('   → 新しい秘密鍵 を取得して保存してください。')
+    process.exit(1)
+  }
+
+  let serviceAccount
+  try {
+    serviceAccount = JSON.parse(readFileSync(credentialPath, 'utf8'))
+  } catch (e) {
+    console.error(`\n❌ service account JSON の読み込みに失敗: ${e.message}`)
+    process.exit(1)
+  }
+
+  const projectId = serviceAccount.project_id || ''
+  const expected = process.env.EXPECTED_PROJECT_ID || 'bomber-admin'
+
+  if (projectId !== expected) {
+    console.error('\n❌ Firebase project ID が想定と一致しません')
+    console.error(`   service-account.json の projectId : ${projectId || '(空)'}`)
+    console.error(`   client_email                       : ${serviceAccount.client_email || '(空)'}`)
+    console.error(`   ファイルパス                        : ${credentialPath}`)
+    console.error(`   期待値 (EXPECTED_PROJECT_ID)        : ${expected}`)
+    console.error('')
+    console.error('対応:')
+    console.error(`   A) 本番 ('${expected}') の service account に差し替える:`)
+    console.error(`      Firebase Console → ${expected} → プロジェクト設定 → サービスアカウント`)
+    console.error('      → 新しい秘密鍵 を取得 → scripts/service-account.json として保存')
+    console.error('')
+    console.error('   B) 別ファイル名で保管している場合は env で指定:')
+    console.error('      $env:SERVICE_ACCOUNT_PATH="service-account.prod.json"')
+    console.error('      node scripts/...')
+    console.error('')
+    console.error(`   C) 意図的に '${projectId}' を使うなら以下を明示:`)
+    console.error(`      $env:EXPECTED_PROJECT_ID="${projectId}"`)
+    console.error('      node scripts/...')
+    process.exit(1)
+  }
+
+  return { serviceAccount, projectId, credentialPath }
+}

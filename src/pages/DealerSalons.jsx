@@ -5,6 +5,7 @@ import { db } from '../lib/firebase.js'
 import { useAuth } from '../contexts/AuthContext.jsx'
 import { fetchDealerSalonNamesFromBcart } from '../lib/dashboardAggregator.js'
 import { fetchOrdersByMonth } from '../lib/bcartApi.js'
+import { fetchCustomerParentMap, isOrderForDealer } from '../lib/bcartResolver.js'
 
 function fmtDate(ts) {
   if (!ts) return '—'
@@ -87,6 +88,12 @@ export default function DealerSalons() {
       })
       setSalons(combinedSalons)
 
+      // 受注の帰属解決用に会員マスタの current parent_id を取得
+      //   V→J コード変更後、注文の captured parent_id は stale なため
+      //   customer_id → 会員マスタの current parent_id で帰属判定する。
+      setProgress('Bカート 会員マスタ取得中...')
+      const parentMap = await fetchCustomerParentMap({ forceRefresh, onProgress: setProgress })
+
       // Bカートから直近12ヶ月の受注を取得
       const months = 12
       const nowDate = new Date()
@@ -100,7 +107,7 @@ export default function DealerSalons() {
         try {
           const raw = await fetchOrdersByMonth(ymStr)
           for (const o of raw) {
-            if (String(o.customer_parent_id || '') !== String(dealerCode)) continue
+            if (!isOrderForDealer(o, dealerCode, parentMap)) continue
             allBcart.push({
               id: o.id,
               companyName: (o.customer_comp_name || o.comp_name || o.customer_name || '').trim(),
@@ -202,7 +209,7 @@ export default function DealerSalons() {
       <div>
         <button
           onClick={() => setSelected(null)}
-          className="mb-4 text-sm text-indigo-600 hover:underline"
+          className="mb-4 text-sm text-violet-500 hover:underline"
         >
           ← サロン一覧に戻る
         </button>
@@ -219,7 +226,7 @@ export default function DealerSalons() {
         <div className="mb-6 flex gap-6 text-sm text-gray-500">
           <span>注文数：<strong className="text-gray-900">{salon.totalOrders}件</strong></span>
           <span>累計売上：<strong className="text-gray-900">{fmtYen(salon.totalSales)}</strong></span>
-          <span>今月：<strong className="text-indigo-600">{fmtYen(salon.thisMonthSales)}</strong></span>
+          <span>今月：<strong className="text-violet-500">{fmtYen(salon.thisMonthSales)}</strong></span>
         </div>
 
         {/* 月別売上 */}
@@ -329,9 +336,9 @@ export default function DealerSalons() {
                   <div className="text-[10px] text-gray-400">{salon.totalOrders}件</div>
                 </div>
                 <div>
-                  <div className="text-[10px] text-indigo-500">今月</div>
-                  <div className="text-sm font-bold text-indigo-600">{fmtYen(salon.thisMonthSales)}</div>
-                  <div className="text-[10px] text-indigo-300">{salon.thisMonthOrders}件</div>
+                  <div className="text-[10px] text-violet-500">今月</div>
+                  <div className="text-sm font-bold text-violet-500">{fmtYen(salon.thisMonthSales)}</div>
+                  <div className="text-[10px] text-violet-300">{salon.thisMonthOrders}件</div>
                 </div>
                 <div>
                   <div className="text-[10px] text-gray-500">最終注文</div>

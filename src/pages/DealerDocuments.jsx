@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react'
-import { collection, getDocs, orderBy, query, where } from 'firebase/firestore'
+import { collection, getDocs, orderBy, query } from 'firebase/firestore'
 import { db } from '../lib/firebase.js'
-import { useAuth } from '../contexts/AuthContext.jsx'
 
 function fmtDate(ts) {
   if (!ts) return '—'
@@ -24,54 +23,24 @@ const CATEGORY_LABELS = {
 }
 
 export default function DealerDocuments() {
-  const { profile } = useAuth()
   const [docs, setDocs] = useState([])
   const [loading, setLoading] = useState(true)
   const [filter, setFilter] = useState('all')
 
   useEffect(() => {
-    if (!profile) return
     ;(async () => {
       try {
-        // Firestore rules の canReadDealerDocument() に合致するクエリを分割実行。
-        // dealer は「isActive && visibility in ['all','dealers']」または
-        //         「isActive && visibility=='specific' && allowedDealers contains 自社dealerCode」
-        const base = collection(db, 'dealerDocuments')
-        const queries = [
-          query(
-            base,
-            where('isActive', '==', true),
-            where('visibility', 'in', ['all', 'dealers']),
-            orderBy('updatedAt', 'desc'),
-          ),
-        ]
-        if (profile.dealerCode) {
-          queries.push(
-            query(
-              base,
-              where('isActive', '==', true),
-              where('visibility', '==', 'specific'),
-              where('allowedDealers', 'array-contains', profile.dealerCode),
-              orderBy('updatedAt', 'desc'),
-            ),
-          )
-        }
-        const snaps = await Promise.all(queries.map((q) => getDocs(q)))
-        const map = new Map()
-        snaps.forEach((snap) => snap.docs.forEach((d) => map.set(d.id, { id: d.id, ...d.data() })))
-        const merged = Array.from(map.values()).sort((a, b) => {
-          const ta = a.updatedAt?.toMillis?.() || 0
-          const tb = b.updatedAt?.toMillis?.() || 0
-          return tb - ta
-        })
-        setDocs(merged)
+        const snap = await getDocs(
+          query(collection(db, 'dealerDocuments'), orderBy('updatedAt', 'desc'))
+        )
+        setDocs(snap.docs.map((d) => ({ id: d.id, ...d.data() })))
       } catch (e) {
         console.error('資料取得エラー:', e)
       } finally {
         setLoading(false)
       }
     })()
-  }, [profile])
+  }, [])
 
   const filtered = filter === 'all' ? docs : docs.filter((d) => d.category === filter)
   const categories = [...new Set(docs.map((d) => d.category).filter(Boolean))]
@@ -92,7 +61,7 @@ export default function DealerDocuments() {
             onClick={() => setFilter('all')}
             className={`rounded-lg px-4 py-1.5 text-sm font-medium transition-colors ${
               filter === 'all'
-                ? 'bg-indigo-600 text-white'
+                ? 'bg-violet-500 text-white'
                 : 'border border-gray-300 bg-white text-gray-600 hover:bg-gray-50'
             }`}
           >
@@ -104,7 +73,7 @@ export default function DealerDocuments() {
               onClick={() => setFilter(cat)}
               className={`rounded-lg px-4 py-1.5 text-sm font-medium transition-colors ${
                 filter === cat
-                  ? 'bg-indigo-600 text-white'
+                  ? 'bg-violet-500 text-white'
                   : 'border border-gray-300 bg-white text-gray-600 hover:bg-gray-50'
               }`}
             >
@@ -129,7 +98,7 @@ export default function DealerDocuments() {
                   </span>
                 )}
                 {d.category && (
-                  <span className="rounded bg-indigo-100 px-2 py-0.5 text-[10px] font-medium text-indigo-700">
+                  <span className="rounded bg-violet-100 px-2 py-0.5 text-[10px] font-medium text-violet-600">
                     {CATEGORY_LABELS[d.category] || d.category}
                   </span>
                 )}
@@ -148,7 +117,7 @@ export default function DealerDocuments() {
                 href={d.url}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="inline-block rounded-lg bg-indigo-600 px-4 py-2 text-xs font-medium text-white hover:bg-indigo-700"
+                className="inline-block rounded-lg bg-violet-500 px-4 py-2 text-xs font-medium text-white hover:bg-violet-600"
               >
                 {d.source === 'upload' ? 'PDFをダウンロード' : 'ダウンロード / 開く'}
               </a>

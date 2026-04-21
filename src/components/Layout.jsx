@@ -89,15 +89,6 @@ export default function Layout() {
       {isAdmin && <Item to="/admin/dashboard-exec" label="経営ダッシュボード" onClick={closeMenu} />}
       {isAdmin && <Item to="/admin/customer-analytics" label="顧客分析" onClick={closeMenu} />}
       {isAdmin && <Item to="/admin/product-costs" label="原価マスタ" onClick={closeMenu} />}
-      {(isAdmin || profile?.role === 'staff') && (
-        <MenuGroup label="ERP（基幹）">
-          <SubItem to="/admin/erp/orders" label="受注" onClick={closeMenu} />
-          <SubItem to="/admin/erp/purchase-orders" label="発注" onClick={closeMenu} />
-          <SubItem to="/admin/erp/inventory" label="在庫" onClick={closeMenu} />
-          <SubItem to="/admin/erp/stock-ins" label="入庫" onClick={closeMenu} />
-          <SubItem to="/admin/erp/shipments" label="出荷" onClick={closeMenu} />
-        </MenuGroup>
-      )}
       <Item to="/salons" label="サロン一覧" onClick={closeMenu} />
       <Item to="/dealers" label="代理店管理" onClick={closeMenu} />
       <Item to="/attendance" label="勤怠打刻" onClick={closeMenu} />
@@ -125,7 +116,6 @@ export default function Layout() {
       )}
       {hasAccess('inventory') && <Item to="/admin/inventory" label="在庫管理" onClick={closeMenu} />}
       {hasAccess('warehouse') && <Item to="/admin/warehouse" label="倉庫管理" onClick={closeMenu} />}
-      {(isAdmin || profile?.role === 'staff') && <Item to="/settlements" label="取引精算" onClick={closeMenu} />}
       {hasAccess('kickback') && <Item to="/admin/kickback" label="KB清算" onClick={closeMenu} />}
       {isAdmin && <Item to="/admin/invoices" label="請求書管理" onClick={closeMenu} />}
       {hasAccess('users') && <Item to="/admin/users" label="スタッフ管理" onClick={closeMenu} />}

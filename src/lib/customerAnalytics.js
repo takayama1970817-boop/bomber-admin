@@ -10,6 +10,7 @@
 import { collection, getDocs, query, where } from 'firebase/firestore'
 import { db } from './firebase.js'
 import { fetchOrdersByMonth } from './bcartApi.js'
+import { fetchCustomerParentMap, isOrderForDealer } from './bcartResolver.js'
 
 const MS_PER_DAY = 1000 * 60 * 60 * 24
 
@@ -386,7 +387,11 @@ export async function fetchSalonAnalyticsFromBcart(dealerCode, options = {}) {
     } catch (e) { /* ignore */ }
   }
 
-  // 月次でBカート受注を取得 → dealerCode フィルタ
+  // 会員マスタ経由で帰属解決（V→J コード変更後も正しく拾う）
+  if (onProgress) onProgress('Bカート 会員マスタ取得中...')
+  const parentMap = await fetchCustomerParentMap({ onProgress })
+
+  // 月次でBカート受注を取得 → dealerCode フィルタ（resolved parent_id 基準）
   const matched = []
   const now = new Date()
   for (let i = 0; i < months; i += 1) {
@@ -397,7 +402,7 @@ export async function fetchSalonAnalyticsFromBcart(dealerCode, options = {}) {
     try {
       if (onProgress) onProgress(`Bカート分析 ${ymStr} ...`)
       const raw = await fetchOrdersByMonth(ymStr)
-      const filtered = raw.filter((o) => String(o.customer_parent_id || '') === String(dealerCode))
+      const filtered = raw.filter((o) => isOrderForDealer(o, dealerCode, parentMap))
       matched.push(...filtered)
     } catch (e) {
       console.warn('bcart analytics fetch skipped for', ymStr, e.message)

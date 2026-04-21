@@ -26,8 +26,10 @@
  *   # 記録者メモ
  *   OPERATOR="社長 ボンバー" DRY_RUN=false node scripts/sync-square-bookings.mjs
  *
- *   # 取得期間の指定（既定: 過去7日〜未来30日）
- *   START_AT_MIN=2026-04-01 START_AT_MAX=2026-05-31 node scripts/sync-square-bookings.mjs
+ *   # 取得期間の指定（既定: 過去7日〜未来24日 = 31日）
+ *   # ※ Square API は期間が 31日以内でないと 400 を返すため、同スクリプトは
+ *   #    起動時に 31日超過なら事前停止する。
+ *   START_AT_MIN=2026-04-01 START_AT_MAX=2026-05-01 node scripts/sync-square-bookings.mjs
  *
  * 必要な環境変数（.env.local）:
  *   SQUARE_ACCESS_TOKEN                          Square Developer Dashboard で発行
@@ -110,10 +112,14 @@ const SQUARE_BASE = SQUARE_ENV === 'sandbox'
   ? 'https://connect.squareupsandbox.com'
   : 'https://connect.squareup.com'
 
-// 取得期間の既定: 過去7日 〜 未来30日（Phase 1 テスト運用に十分）
+// 取得期間の既定: 過去7日 〜 未来24日（合計31日。Square API の 31日以内制限に厳密準拠）
+// Square Bookings API は start_at_min / start_at_max の差分が 31日超だと 400 で拒否する。
+// Phase 1 テスト運用では未来寄りに多めに取りたいので、過去はやや狭めに確保。
+const SQUARE_MAX_RANGE_DAYS = 31
+const MS_PER_DAY = 24 * 60 * 60 * 1000
 const now = new Date()
-const defaultMin = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
-const defaultMax = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000)
+const defaultMin = new Date(now.getTime() - 7 * MS_PER_DAY)
+const defaultMax = new Date(now.getTime() + 24 * MS_PER_DAY)
 const START_AT_MIN = process.env.START_AT_MIN
   ? new Date(process.env.START_AT_MIN)
   : defaultMin
@@ -121,7 +127,38 @@ const START_AT_MAX = process.env.START_AT_MAX
   ? new Date(process.env.START_AT_MAX)
   : defaultMax
 
-const SCRIPT_VERSION = '2026-04-18.v1'
+// 入力値バリデーション
+if (Number.isNaN(START_AT_MIN.getTime())) {
+  console.error(`❌ START_AT_MIN が不正な日時です: "${process.env.START_AT_MIN}"`)
+  process.exit(1)
+}
+if (Number.isNaN(START_AT_MAX.getTime())) {
+  console.error(`❌ START_AT_MAX が不正な日時です: "${process.env.START_AT_MAX}"`)
+  process.exit(1)
+}
+if (START_AT_MIN.getTime() >= START_AT_MAX.getTime()) {
+  console.error(
+    `❌ START_AT_MIN (${START_AT_MIN.toISOString()}) が START_AT_MAX (${START_AT_MAX.toISOString()}) 以降になっています。`,
+  )
+  process.exit(1)
+}
+
+// Square API 31日以内制限ガード
+// env で明示指定した場合も、既定値でも必ずチェックする（API 側で 400 になる前にここで止める）
+const rangeDays = (START_AT_MAX.getTime() - START_AT_MIN.getTime()) / MS_PER_DAY
+if (rangeDays > SQUARE_MAX_RANGE_DAYS) {
+  console.error('❌ 取得期間が Square API の 31日制限を超えています。')
+  console.error(`   指定された期間: ${rangeDays.toFixed(2)} 日`)
+  console.error(`   START_AT_MIN  : ${START_AT_MIN.toISOString()}`)
+  console.error(`   START_AT_MAX  : ${START_AT_MAX.toISOString()}`)
+  console.error(`   上限          : ${SQUARE_MAX_RANGE_DAYS} 日`)
+  console.error('')
+  console.error('   対応: START_AT_MIN / START_AT_MAX を 31日以内の範囲に調整するか、')
+  console.error('   環境変数を外して既定値（過去7日〜未来24日 = 31日）を使ってください。')
+  process.exit(1)
+}
+
+const SCRIPT_VERSION = '2026-04-18.v2'
 const LOG_COLLECTION = 'squareSyncLogs'
 const RESERVATIONS_COLLECTION = 'reservations'
 

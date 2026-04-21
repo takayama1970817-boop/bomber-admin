@@ -164,16 +164,9 @@ service cloud.firestore {
     }
 
     // ========================================
-    // orders コレクション（legacy 受注、cutover で readOnly 化）
-    // 設計書: docs/04_ERP_DATA_MODEL.md §7
-    // ポリシー:
-    //   - read: 既存通り（admin/staff 全件、dealer/salon は自社のみ）
-    //   - create: 既存通り（BcartImport が erp_orders 対応完了まで互換維持）
-    //   - update:
-    //       * 通常（isDeprecated != true）: admin/staff 可
-    //       * cutover 済み（isDeprecated == true）: admin のみ、かつ
-    //         isDeprecated 関連フィールドの修正（やり直し・取消）に限定
-    //   - delete: 既存通り禁止（write で admin/staff に限定、個別 delete 許可なし）
+    // orders コレクション
+    // admin/staff は全件読める。dealer は自社の注文のみ読める
+    // 書き込みは admin のみ
     // ========================================
     match /orders/{orderId} {
       allow read:  if isSignedIn()
@@ -185,19 +178,7 @@ service cloud.firestore {
                       || (isSalon()
                           && resource.data.companyName == userDoc().companyName)
                     );
-      allow create: if isAdmin() || isStaff();
-      allow update: if (
-                      // cutover 前 or 未付与：通常の admin/staff 更新を許容
-                      !(resource.data.get('isDeprecated', false) == true)
-                      && (isAdmin() || isStaff())
-                    ) || (
-                      // cutover 後：admin のみ、かつ isDeprecated 関連フィールドのみ触れる
-                      resource.data.get('isDeprecated', false) == true
-                      && isAdmin()
-                      && request.resource.data.diff(resource.data).affectedKeys()
-                          .hasOnly(['isDeprecated', 'deprecatedAt', 'deprecatedBy', 'migratedToErpOrderId'])
-                    );
-      allow delete: if false;
+      allow write: if isAdmin() || isStaff();
     }
 
     // ========================================
@@ -576,31 +557,6 @@ service cloud.firestore {
     }
 
     // ========================================
-    // reservations コレクション（Square予約連動）
-    // - 予約の正本は Square、これは取り込み用の閲覧コピー
-    // - read: salon は自社（salonCompanyName 一致）のみ、admin/staff/master は全件
-    // - write: admin/staff のみ（同期スクリプト経由の書き込みも Admin SDK でバイパスする想定）
-    //   salon からは直接書き込み不可（Square が正本のため）
-    // ========================================
-    match /reservations/{reservationId} {
-      allow read:  if isSignedIn()
-                    && (isAdmin() || isStaff()
-                        || (isSalon()
-                            && resource.data.salonCompanyName == userDoc().companyName));
-      allow write: if isAdmin() || isStaff();
-    }
-
-    // ========================================
-    // squareSyncLogs コレクション（Square予約同期スクリプトの監査ログ）
-    // - write: 完全禁止（scripts/sync-square-bookings.mjs が Admin SDK で書き込む）
-    // - read: 本社 admin のみ（社内の監査目的）
-    // ========================================
-    match /squareSyncLogs/{logId} {
-      allow read:  if isAdmin();
-      allow write: if false;
-    }
-
-    // ========================================
     // subRoleBackfillLogs コレクション（subRole 一括付与スクリプトの監査ログ）
     // - write: 完全禁止（scripts/backfill-subrole.mjs が Admin SDK で直接書き込む）
     // - read: 本社 admin のみ（社内の監査目的でのみ参照可）
@@ -616,6 +572,52 @@ service cloud.firestore {
     // - read: 本社 admin のみ（failedEntries の人手調査用）
     // ========================================
     match /ordersBackfillLogs/{logId} {
+      allow read:  if isAdmin();
+      allow write: if false;
+    }
+
+    // ========================================
+    // dealerMonthlySnapshots コレクション（代理店ダッシュボード用 日次スナップショット）
+    // docId = {dealerCode}_{YYYY-MM}
+    // - write: 完全禁止（scripts/aggregate-dealer-monthly.mjs が Admin SDK で直接書き込む）
+    // - read: admin/staff は全件、dealer は自社 dealerCode のみ
+    //         （docId ベース判定。resource.data ベースだと評価タイミング差で
+    //          PERMISSION_DENIED が出るケースがあるため避ける）
+    // ========================================
+    match /dealerMonthlySnapshots/{docId} {
+      allow read:  if isAdmin() || isStaff()
+                    || (isDealer()
+                        && userDoc().get('dealerCode', '') != ''
+                        && docId.matches('^' + userDoc().dealerCode + '_.*$'));
+      allow write: if false;
+    }
+
+    // ========================================
+    // dealerAggregationLogs コレクション（代理店スナップショット集計スクリプトの監査ログ）
+    // - write: 完全禁止（aggregate-dealer-monthly.mjs のみ）
+    // - read: 本社 admin のみ
+    // ========================================
+    match /dealerAggregationLogs/{logId} {
+      allow read:  if isAdmin();
+      allow write: if false;
+    }
+
+    // ========================================
+    // dealerSalonsRebuildLogs コレクション（dealerSalons 再構築スクリプトの監査ログ）
+    // - write: 完全禁止（rebuild-dealer-salons.mjs のみ）
+    // - read: 本社 admin のみ
+    // ========================================
+    match /dealerSalonsRebuildLogs/{logId} {
+      allow read:  if isAdmin();
+      allow write: if false;
+    }
+
+    // ========================================
+    // dealerRegistrationLogs コレクション（代理店 allowedEmails 自動登録スクリプトの監査ログ）
+    // - write: 完全禁止（register-missing-dealers.mjs のみ）
+    // - read: 本社 admin のみ
+    // ========================================
+    match /dealerRegistrationLogs/{logId} {
       allow read:  if isAdmin();
       allow write: if false;
     }
@@ -703,53 +705,6 @@ service cloud.firestore {
       allow read: if isAdmin();
       allow create: if isErpUser();
       allow update, delete: if false;
-    }
-
-    // ========================================
-    // Phase 2 段階1: 自動化監査コレクション群
-    // 設計書: docs/05_PHASE2_AUTOMATION.md §3.2 / §3.6
-    //
-    // 共通ポリシー:
-    //   - read は admin のみ
-    //   - create / update / delete はクライアントから不可
-    //     （すべて Cloud Functions Admin SDK 経由で書き込む）
-    //   - Admin SDK は rules をバイパスするため、本 rule は「クライアント遮断」が目的
-    //
-    // 段階1 初期配備時の挙動（v1.1 軽微5 補足）:
-    //   settings/settlement_automation.enabled = false の間は、
-    //   Cloud Functions 側も実質的に書き込みを行わない（関数冒頭の enabled チェックで
-    //   即 return するため）。結果として本 rule の 3 コレクションは
-    //   「クライアントも Cloud Functions も書き込めない完全静止状態」から始まる。
-    //   enabled=true に社長判断で切り替えて初めて Cloud Functions 経由の書き込みが始まる。
-    //
-    // 注意:
-    //   今回（段階1 Step D）は以下 3 コレクションのみ追加する。
-    //   kickbacks / invoices の既存 rules は今回は変更しない（既存 UI 非破壊）。
-    //   rules 厳格化は後続段階で行う。
-    // ========================================
-
-    // settlementRunLogs: 月次バッチ実行単位の監査ログ（append-only）
-    match /settlementRunLogs/{id} {
-      allow read: if isAdmin();
-      allow create, update, delete: if false;
-    }
-
-    // settlementDuplicateChecks: 二重作成・二重送信の検知結果（append-only）
-    // kind: 'creation' | 'email' フィールドで種別を区別（§3.5 v0.8）
-    match /settlementDuplicateChecks/{id} {
-      allow read: if isAdmin();
-      allow create, update, delete: if false;
-    }
-
-    // adminNotifications: admin 通知キュー + fan-out 結果
-    // create / delete は禁止。update は readBy / acknowledged 系フィールドのみ
-    // （admin が UI 上で既読・対応済みにできるようにする）
-    match /adminNotifications/{id} {
-      allow read: if isAdmin();
-      allow create, delete: if false;
-      allow update: if isAdmin()
-                     && request.resource.data.diff(resource.data).affectedKeys()
-                         .hasOnly(['readBy', 'acknowledgedAt', 'acknowledgedBy']);
     }
 
     // ========================================

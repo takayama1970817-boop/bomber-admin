@@ -13,57 +13,37 @@ const PROXY_URL = '/api/bcart'
 const TOKEN = import.meta.env.VITE_BCART_API_TOKEN
 const PAGE_SIZE = 100
 
-// レート制限対応: 429 は指数的待機で最大 5 回リトライ、5xx も 3 回までリトライ
-const MAX_RETRIES = 5
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
-
 async function apiFetch(endpoint, params = {}) {
-  // URL 構築（DEV / PROD で分岐）
-  let url, authHeader
   if (import.meta.env.DEV) {
-    url = new URL(`${PROXY_URL}/${endpoint}`, window.location.origin)
+    // 開発: Viteプロキシ経由
+    const url = new URL(`${PROXY_URL}/${endpoint}`, window.location.origin)
     Object.entries(params).forEach(([k, v]) => {
       if (v !== undefined && v !== null && v !== '') url.searchParams.set(k, v)
     })
-    authHeader = `Bearer ${TOKEN}`
-  } else {
-    url = new URL(CF_URL)
-    url.searchParams.set('endpoint', endpoint)
-    Object.entries(params).forEach(([k, v]) => {
-      if (v !== undefined && v !== null && v !== '') url.searchParams.set(k, v)
-    })
-    const user = getAuth().currentUser
-    const idToken = user ? await user.getIdToken() : ''
-    authHeader = `Bearer ${idToken}`
-  }
-
-  // リトライループ
-  for (let retry = 0; retry < MAX_RETRIES; retry++) {
     const res = await fetch(url.toString(), {
-      headers: { Authorization: authHeader },
+      headers: { Authorization: `Bearer ${TOKEN}` },
     })
-
-    if (res.status === 429) {
-      // レート制限: 指数的バックオフ (5s, 10s, 20s, 40s, 60s)
-      const wait = Math.min(5000 * Math.pow(2, retry), 60000)
-      console.warn(`[bcartApi] 429 レート制限 → ${wait / 1000}s 待機 (retry ${retry + 1}/${MAX_RETRIES})`)
-      await sleep(wait)
-      continue
-    }
-
-    if (res.status >= 500 && res.status < 600 && retry < 3) {
-      // 一時的なサーバエラー: 短めのバックオフで 3 回までリトライ
-      const wait = (retry + 1) * 1000
-      console.warn(`[bcartApi] ${res.status} → ${wait / 1000}s 待機 (retry ${retry + 1}/3)`)
-      await sleep(wait)
-      continue
-    }
-
     if (!res.ok) throw new Error(`BカートAPI エラー: ${res.status} ${res.statusText}`)
     return res.json()
   }
 
-  throw new Error('BカートAPI レート制限が継続。しばらく待ってから再読み込みしてください。')
+  // 本番: Cloud Functions プロキシ経由
+  const url = new URL(CF_URL)
+  url.searchParams.set('endpoint', endpoint)
+  Object.entries(params).forEach(([k, v]) => {
+    if (v !== undefined && v !== null && v !== '') url.searchParams.set(k, v)
+  })
+
+  // Firebase Auth の IDトークンを取得して認証
+  const user = getAuth().currentUser
+  const idToken = user ? await user.getIdToken() : ''
+
+  const res = await fetch(url.toString(), {
+    headers: { Authorization: `Bearer ${idToken}` },
+  })
+
+  if (!res.ok) throw new Error(`BカートAPI エラー: ${res.status} ${res.statusText}`)
+  return res.json()
 }
 
 /**
@@ -132,15 +112,13 @@ export async function fetchOrderProducts(orderId) {
 }
 
 /**
- * 複数受注IDの明細を一括取得。
- * レート制限回避のため 3 並列 + バッチ間 500ms 待機。
+ * 複数受注IDの明細を一括取得（並列、10件ずつ）
  * @param {Array<number|string>} orderIds
  * @param {Function} onProgress - 進捗コールバック(完了数, 全数)
  */
 export async function fetchOrderProductsBatch(orderIds, onProgress) {
   const results = []
-  const batchSize = 3
-  const batchDelayMs = 500
+  const batchSize = 10
   for (let i = 0; i < orderIds.length; i += batchSize) {
     const batch = orderIds.slice(i, i + batchSize)
     // allSettled で個別のreject が unhandled rejection にならないようにする
@@ -154,10 +132,6 @@ export async function fetchOrderProductsBatch(orderIds, onProgress) {
       else console.warn('order_products skip:', s.reason?.message || s.reason)
     }
     if (onProgress) onProgress(Math.min(i + batchSize, orderIds.length), orderIds.length)
-    // 次バッチまで小休止してレート制限を回避
-    if (i + batchSize < orderIds.length) {
-      await new Promise((r) => setTimeout(r, batchDelayMs))
-    }
   }
   return results
 }

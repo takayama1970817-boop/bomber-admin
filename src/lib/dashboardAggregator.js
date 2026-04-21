@@ -5,6 +5,7 @@
 import { collection, getDocs, query, orderBy, where, Timestamp } from 'firebase/firestore'
 import { db } from './firebase.js'
 import { fetchOrdersByMonth, fetchOrderProductsBatch, fetchAllCustomers } from './bcartApi.js'
+import { fetchCustomerParentMap, resolveOrderDealerCode } from './bcartResolver.js'
 
 const CAMPAIGN_BUCKETS = ['ミカエル', 'エンジェル', '単品販売', '6+1']
 
@@ -211,6 +212,13 @@ export async function fetchDealerSalonNamesFromBcart(dealerCode, options = {}) {
   }
 
   // ② 受注データから派生（会員API取れなくても最近発注しているサロンは拾う）
+  //   帰属解決は会員マスタの current parent_id を優先（V→J コード変更後も正しく拾う）。
+  //   customers API が失敗している場合は captured parent_id にフォールバック。
+  let parentMapForFallback = null
+  try {
+    parentMapForFallback = await fetchCustomerParentMap()
+  } catch (e) { /* customers API 不通時は captured にフォールバック */ }
+
   const now = new Date()
   for (let i = 0; i < fallbackMonths; i += 1) {
     let ty = now.getFullYear()
@@ -221,7 +229,7 @@ export async function fetchDealerSalonNamesFromBcart(dealerCode, options = {}) {
       if (onProgress) onProgress(`Bカート 受注派生 ${ymStr} ...`)
       const raw = await fetchOrdersByMonth(ymStr)
       raw
-        .filter((o) => String(o.customer_parent_id || '') === String(dealerCode))
+        .filter((o) => String(resolveOrderDealerCode(o, parentMapForFallback)) === String(dealerCode))
         .forEach((o) => {
           const n = o.customer_comp_name || o.comp_name || o.customer_name
           if (n) names.add(n)
@@ -315,11 +323,16 @@ export async function fetchMonthlyDashboardLive(year, month, onProgress, company
   const shouldFilterByNames = companyNames instanceof Set
   const shouldFilterByDealer = !!dealerCode
 
-  // Bカート生データ段階でフィルタ（customer_parent_id=dealerCode が代理店配下サロンの指標）
-  // キックバック清算画面と同じロジック
+  // 代理店フィルタは会員マスタの current parent_id で解決する
+  //   (V→J コード変更後、注文の captured customer_parent_id は stale のため)
+  let parentMap = null
+  if (shouldFilterByDealer) {
+    if (onProgress) onProgress('Bカート 会員マスタ取得中...')
+    parentMap = await fetchCustomerParentMap({ onProgress })
+  }
   const filterRaw = (bcartOrders) => {
     if (shouldFilterByDealer) {
-      return bcartOrders.filter((o) => String(o.customer_parent_id || '') === String(dealerCode))
+      return bcartOrders.filter((o) => String(resolveOrderDealerCode(o, parentMap)) === String(dealerCode))
     }
     return bcartOrders
   }
