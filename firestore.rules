@@ -851,6 +851,22 @@ service cloud.firestore {
     }
 
     // ========================================
+    // bcartPromotionLogs コレクション（Bカート受注 email→api 昇格の監査ログ）
+    // - write: admin のみ（BcartImport.jsx または scripts/bcart-sync.mjs の admin セッションから）
+    //          必須フィールドを強制し、他用途で悪用されないようガード
+    // - read:  admin のみ
+    // - update/delete: 全面禁止（append-only）
+    // ========================================
+    match /bcartPromotionLogs/{logId} {
+      allow read:   if isAdmin();
+      allow create: if isAdmin()
+                     && request.resource.data.keys().hasAll(['bcartCode', 'beforeSource', 'afterSource', 'promotedAt'])
+                     && request.resource.data.beforeSource == 'bcart-email'
+                     && request.resource.data.afterSource == 'bcart-api';
+      allow update, delete: if false;
+    }
+
+    // ========================================
     // それ以外は全拒否（保険）
     // ========================================
     match /{document=**} {
