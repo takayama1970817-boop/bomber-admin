@@ -91,13 +91,15 @@ export default function BcartImport() {
         return
       }
 
-      // 既存の注文番号を取得（重複チェック）
+      // 既存の注文 (bcartCode / bcartOrderNumber) をマップ化
+      // 速報 (bcart-email) 行を昇格更新するため、id と source を保持する
       const existingSnap = await getDocs(collection(db, 'orders'))
-      const existingCodes = new Set()
+      const existingByCode = new Map()
       existingSnap.docs.forEach((d) => {
         const data = d.data()
-        if (data.bcartOrderNumber) existingCodes.add(data.bcartOrderNumber)
-        if (data.bcartCode) existingCodes.add(data.bcartCode)
+        const entry = { id: d.id, source: data.source || '' }
+        if (data.bcartOrderNumber) existingByCode.set(data.bcartOrderNumber, entry)
+        if (data.bcartCode) existingByCode.set(data.bcartCode, entry)
       })
 
       // 注文IDごとの商品明細をマップ
@@ -116,6 +118,7 @@ export default function BcartImport() {
       })
 
       let imported = 0
+      let promoted = 0
       let skipped = 0
       let newSalons = 0
 
@@ -126,15 +129,63 @@ export default function BcartImport() {
 
         for (const order of chunk) {
           const code = order.code
-          if (existingCodes.has(code)) {
-            skipped++
+          const companyName = order.customer_comp_name || '（不明）'
+          const dealerCode = resolveDealerCodeFromBcartOrder(order)
+
+          const items = (prodMap[order.id] || []).map((p) => ({
+            name: p.product_name || '',
+            sku: p.jan_code || '',
+            campaign: p.set_name || '',
+            unit: p.set_unit || '',
+            price: p.unit_price || 0,
+            qty: p.order_pro_count || 1,
+          }))
+
+          // 既存マッチ: bcart-email なら昇格、それ以外はスキップ
+          const existing = existingByCode.get(code)
+          if (existing) {
+            if (existing.source === 'bcart-email') {
+              // 速報 → 正式 昇格更新。createdAt は保持、他は API データで上書き
+              const orderRef = doc(db, 'orders', existing.id)
+              batch.update(orderRef, {
+                orderDate: Timestamp.fromDate(new Date(order.ordered_at)),
+                total: order.final_price || 0,
+                subtotal: order.total_price || 0,
+                shipping: order.shipping_cost || 0,
+                tax: order.tax || 0,
+                paymentMethod: order.payment || '',
+                customerNote: order.customer_message || '',
+                items,
+                source: 'bcart-api',
+                bcartOrderId: order.id,
+                companyName,
+                dealerCode,
+                contact: order.customer_name || '',
+                promotedFromEmailAt: serverTimestamp(),
+              })
+
+              // 監査ログ（append-only）
+              const logRef = doc(collection(db, 'bcartPromotionLogs'))
+              batch.set(logRef, {
+                bcartCode: code,
+                beforeSource: 'bcart-email',
+                afterSource: 'bcart-api',
+                orderId: existing.id,
+                bcartOrderId: order.id,
+                companyName,
+                dealerCode,
+                via: 'BcartImport.handleOneClickSync',
+                promotedAt: serverTimestamp(),
+              })
+
+              promoted++
+            } else {
+              skipped++
+            }
             continue
           }
 
-          const companyName = order.customer_comp_name || '（不明）'
-          const dealerCode = resolveDealerCodeFromBcartOrder(order)
           let salonId = salonMap[companyName]
-
           if (!salonId) {
             const salonRef = doc(collection(db, 'salons'))
             salonId = salonRef.id
@@ -157,15 +208,6 @@ export default function BcartImport() {
               updatedAt: serverTimestamp(),
             })
           }
-
-          const items = (prodMap[order.id] || []).map((p) => ({
-            name: p.product_name || '',
-            sku: p.jan_code || '',
-            campaign: p.set_name || '',
-            unit: p.set_unit || '',
-            price: p.unit_price || 0,
-            qty: p.order_pro_count || 1,
-          }))
 
           const orderRef = doc(collection(db, 'orders'))
           batch.set(orderRef, {
@@ -197,7 +239,7 @@ export default function BcartImport() {
       }
 
       setSyncResult(
-        `同期完了: ${imported}件の新規受注を取り込み / ${skipped}件スキップ（取り込み済み）${newSalons > 0 ? ` / ${newSalons}件の新規サロン登録` : ''}`,
+        `同期完了: ${imported}件新規 / ${promoted}件昇格（速報→正式）/ ${skipped}件スキップ${newSalons > 0 ? ` / ${newSalons}件の新規サロン登録` : ''}`,
       )
     } catch (e) {
       console.error(e)
@@ -234,13 +276,14 @@ export default function BcartImport() {
     setApiResult('')
 
     try {
-      // 既存の注文番号を取得（重複チェック）
+      // 既存の注文をマップ化（速報→正式 昇格対応のため id + source を保持）
       const existingSnap = await getDocs(collection(db, 'orders'))
-      const existingCodes = new Set()
+      const existingByCode = new Map()
       existingSnap.docs.forEach((d) => {
         const data = d.data()
-        if (data.bcartOrderNumber) existingCodes.add(data.bcartOrderNumber)
-        if (data.bcartCode) existingCodes.add(data.bcartCode)
+        const entry = { id: d.id, source: data.source || '' }
+        if (data.bcartOrderNumber) existingByCode.set(data.bcartOrderNumber, entry)
+        if (data.bcartCode) existingByCode.set(data.bcartCode, entry)
       })
 
       // 注文IDごとの商品明細をマップ
@@ -251,6 +294,7 @@ export default function BcartImport() {
       })
 
       let imported = 0
+      let promoted = 0
       let skipped = 0
       let newSalons = 0
 
@@ -270,14 +314,61 @@ export default function BcartImport() {
 
         for (const order of chunk) {
           const code = order.code
-          if (existingCodes.has(code)) {
-            skipped++
+          const companyName = order.customer_comp_name || '（不明）'
+          const dealerCode = resolveDealerCodeFromBcartOrder(order)
+
+          const items = (prodMap[order.id] || []).map((p) => ({
+            name: p.product_name || '',
+            sku: p.jan_code || '',
+            campaign: p.set_name || '',
+            unit: p.set_unit || '',
+            price: p.unit_price || 0,
+            qty: p.order_pro_count || 1,
+          }))
+
+          // 既存マッチ: bcart-email なら昇格、それ以外はスキップ
+          const existing = existingByCode.get(code)
+          if (existing) {
+            if (existing.source === 'bcart-email') {
+              const orderRef = doc(db, 'orders', existing.id)
+              batch.update(orderRef, {
+                orderDate: Timestamp.fromDate(new Date(order.ordered_at)),
+                total: order.final_price || 0,
+                subtotal: order.total_price || 0,
+                shipping: order.shipping_cost || 0,
+                tax: order.tax || 0,
+                paymentMethod: order.payment || '',
+                customerNote: order.customer_message || '',
+                items,
+                source: 'bcart-api',
+                bcartOrderId: order.id,
+                companyName,
+                dealerCode,
+                contact: order.customer_name || '',
+                promotedFromEmailAt: serverTimestamp(),
+              })
+
+              const logRef = doc(collection(db, 'bcartPromotionLogs'))
+              batch.set(logRef, {
+                bcartCode: code,
+                beforeSource: 'bcart-email',
+                afterSource: 'bcart-api',
+                orderId: existing.id,
+                bcartOrderId: order.id,
+                companyName,
+                dealerCode,
+                via: 'BcartImport.handleApiImport',
+                promotedAt: serverTimestamp(),
+              })
+
+              promoted++
+            } else {
+              skipped++
+            }
             continue
           }
 
-          const companyName = order.customer_comp_name || '（不明）'
           let salonId = salonMap[companyName]
-
           // 新規サロン登録
           if (!salonId) {
             const salonRef = doc(collection(db, 'salons'))
@@ -302,16 +393,6 @@ export default function BcartImport() {
             })
           }
 
-          // 注文明細
-          const items = (prodMap[order.id] || []).map((p) => ({
-            name: p.product_name || '',
-            sku: p.jan_code || '',
-            campaign: p.set_name || '',
-            unit: p.set_unit || '',
-            price: p.unit_price || 0,
-            qty: p.order_pro_count || 1,
-          }))
-
           const orderRef = doc(collection(db, 'orders'))
           batch.set(orderRef, {
             salonId,
@@ -330,7 +411,7 @@ export default function BcartImport() {
             bcartCode: code,
             bcartOrderId: order.id,
             companyName,
-            dealerCode: resolveDealerCodeFromBcartOrder(order),
+            dealerCode,
             contact: order.customer_name || '',
             createdAt: serverTimestamp(),
           })
@@ -341,7 +422,7 @@ export default function BcartImport() {
         await batch.commit()
       }
 
-      setApiResult(`取り込み完了: ${imported}件登録 / ${skipped}件スキップ（重複）${newSalons > 0 ? ` / ${newSalons}件の新規サロン登録` : ''}`)
+      setApiResult(`取り込み完了: ${imported}件新規 / ${promoted}件昇格（速報→正式）/ ${skipped}件スキップ${newSalons > 0 ? ` / ${newSalons}件の新規サロン登録` : ''}`)
       setApiOrders([])
       setApiProducts([])
     } catch (e) {

@@ -40,6 +40,7 @@ const args = process.argv.slice(2)
 const yearArg = args.find((a) => a.startsWith('--year='))
 const syncAll = args.includes('--all')
 const skipProducts = args.includes('--skip-products')
+const dryRun = args.includes('--dry-run')
 const TARGET_YEAR = yearArg ? parseInt(yearArg.split('=')[1]) : 2026
 
 // === レート制限対応 fetch ===
@@ -175,15 +176,23 @@ async function main() {
   }
 
   // 3. Firestore既存データ確認
+  // 速報 (bcart-email) 行を昇格更新できるよう、id と source を保持する
   console.log('3. Firestore既存データ確認中...')
   const existingSnap = await getDocs(collection(db, 'orders'))
-  const existingCodes = new Set()
+  const existingByCode = new Map()
+  let emailCount = 0
+  let apiCount = 0
+  let otherCount = 0
   existingSnap.docs.forEach((d) => {
     const data = d.data()
-    if (data.bcartCode) existingCodes.add(data.bcartCode)
-    if (data.bcartOrderNumber) existingCodes.add(data.bcartOrderNumber)
+    const entry = { id: d.id, source: data.source || '' }
+    if (data.bcartCode) existingByCode.set(data.bcartCode, entry)
+    if (data.bcartOrderNumber) existingByCode.set(data.bcartOrderNumber, entry)
+    if (data.source === 'bcart-email') emailCount++
+    else if (data.source === 'bcart-api') apiCount++
+    else otherCount++
   })
-  console.log(`   既存: ${existingSnap.size}件\n`)
+  console.log(`   既存 orders: ${existingSnap.size}件（bcart-email=${emailCount} / bcart-api=${apiCount} / その他=${otherCount}）\n`)
 
   // 4. サロンマップ
   const salonSnap = await getDocs(collection(db, 'salons'))
@@ -194,8 +203,9 @@ async function main() {
   })
 
   // 5. Firestore書き込み
-  console.log('4. Firestore書き込み中...')
-  let imported = 0, skipped = 0, newSalons = 0
+  const dryLabel = dryRun ? '（DRY_RUN: 書き込まず集計のみ）' : ''
+  console.log(`4. Firestore書き込み${dryRun ? '（シミュレーション）' : ''}...${dryLabel}`)
+  let imported = 0, promoted = 0, skipped = 0, newSalons = 0
   let batch = writeBatch(db)
   let batchCount = 0
 
@@ -204,40 +214,19 @@ async function main() {
 
   for (const order of orders) {
     const code = order.code
-    if (existingCodes.has(code)) { skipped++; continue }
 
-    // 月別カウント
+    // 月別カウント（新規・昇格ともに集計対象）
     const month = order.ordered_at.substring(0, 7) // YYYY-MM
     if (!monthlyStats[month]) monthlyStats[month] = { count: 0, total: 0 }
-    monthlyStats[month].count++
-    monthlyStats[month].total += (order.final_price || 0)
 
     const companyName = order.customer_comp_name || '（不明）'
-    let salonId = salonMap[companyName]
 
-    if (!salonId) {
-      const salonRef = doc(collection(db, 'salons'))
-      salonId = salonRef.id
-      salonMap[companyName] = salonId
-      newSalons++
-      batch.set(salonRef, {
-        name: companyName,
-        contact: order.customer_name || '',
-        phone: order.customer_tel || '',
-        email: order.customer_email || '',
-        address: `${order.customer_pref || ''}${order.customer_address1 || ''}${order.customer_address2 || ''}${order.customer_address3 || ''}`,
-        zip: order.customer_zip || '',
-        department: order.customer_department || '',
-        plan: '',
-        bcartRegistered: true,
-        assignedUid: '',
-        notes: 'BカートAPI同期で自動登録',
-        lastOrderDate: Timestamp.fromDate(new Date(order.ordered_at)),
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      })
-      batchCount++
-    }
+    // orders.read strict 化に備え、Bカート側の customer_parent_id を dealerCode として刻む。
+    // ロジックは src/lib/dealerCodeResolver.js の resolveDealerCodeFromBcartOrder と同一。
+    // Node.js スクリプトから frontend lib を import できないため、ここではインライン化する。
+    const dealerCode = String(
+      order.customer_parent_id ?? order.parent_id ?? order.parent_member_id ?? '',
+    ).trim()
 
     const items = (prodMap[order.id] || []).map((p) => ({
       name: p.product_name || '',
@@ -248,57 +237,139 @@ async function main() {
       qty: p.order_pro_count || 1,
     }))
 
-    // orders.read strict 化に備え、Bカート側の customer_parent_id を dealerCode として刻む。
-    // ロジックは src/lib/dealerCodeResolver.js の resolveDealerCodeFromBcartOrder と同一。
-    // Node.js スクリプトから frontend lib を import できないため、ここではインライン化する。
-    const dealerCode = String(
-      order.customer_parent_id ?? order.parent_id ?? order.parent_member_id ?? '',
-    ).trim()
+    // 既存マッチ: bcart-email なら昇格、それ以外はスキップ
+    const existing = existingByCode.get(code)
+    if (existing) {
+      if (existing.source === 'bcart-email') {
+        // 月別集計（昇格は金額が確定するためここで集計）
+        monthlyStats[month].count++
+        monthlyStats[month].total += (order.final_price || 0)
 
-    const orderRef = doc(collection(db, 'orders'))
-    batch.set(orderRef, {
-      salonId,
-      orderDate: Timestamp.fromDate(new Date(order.ordered_at)),
-      total: order.final_price || 0,
-      subtotal: order.total_price || 0,
-      shipping: order.shipping_cost || 0,
-      tax: order.tax || 0,
-      paymentMethod: order.payment || '',
-      campaign: '',
-      customerNote: order.customer_message || '',
-      items,
-      source: 'bcart-api',
-      bcartOrderNumber: code,
-      bcartCode: code,
-      bcartOrderId: order.id,
-      companyName,
-      ...(dealerCode ? { dealerCode } : {}),
-      contact: order.customer_name || '',
-      createdAt: serverTimestamp(),
-    })
-    batchCount++
+        if (!dryRun) {
+          const orderRef = doc(db, 'orders', existing.id)
+          batch.update(orderRef, {
+            orderDate: Timestamp.fromDate(new Date(order.ordered_at)),
+            total: order.final_price || 0,
+            subtotal: order.total_price || 0,
+            shipping: order.shipping_cost || 0,
+            tax: order.tax || 0,
+            paymentMethod: order.payment || '',
+            customerNote: order.customer_message || '',
+            items,
+            source: 'bcart-api',
+            bcartOrderId: order.id,
+            companyName,
+            ...(dealerCode ? { dealerCode } : {}),
+            contact: order.customer_name || '',
+            promotedFromEmailAt: serverTimestamp(),
+          })
+
+          const logRef = doc(collection(db, 'bcartPromotionLogs'))
+          batch.set(logRef, {
+            bcartCode: code,
+            beforeSource: 'bcart-email',
+            afterSource: 'bcart-api',
+            orderId: existing.id,
+            bcartOrderId: order.id,
+            companyName,
+            ...(dealerCode ? { dealerCode } : {}),
+            via: 'scripts/bcart-sync.mjs',
+            promotedAt: serverTimestamp(),
+          })
+          batchCount += 2
+        }
+        promoted++
+      } else {
+        skipped++
+      }
+      // flush batch if needed
+      if (!dryRun && batchCount >= 450) {
+        await batch.commit()
+        console.log(`   ... ${imported}件新規 / ${promoted}件昇格 書き込み済み`)
+        batch = writeBatch(db)
+        batchCount = 0
+      }
+      continue
+    }
+
+    // 新規（新規は月別に集計）
+    monthlyStats[month].count++
+    monthlyStats[month].total += (order.final_price || 0)
+
+    let salonId = salonMap[companyName]
+    if (!salonId) {
+      if (!dryRun) {
+        const salonRef = doc(collection(db, 'salons'))
+        salonId = salonRef.id
+        salonMap[companyName] = salonId
+        batch.set(salonRef, {
+          name: companyName,
+          contact: order.customer_name || '',
+          phone: order.customer_tel || '',
+          email: order.customer_email || '',
+          address: `${order.customer_pref || ''}${order.customer_address1 || ''}${order.customer_address2 || ''}${order.customer_address3 || ''}`,
+          zip: order.customer_zip || '',
+          department: order.customer_department || '',
+          plan: '',
+          bcartRegistered: true,
+          assignedUid: '',
+          notes: 'BカートAPI同期で自動登録',
+          lastOrderDate: Timestamp.fromDate(new Date(order.ordered_at)),
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        })
+        batchCount++
+      }
+      newSalons++
+    }
+
+    if (!dryRun) {
+      const orderRef = doc(collection(db, 'orders'))
+      batch.set(orderRef, {
+        salonId,
+        orderDate: Timestamp.fromDate(new Date(order.ordered_at)),
+        total: order.final_price || 0,
+        subtotal: order.total_price || 0,
+        shipping: order.shipping_cost || 0,
+        tax: order.tax || 0,
+        paymentMethod: order.payment || '',
+        campaign: '',
+        customerNote: order.customer_message || '',
+        items,
+        source: 'bcart-api',
+        bcartOrderNumber: code,
+        bcartCode: code,
+        bcartOrderId: order.id,
+        companyName,
+        ...(dealerCode ? { dealerCode } : {}),
+        contact: order.customer_name || '',
+        createdAt: serverTimestamp(),
+      })
+      batchCount++
+    }
     imported++
 
-    if (batchCount >= 450) {
+    if (!dryRun && batchCount >= 450) {
       await batch.commit()
-      console.log(`   ... ${imported}件書き込み済み`)
+      console.log(`   ... ${imported}件新規 / ${promoted}件昇格 書き込み済み`)
       batch = writeBatch(db)
       batchCount = 0
     }
   }
 
-  if (batchCount > 0) {
+  if (!dryRun && batchCount > 0) {
     await batch.commit()
   }
 
   // === 結果表示 ===
   console.log('\n========================================')
-  console.log(`  同期完了: ${yearLabel}`)
+  console.log(`  ${dryRun ? '【DRY_RUN】想定結果' : '同期完了'}: ${yearLabel}`)
   console.log('========================================')
   console.log(`  API取得:       ${orders.length}件`)
-  console.log(`  新規取り込み:  ${imported}件`)
-  console.log(`  スキップ:      ${skipped}件（重複）`)
-  console.log(`  新規サロン:    ${newSalons}件`)
+  console.log(`  新規取り込み:  ${imported}件${dryRun ? '（書き込みなし）' : ''}`)
+  console.log(`  昇格（速報→正式）: ${promoted}件${dryRun ? '（書き込みなし）' : ''}`)
+  console.log(`  スキップ:      ${skipped}件（既に正式）`)
+  console.log(`  新規サロン:    ${newSalons}件${dryRun ? '（書き込みなし）' : ''}`)
 
   if (Object.keys(monthlyStats).length > 0) {
     console.log('\n  【月別内訳（新規分のみ）】')
