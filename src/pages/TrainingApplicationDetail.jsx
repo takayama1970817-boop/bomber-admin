@@ -16,12 +16,19 @@ import { useAuth } from '../contexts/AuthContext.jsx'
 import { assertCan, canManageTraining } from '../lib/permissions.js'
 import {
   APPLICATION_TYPE_LABEL,
+  DOCUMENT_TYPE_LABEL,
   TRAINING_STATUS,
   TRAINING_STATUS_LABEL,
   TRAINING_STATUS_COLOR,
   canTransition,
   getPr1Transitions,
 } from '../lib/trainingStatus.js'
+import {
+  DOCUMENT_STATUS,
+  DOCUMENT_HISTORY_ACTION,
+  checkDocumentIssuable,
+  getAllDocumentTypesForTraining,
+} from '../lib/trainingDocuments.js'
 
 /**
  * 研修案件 詳細（PR-1 骨組み）
@@ -65,6 +72,8 @@ export default function TrainingApplicationDetail() {
   const navigate = useNavigate()
   const [data, setData] = useState(null)
   const [history, setHistory] = useState([])
+  const [documents, setDocuments] = useState([])
+  const [docHistory, setDocHistory] = useState([])
   const [types, setTypes] = useState([])
   const [loading, setLoading] = useState(true)
   const [message, setMessage] = useState('')
@@ -100,15 +109,22 @@ export default function TrainingApplicationDetail() {
         note: d.note || '',
       })
 
-      const [histSnap, typesSnap] = await Promise.all([
+      const [histSnap, typesSnap, docsSnap, docHistSnap] = await Promise.all([
         getDocs(query(
           collection(db, 'trainingApplications', id, 'history'),
           orderBy('createdAt', 'desc'),
         )),
         getDocs(query(collection(db, 'trainingTypes'), orderBy('sortOrder', 'asc'))),
+        getDocs(collection(db, 'trainingApplications', id, 'documents')),
+        getDocs(query(
+          collection(db, 'trainingApplications', id, 'documentHistory'),
+          orderBy('createdAt', 'desc'),
+        )),
       ])
       setHistory(histSnap.docs.map((h) => ({ id: h.id, ...h.data() })))
       setTypes(typesSnap.docs.map((t) => ({ id: t.id, ...t.data() })))
+      setDocuments(docsSnap.docs.map((d) => ({ id: d.id, ...d.data() })))
+      setDocHistory(docHistSnap.docs.map((h) => ({ id: h.id, ...h.data() })))
     } catch (e) {
       console.error(e)
       setMessage(`読み込みエラー: ${e.message}`)
@@ -483,11 +499,109 @@ export default function TrainingApplicationDetail() {
         </div>
 
         <div className="space-y-4">
-          <section className="rounded-lg border border-dashed border-gray-300 bg-white p-4">
-            <h2 className="text-sm font-bold text-gray-700">発行物</h2>
-            <p className="mt-2 text-xs text-gray-500">
-              PR-2 で実装予定。研修種別の発行対象に応じて、ディプロマ / 認定サロン賞 の発行・再印刷・PDF確認ができるようになります。
-            </p>
+          <section className="rounded-lg border border-gray-200 bg-white p-4">
+            <div className="flex items-center justify-between">
+              <h2 className="text-sm font-bold text-gray-700">発行物</h2>
+              <span className="text-[10px] text-gray-400">発行ボタンは PR-3 で実装予定</span>
+            </div>
+            {!selectedType && (
+              <p className="mt-2 text-xs text-gray-400">研修種別が未選択です。</p>
+            )}
+            {selectedType && getAllDocumentTypesForTraining(selectedType).length === 0 && (
+              <p className="mt-2 text-xs text-gray-400">この研修種別には発行対象がありません。</p>
+            )}
+            {selectedType && getAllDocumentTypesForTraining(selectedType).length > 0 && (
+              <div className="mt-3 space-y-3">
+                {getAllDocumentTypesForTraining(selectedType).map((docType) => {
+                  const existing = documents.find((d) => d.documentType === docType)
+                  const isIssued = existing?.status === DOCUMENT_STATUS.ISSUED || existing?.status === DOCUMENT_STATUS.REISSUED
+                  const check = checkDocumentIssuable(data, docType)
+                  return (
+                    <div key={docType} className="rounded border border-gray-200 bg-gray-50 p-3">
+                      <div className="flex items-center justify-between">
+                        <div className="text-sm font-semibold text-gray-700">
+                          {DOCUMENT_TYPE_LABEL[docType] || docType}
+                        </div>
+                        {isIssued ? (
+                          <span className="rounded bg-emerald-100 px-2 py-0.5 text-[11px] text-emerald-700">発行済み</span>
+                        ) : (
+                          <span className={`rounded px-2 py-0.5 text-[11px] ${check.ok ? 'bg-indigo-100 text-indigo-700' : 'bg-red-100 text-red-700'}`}>
+                            {check.ok ? '発行準備OK' : '条件未充足'}
+                          </span>
+                        )}
+                      </div>
+
+                      {isIssued && (
+                        <dl className="mt-2 space-y-1 text-xs text-gray-600">
+                          <div className="flex justify-between">
+                            <dt>発行番号</dt>
+                            <dd className="font-mono text-gray-800">{existing.documentNumber || '—'}</dd>
+                          </div>
+                          <div className="flex justify-between">
+                            <dt>発行日時</dt>
+                            <dd>{fmtDateTime(existing.issuedAt)}</dd>
+                          </div>
+                          <div className="flex justify-between">
+                            <dt>印刷回数</dt>
+                            <dd>{existing.printCount ?? 0} 回</dd>
+                          </div>
+                          <div className="flex justify-between">
+                            <dt>PDF</dt>
+                            <dd>
+                              {existing.pdfUrl ? (
+                                <a href={existing.pdfUrl} target="_blank" rel="noreferrer" className="text-indigo-600 hover:underline">開く</a>
+                              ) : (
+                                <span className="text-amber-600">未生成（PR-3 で生成）</span>
+                              )}
+                            </dd>
+                          </div>
+                        </dl>
+                      )}
+
+                      {!isIssued && !check.ok && (
+                        <ul className="mt-2 list-disc pl-5 text-xs text-red-600">
+                          {check.reasons.map((r, i) => <li key={i}>{r}</li>)}
+                        </ul>
+                      )}
+
+                      {!isIssued && check.ok && (
+                        <p className="mt-2 text-xs text-gray-600">
+                          発行ボタン（PR-3 で配線）を押すと、番号が採番されて発行物レコードが作成されます。
+                        </p>
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+          </section>
+
+          <section className="rounded-lg border border-gray-200 bg-white p-4">
+            <h2 className="mb-2 text-sm font-bold text-gray-700">発行・再印刷履歴</h2>
+            {docHistory.length === 0 ? (
+              <div className="text-xs text-gray-400">発行・再印刷の履歴はまだありません。</div>
+            ) : (
+              <ul className="space-y-2">
+                {docHistory.map((h) => (
+                  <li key={h.id} className="border-l-2 border-purple-200 pl-2 text-xs text-gray-600">
+                    <div className="text-gray-500">{fmtDateTime(h.createdAt)}</div>
+                    <div>
+                      <span className="font-semibold">
+                        {h.action === DOCUMENT_HISTORY_ACTION.ISSUE && '発行'}
+                        {h.action === DOCUMENT_HISTORY_ACTION.REISSUE && '再発行'}
+                        {h.action === DOCUMENT_HISTORY_ACTION.REPRINT && '再印刷'}
+                        {h.action === DOCUMENT_HISTORY_ACTION.PDF_ATTACH && 'PDF添付'}
+                        {h.action === DOCUMENT_HISTORY_ACTION.PDF_FAIL && 'PDF失敗'}
+                      </span>
+                      {h.documentType && <span className="ml-1">{DOCUMENT_TYPE_LABEL[h.documentType] || h.documentType}</span>}
+                      {h.documentNumber && <span className="ml-1 font-mono">{h.documentNumber}</span>}
+                    </div>
+                    {h.error && <div className="text-red-500">エラー: {h.error}</div>}
+                    {h.actorName && <div className="text-[10px] text-gray-400">by {h.actorName}</div>}
+                  </li>
+                ))}
+              </ul>
+            )}
           </section>
 
           <section className="rounded-lg border border-dashed border-gray-300 bg-white p-4">
