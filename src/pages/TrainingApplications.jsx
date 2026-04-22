@@ -248,12 +248,36 @@ export default function TrainingApplications() {
 
   function onSelectDealer(dealerCode) {
     // PR-A: dealerName は手入力せず、選択された dealers レコードから自動取得する
+    // PR-C（サロンスコープ）: 代理店を変更したら配下サロンの集合が変わるため、
+    // salon 選択値・名前・代表者名をまとめてクリアする（誤った紐付けを防止）
     setNewForm((prev) => ({
       ...prev,
       dealerCode: dealerCode || '',
       dealerName: dealerCode ? dealerNameOf(dealerCode) : '',
+      salonId: '',
+      salonName: '',
+      salonRepresentativeName: '',
     }))
   }
+
+  // PR-C: サロン select の絞り込み対象を計算。
+  //   - 本社直: salons 全件（代理店紐付けの制約なし）
+  //   - 代理店経由 & dealerCode 選択済み: dealerSalons で配下と紐付いた companyName のサロンのみ
+  //   - 代理店経由 & dealerCode 未選択: 空（UI 側で disabled 表示）
+  //
+  // 基準は dealerCode（companyName の曖昧マッチではなく、dealerSalons の明示紐付けデータ）。
+  const scopedSalonsForNew = useMemo(() => {
+    if (newForm.applicationType !== 'dealer') return salons
+    if (!newForm.dealerCode) return []
+    const allowedCompanyNames = new Set(
+      dealerSalonsLinks
+        .filter((l) => l.dealerCode === newForm.dealerCode && l.companyName)
+        .map((l) => l.companyName),
+    )
+    return salons.filter((s) => s.companyName && allowedCompanyNames.has(s.companyName))
+  }, [newForm.applicationType, newForm.dealerCode, salons, dealerSalonsLinks])
+
+  const salonSelectDisabled = newForm.applicationType === 'dealer' && !newForm.dealerCode
 
   async function createApplication() {
     try {
@@ -665,16 +689,32 @@ export default function TrainingApplications() {
                 />
               </label>
 
-              <div className="col-span-2 mt-1 border-t border-gray-100 pt-2 text-sm font-semibold text-gray-700">サロン情報</div>
+              <div className="col-span-2 mt-1 border-t border-gray-100 pt-2 text-sm font-semibold text-gray-700">
+                サロン情報
+                {newForm.applicationType === 'dealer' && (
+                  <span className="ml-2 text-[11px] font-normal text-gray-500">
+                    （代理店経由: 選択中代理店の配下サロンのみ表示）
+                  </span>
+                )}
+              </div>
               <label className="block text-sm">
-                <span className="text-xs text-gray-500">サロンを選択（任意）</span>
+                <span className="text-xs text-gray-500">
+                  サロンを選択（任意）
+                  {salonSelectDisabled && (
+                    <span className="ml-1 text-amber-600">先に代理店を選択してください</span>
+                  )}
+                  {newForm.applicationType === 'dealer' && newForm.dealerCode && scopedSalonsForNew.length === 0 && (
+                    <span className="ml-1 text-amber-600">配下サロンの登録がありません（手入力で可）</span>
+                  )}
+                </span>
                 <select
                   value={newForm.salonId}
                   onChange={(e) => onSelectSalon(e.target.value)}
-                  className="mt-1 w-full rounded border border-gray-300 px-2 py-2 text-sm"
+                  disabled={salonSelectDisabled}
+                  className="mt-1 w-full rounded border border-gray-300 px-2 py-2 text-sm disabled:bg-gray-50 disabled:text-gray-400"
                 >
                   <option value="">（未選択・手入力）</option>
-                  {salons.map((s) => (
+                  {scopedSalonsForNew.map((s) => (
                     <option key={s.id} value={s.id}>
                       {s.companyName || s.name || s.id}
                     </option>
