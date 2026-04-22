@@ -102,6 +102,24 @@ service cloud.firestore {
         || (data.assignedDealerCodes is list);
     }
 
+    // assignedDealerCodes / assignedDealerCodesUpdatedAt は admin 専用フィールド。
+    // staff 自身（isSelf）が API 直叩きで自分のスコープを書き換えられないよう、
+    // create/update 双方でガードする。
+    // - update: 変更前後の diff にこのキーが含まれないこと
+    // - create: 新規作成時にこのキーが含まれないこと
+    function isAdminOnlyAssignmentFieldUntouchedOnUpdate() {
+      return !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+        'assignedDealerCodes',
+        'assignedDealerCodesUpdatedAt',
+      ]);
+    }
+    function hasNoAdminOnlyAssignmentFieldOnCreate() {
+      return !request.resource.data.keys().hasAny([
+        'assignedDealerCodes',
+        'assignedDealerCodesUpdatedAt',
+      ]);
+    }
+
     // ========================================
     // users コレクション
     // 本人は自分のドキュメントだけ読める
@@ -111,23 +129,28 @@ service cloud.firestore {
     match /users/{uid} {
       allow get:    if isSignedIn();
       allow list:   if isSignedIn();
-      // create 時は role が dealer/salon なら subRole 必須（strict モード整合）
-      // assignedDealerCodes は任意フィールドだが、含める場合は list 型に限定
-      allow create: if (isAdmin()
+      // create 時は role が dealer/salon なら subRole 必須（strict モード整合）。
+      // assignedDealerCodes は任意フィールドだが、含める場合は list 型に限定。
+      // さらに self による create では assignedDealerCodes / 同 UpdatedAt を
+      // 含めることを禁止（admin のみが付与可能）。
+      allow create: if (
+                        isAdmin()
                         || (isSelf(uid)
                             && request.resource.data.role in ['staff', 'dealer', 'warehouse', 'salon', 'client']
-                            && request.resource.data.uid == uid))
+                            && request.resource.data.uid == uid
+                            && hasNoAdminOnlyAssignmentFieldOnCreate())
+                      )
                      && hasRequiredSubRoleForInvite(request.resource.data)
                      && hasValidAssignedDealerCodesIfPresent(request.resource.data);
-      // update も dealer/salon に昇格するケースで subRole を要求する
-      // assignedDealerCodes の更新は admin のみ意図しているが、rules では
-      // 「list 型である」ことだけ強制し、書き込み権限自体は既存の
-      // (isAdmin || isSelf without role-change) ロジックに委ねる。
-      // self による更新で assignedDealerCodes を変えてしまう余地は残るが、
-      // 現状 UI に該当機能はなく、PR3-B の管理 UI で admin 限定にする。
-      allow update: if (isAdmin()
+      // update も dealer/salon に昇格するケースで subRole を要求する。
+      // assignedDealerCodes / assignedDealerCodesUpdatedAt は admin 専用。
+      // self による update ではこの2フィールドを変更不可（API直叩きを防ぐ）。
+      allow update: if (
+                        isAdmin()
                         || (isSelf(uid)
-                            && request.resource.data.role == resource.data.role))
+                            && request.resource.data.role == resource.data.role
+                            && isAdminOnlyAssignmentFieldUntouchedOnUpdate())
+                      )
                      && hasRequiredSubRoleForInvite(request.resource.data)
                      && hasValidAssignedDealerCodesIfPresent(request.resource.data);
       allow delete: if isAdmin();
