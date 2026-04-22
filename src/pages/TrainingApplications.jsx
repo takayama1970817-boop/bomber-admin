@@ -62,6 +62,7 @@ export default function TrainingApplications() {
   const [types, setTypes] = useState([])
   const [dealers, setDealers] = useState([])
   const [salons, setSalons] = useState([])
+  const [dealerSalonsLinks, setDealerSalonsLinks] = useState([]) // PR-A: 代理店↔サロン紐付け（companyName ベース）
   const [loading, setLoading] = useState(true)
   const [message, setMessage] = useState('')
   const [showNew, setShowNew] = useState(false)
@@ -84,16 +85,19 @@ export default function TrainingApplications() {
   async function loadAll() {
     setLoading(true)
     try {
-      const [appsSnap, typesSnap, dealersSnap, salonsSnap] = await Promise.all([
+      const [appsSnap, typesSnap, dealersSnap, salonsSnap, linksSnap] = await Promise.all([
         getDocs(query(collection(db, 'trainingApplications'), orderBy('applicationDate', 'desc'))),
         getDocs(query(collection(db, 'trainingTypes'), orderBy('sortOrder', 'asc'))),
         getDocs(collection(db, 'dealers')).catch(() => ({ docs: [] })),
         getDocs(collection(db, 'salons')).catch(() => ({ docs: [] })),
+        // PR-A: dealerSalons（companyName ⇔ dealerCode 紐付け）
+        getDocs(collection(db, 'dealerSalons')).catch(() => ({ docs: [] })),
       ])
       setRows(appsSnap.docs.map((d) => ({ id: d.id, ...d.data() })))
       setTypes(typesSnap.docs.map((d) => ({ id: d.id, ...d.data() })))
       setDealers(dealersSnap.docs.map((d) => ({ id: d.id, ...d.data() })))
       setSalons(salonsSnap.docs.map((d) => ({ id: d.id, ...d.data() })))
+      setDealerSalonsLinks(linksSnap.docs.map((d) => ({ id: d.id, ...d.data() })))
     } catch (e) {
       console.error(e)
       setMessage(`読み込みエラー: ${e.message}`)
@@ -156,28 +160,92 @@ export default function TrainingApplications() {
     })
   }, [rows, fType, fStatus, fTrainingType, fKeyword, fQuick, fAppDateFrom, fAppDateTo, fTrDateFrom, fTrDateTo])
 
+  // PR-A: dealerCode から dealerName を解決（dealers コレクションの companyName / name を優先）
+  function dealerNameOf(dealerCode) {
+    if (!dealerCode) return ''
+    const d = dealers.find((x) => x.dealerCode === dealerCode)
+    return d?.companyName || d?.name || d?.dealerName || ''
+  }
+
+  // PR-A: salon から dealerCode を解決
+  //   1. salon.dealerCode があればそれ
+  //   2. なければ dealerSalons を companyName で引き、最新 updatedAt 1件を採用
+  function resolveDealerCodeFromSalon(salon) {
+    if (!salon) return ''
+    if (salon.dealerCode) return salon.dealerCode
+    const links = dealerSalonsLinks.filter((l) => l.companyName === salon.companyName)
+    if (links.length === 0) return ''
+    // updatedAt が無ければ createdAt、それも無ければ 0 で降順
+    const ts = (x) => {
+      const t = x.updatedAt?.toMillis?.() ?? x.createdAt?.toMillis?.() ?? 0
+      return t
+    }
+    links.sort((a, b) => ts(b) - ts(a))
+    return links[0]?.dealerCode || ''
+  }
+
+  // PR-A: 自動決定ルール（ログインユーザー > サロン選択 > UI 選択）
+  //   1. profile.role === 'dealer' && profile.dealerCode → それを使う（将来の代理店セルフ申込向け）
+  //   2. salon 選択済み → resolveDealerCodeFromSalon
+  //   3. 上記不可 → UI で選択
+  function autoResolveDealerCode({ applicationType, salonId }) {
+    if (applicationType !== 'dealer') return ''
+    if (profile?.role === 'dealer' && profile?.dealerCode) return profile.dealerCode
+    if (salonId) {
+      const s = salons.find((x) => x.id === salonId)
+      const code = resolveDealerCodeFromSalon(s)
+      if (code) return code
+    }
+    return ''
+  }
+
   function openNew() {
-    setNewForm(EMPTY_NEW)
+    // PR-A: dealer ロールで開くと applicationType='dealer' + dealerCode 自動セット
+    const isDealerUser = profile?.role === 'dealer' && profile?.dealerCode
+    const initialApplicationType = isDealerUser ? 'dealer' : 'head_office_direct'
+    const initialDealerCode = isDealerUser ? profile.dealerCode : ''
+    setNewForm({
+      ...EMPTY_NEW,
+      applicationType: initialApplicationType,
+      trainerType: isDealerUser ? 'dealer' : 'head_office',
+      dealerCode: initialDealerCode,
+      dealerName: initialDealerCode ? dealerNameOf(initialDealerCode) : '',
+    })
     setShowNew(true)
     setMessage('')
   }
 
   function onSelectSalon(salonId) {
     const s = salons.find((x) => x.id === salonId)
-    setNewForm((prev) => ({
-      ...prev,
-      salonId,
-      salonName: s?.companyName || prev.salonName,
-      salonRepresentativeName: s?.representativeName || prev.salonRepresentativeName,
-    }))
+    setNewForm((prev) => {
+      // PR-A: サロン選択で dealerCode を自動解決。既に dealerCode 設定済みなら上書きしない
+      //   （ログインユーザーが dealer ロール等、優先度の高い自動決定で入った値を尊重）
+      let nextDealerCode = prev.dealerCode
+      let nextDealerName = prev.dealerName
+      if (prev.applicationType === 'dealer' && !prev.dealerCode && s) {
+        const resolved = resolveDealerCodeFromSalon(s)
+        if (resolved) {
+          nextDealerCode = resolved
+          nextDealerName = dealerNameOf(resolved)
+        }
+      }
+      return {
+        ...prev,
+        salonId,
+        salonName: s?.companyName || prev.salonName,
+        salonRepresentativeName: s?.representativeName || prev.salonRepresentativeName,
+        dealerCode: nextDealerCode,
+        dealerName: nextDealerName,
+      }
+    })
   }
 
   function onSelectDealer(dealerCode) {
-    const d = dealers.find((x) => x.dealerCode === dealerCode || x.id === dealerCode)
+    // PR-A: dealerName は手入力せず、選択された dealers レコードから自動取得する
     setNewForm((prev) => ({
       ...prev,
-      dealerCode: d?.dealerCode || dealerCode,
-      dealerName: d?.name || d?.dealerName || prev.dealerName,
+      dealerCode: dealerCode || '',
+      dealerName: dealerCode ? dealerNameOf(dealerCode) : '',
     }))
   }
 
@@ -194,8 +262,8 @@ export default function TrainingApplications() {
         setMessage('研修種別を選択してください')
         return
       }
-      if (newForm.applicationType === 'dealer' && !newForm.dealerName.trim()) {
-        setMessage('代理店経由の申込では代理店名が必須です')
+      if (newForm.applicationType === 'dealer' && !newForm.dealerCode) {
+        setMessage('代理店経由の申込では代理店（dealerCode）の選択が必須です。手入力は廃止されました。')
         return
       }
       setBusy(true)
@@ -593,33 +661,34 @@ export default function TrainingApplications() {
 
               {newForm.applicationType === 'dealer' && (
                 <>
-                  <div className="col-span-2 mt-1 border-t border-gray-100 pt-2 text-sm font-semibold text-gray-700">代理店情報</div>
+                  <div className="col-span-2 mt-1 border-t border-gray-100 pt-2 text-sm font-semibold text-gray-700">
+                    代理店情報 <span className="text-[11px] font-normal text-gray-500">（PR-A: 手入力は廃止・選択のみ）</span>
+                  </div>
                   <label className="block text-sm">
-                    <span className="text-xs text-gray-500">代理店を選択（任意）</span>
+                    <span className="text-xs text-gray-500">代理店（必須・選択）</span>
                     <select
                       value={newForm.dealerCode}
                       onChange={(e) => onSelectDealer(e.target.value)}
                       className="mt-1 w-full rounded border border-gray-300 px-2 py-2 text-sm"
                     >
-                      <option value="">（未選択・手入力）</option>
-                      {dealers.map((d) => (
-                        <option key={d.id} value={d.dealerCode || d.id}>
-                          {(d.dealerCode ? `[${d.dealerCode}] ` : '') + (d.name || d.dealerName || d.id)}
-                        </option>
-                      ))}
+                      <option value="">選択してください</option>
+                      {dealers
+                        .filter((d) => d.dealerCode)
+                        .map((d) => (
+                          <option key={d.id} value={d.dealerCode}>
+                            [{d.dealerCode}] {d.companyName || d.name || d.dealerName || d.id}
+                          </option>
+                        ))}
                     </select>
                   </label>
-                  <label className="block text-sm">
-                    <span className="text-xs text-gray-500">代理店名</span>
-                    <input
-                      type="text"
-                      value={newForm.dealerName}
-                      onChange={(e) => setNewForm({ ...newForm, dealerName: e.target.value })}
-                      className="mt-1 w-full rounded border border-gray-300 px-2 py-2 text-sm"
-                    />
-                  </label>
+                  <div className="block text-sm">
+                    <span className="text-xs text-gray-500">代理店名（自動表示）</span>
+                    <div className="mt-1 w-full rounded border border-gray-200 bg-gray-50 px-2 py-2 text-sm text-gray-700">
+                      {newForm.dealerName || <span className="text-gray-400">未選択</span>}
+                    </div>
+                  </div>
                   <label className="col-span-2 block text-sm">
-                    <span className="text-xs text-gray-500">代理店担当者名</span>
+                    <span className="text-xs text-gray-500">代理店担当者名（任意・個人名の手入力可）</span>
                     <input
                       type="text"
                       value={newForm.dealerPersonName}

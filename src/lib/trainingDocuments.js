@@ -105,8 +105,13 @@ export function checkCommonIssuable(app) {
   if (!ISSUABLE_STATUSES.has(app.status)) {
     reasons.push('研修完了後でないと発行できません（ステータス: 研修完了・発行待ち 以上が必要）')
   }
-  if (app.applicationType === 'dealer' && !app.dealerReportConfirmed) {
-    reasons.push('代理店案件は実施報告の確認済みが必要です')
+  if (app.applicationType === 'dealer') {
+    if (!app.dealerCode) {
+      reasons.push('代理店案件は代理店（dealerCode）の紐付けが必要です（手入力ではなく選択で指定してください）')
+    }
+    if (!app.dealerReportConfirmed) {
+      reasons.push('代理店案件は実施報告の確認済みが必要です')
+    }
   }
   return { ok: reasons.length === 0, reasons }
 }
