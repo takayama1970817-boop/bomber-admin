@@ -77,8 +77,22 @@ jobs:
 
       # -----------------------------------------------
       # 4. Build app (失敗したら後続 deploy はスキップ)
+      #    Vite は VITE_* env を import.meta.env.* として静的にバンドルする。
+      #    .env.production は .gitignore 対象のため Actions runner には存在しない。
+      #    ローカルの .env.production と同じ値を env: で注入する。
+      #    Firebase Web config (apiKey 等) はクライアント JS に最終的に埋め込まれる
+      #    公開値であり、機密保護は Firestore rules + API Key Restriction 側で担保する設計。
+      #    https://firebase.google.com/docs/projects/api-keys
       # -----------------------------------------------
       - name: Build app
+        env:
+          VITE_FIREBASE_API_KEY: AIzaSyDxVacg_Tv6lRh0fKYNVZpr4Yd3bZUdb_E
+          VITE_FIREBASE_AUTH_DOMAIN: bomber-admin.web.app
+          VITE_FIREBASE_PROJECT_ID: bomber-admin
+          VITE_FIREBASE_STORAGE_BUCKET: bomber-admin.firebasestorage.app
+          VITE_FIREBASE_MESSAGING_SENDER_ID: '510848257458'
+          VITE_FIREBASE_APP_ID: '1:510848257458:web:a26033bccd1cbb0b5f28ab'
+          VITE_ENV: production
         run: npm run build
 
       # -----------------------------------------------
