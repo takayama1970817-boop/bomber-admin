@@ -5,8 +5,6 @@ name: Deploy
 #   ただし「復旧訓練ログが前月分まで記入されている」ことを前提条件とする。
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 jobs:
