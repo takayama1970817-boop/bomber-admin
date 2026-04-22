@@ -113,6 +113,10 @@ export function checkCommonIssuable(app) {
       reasons.push('代理店案件は実施報告の確認済みが必要です')
     }
   }
+  // PR-B: 認定インストラクターが未設定なら発行不可（全発行物共通）
+  if (!app.instructorId) {
+    reasons.push('認定インストラクターが未選択です（発行必須）')
+  }
   return { ok: reasons.length === 0, reasons }
 }
 
@@ -185,6 +189,9 @@ function buildSnapshot(app, companySettings) {
     issuerName: companySettings?.issuerName || companySettings?.representativeName || '',
     issuerCompanyName: companySettings?.companyName || '',
     stampUrl: companySettings?.stampUrl || '',
+    // PR-B: 認定インストラクター名を発行時点で凍結。案件編集後も PDF 内容と照合可能。
+    instructorId: app.instructorId || null,
+    instructorName: app.instructorName || '',
   }
 }
 

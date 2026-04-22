@@ -100,6 +100,28 @@ function sharedCss() {
       top: 24px; left: 50%; transform: translateX(-50%);
       font-size: 9pt; letter-spacing: 6px; color: #9b7a3f;
     }
+
+    /* PR-B: 認定インストラクター名ブロック（ディプロマ用） */
+    .instructor-block {
+      margin-top: 18px;
+      text-align: center;
+      font-size: 12pt;
+      letter-spacing: 2px;
+      color: #3b2d5c;
+    }
+    .instructor-label {
+      display: inline-block;
+      padding: 2px 10px;
+      margin-right: 10px;
+      border: 1px solid #9b7a3f;
+      border-radius: 4px;
+      font-size: 10pt;
+      color: #9b7a3f;
+      letter-spacing: 3px;
+    }
+    .instructor-name {
+      font-weight: bold;
+    }
   `
 }
 
@@ -121,6 +143,21 @@ function stampBlock(stampUrl) {
 }
 
 /**
+ * PR-B: 認定インストラクター名ブロック（ディプロマ用・関数分離）
+ * 後からデザイン変更できるよう切り出し。snapshot.instructorName が空なら何も描画しない。
+ * HTML 構造は "講師：〈氏名〉" を明朝で強調し、発行番号行の横か下に配置できる汎用出力。
+ */
+function diplomaInstructorBlock(instructorName) {
+  if (!instructorName) return ''
+  return `
+    <div class="instructor-block">
+      <span class="instructor-label">講師</span>
+      <span class="instructor-name">${escapeHtml(instructorName)}</span>
+    </div>
+  `
+}
+
+/**
  * ディプロマ HTML 組立
  * @param {object} data - { documentNumber, snapshot, issuedAt }
  *   snapshot: { attendeeName, trainingName, trainingCompletedDate, issuerName, issuerCompanyName, stampUrl }
@@ -139,6 +176,7 @@ export function buildDiplomaHtml(data) {
         上記の者は <span class="training-name">${escapeHtml(s.trainingName || '')}</span> の<br/>
         全課程を修了したことを証する
       </div>
+      ${diplomaInstructorBlock(s.instructorName)}
     </div>
     <div class="meta">
       <div class="left">

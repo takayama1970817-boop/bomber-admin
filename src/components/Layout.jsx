@@ -149,6 +149,7 @@ export default function Layout() {
         <MenuGroup label="研修管理">
           <SubItem to="/admin/training-applications" label="研修案件" onClick={closeMenu} />
           <SubItem to="/admin/training-types" label="研修種別マスタ" onClick={closeMenu} />
+          <SubItem to="/admin/certified-instructors" label="認定インストラクター" onClick={closeMenu} />
         </MenuGroup>
       )}
       {isAdmin && (

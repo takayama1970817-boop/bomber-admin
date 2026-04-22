@@ -812,6 +812,19 @@ service cloud.firestore {
     }
 
     // ========================================
+    // certifiedInstructors コレクション（認定インストラクターマスタ・PR-B 導入 2026-04-22）
+    // 研修のディプロマに記載する講師のマスタ。講座（trainingTypeId）との紐付けを持つ。
+    // - read: 認証済み全員（UI で isActive=true のみ表示・将来の dealer/salon 公開に備えた設計）
+    // - write (create/update): master / admin のみ
+    // - 物理削除は禁止（isActive=false の論理削除で運用）
+    // ========================================
+    match /certifiedInstructors/{instructorId} {
+      allow read:   if isSignedIn();
+      allow create, update: if isAdmin();
+      allow delete: if false;
+    }
+
+    // ========================================
     // trainingApplications コレクション（研修案件本体）
     // PR-1 導入（2026-04-21）。PR-2 で documents / documentHistory を追加。
     // - admin のみ読み書き可
