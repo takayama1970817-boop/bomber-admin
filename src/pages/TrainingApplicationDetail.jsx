@@ -82,6 +82,7 @@ export default function TrainingApplicationDetail() {
   const [docHistory, setDocHistory] = useState([])
   const [types, setTypes] = useState([])
   const [dealers, setDealers] = useState([]) // PR-A: 代理店選択用
+  const [instructors, setInstructors] = useState([]) // PR-B: 認定インストラクター
   const [companySettings, setCompanySettings] = useState(null)
   const [loading, setLoading] = useState(true)
   const [message, setMessage] = useState('')
@@ -122,6 +123,9 @@ export default function TrainingApplicationDetail() {
         trainingTypeId: d.trainingTypeId || '',
         trainingScheduledDate: toInputDate(d.trainingScheduledDate),
         trainingCompletedDate: toInputDate(d.trainingCompletedDate),
+        // PR-B: 認定インストラクター
+        instructorId: d.instructorId || '',
+        instructorName: d.instructorName || '',
         note: d.note || '',
       })
 
@@ -138,7 +142,7 @@ export default function TrainingApplicationDetail() {
         receivedAt: toInputDate(d.receivedAt),
       })
 
-      const [histSnap, typesSnap, docsSnap, docHistSnap, companySnap, stampSnap, dealersSnap] = await Promise.all([
+      const [histSnap, typesSnap, docsSnap, docHistSnap, companySnap, stampSnap, dealersSnap, instSnap] = await Promise.all([
         getDocs(query(
           collection(db, 'trainingApplications', id, 'history'),
           orderBy('createdAt', 'desc'),
@@ -154,12 +158,15 @@ export default function TrainingApplicationDetail() {
         getDoc(doc(db, 'settings', 'rt_companyStamp')).catch(() => null),
         // PR-A: 代理店選択用（手入力廃止）
         getDocs(collection(db, 'dealers')).catch(() => ({ docs: [] })),
+        // PR-B: 認定インストラクター一覧（isActive の絞り込みは UI 側で実施）
+        getDocs(query(collection(db, 'certifiedInstructors'), orderBy('name', 'asc'))).catch(() => ({ docs: [] })),
       ])
       setHistory(histSnap.docs.map((h) => ({ id: h.id, ...h.data() })))
       setTypes(typesSnap.docs.map((t) => ({ id: t.id, ...t.data() })))
       setDocuments(docsSnap.docs.map((d) => ({ id: d.id, ...d.data() })))
       setDocHistory(docHistSnap.docs.map((h) => ({ id: h.id, ...h.data() })))
       setDealers(dealersSnap.docs.map((d) => ({ id: d.id, ...d.data() })))
+      setInstructors(instSnap.docs.map((d) => ({ id: d.id, ...d.data() })))
 
       const companyData = companySnap?.exists() ? companySnap.data() : {}
       const stampData = stampSnap?.exists() ? stampSnap.data() : {}
@@ -228,6 +235,11 @@ export default function TrainingApplicationDetail() {
           ? new Date(edit.trainingScheduledDate) : null,
         trainingCompletedDate: edit.trainingCompletedDate
           ? new Date(edit.trainingCompletedDate) : null,
+        // PR-B: 認定インストラクター（instructorName はマスタから自動解決してスナップショット保存）
+        instructorId: edit.instructorId || null,
+        instructorName: edit.instructorId
+          ? (instructors.find((x) => x.id === edit.instructorId)?.name || edit.instructorName || '')
+          : '',
         note: edit.note || '',
         updatedAt: serverTimestamp(),
         updatedBy: profile?.uid || null,
@@ -333,7 +345,19 @@ export default function TrainingApplicationDetail() {
         setMessage(`発行条件を満たしていない発行物があります: ${labels}。詳細は各発行物のブロックを確認してください。`)
         return
       }
-      if (!confirm(`${targets.map((t) => DOCUMENT_TYPE_LABEL[t] || t).join(' と ')} を発行・印刷します。よろしいですか？`)) return
+      // PR-B: 発行前確認ダイアログに発行内容を明示
+      const confirmLines = [
+        '以下の内容で発行・印刷します。よろしいですか？',
+        '',
+        `発行物: ${targets.map((t) => DOCUMENT_TYPE_LABEL[t] || t).join(' と ')}`,
+        `受講者: ${data.attendeeName || '—'}`,
+        `講座: ${data.trainingName || '—'}`,
+        `代理店: ${data.applicationType === 'dealer' ? (data.dealerName || data.dealerCode || '—') : '本社直'}`,
+        `サロン: ${data.salonName || '—'}`,
+        `インストラクター: ${data.instructorName || '（未設定）'}`,
+        `発行番号: 採番後に自動採番されます（D-YYYY-NNNN / CS-YYYY-NNNN）`,
+      ]
+      if (!confirm(confirmLines.join('\n'))) return
       setBusy(true)
       const { results, statusTransitioned } = await issueAndPrintAll({
         app: data,
@@ -711,6 +735,34 @@ export default function TrainingApplicationDetail() {
                   onChange={(e) => setEdit({ ...edit, trainingScheduledDate: e.target.value })}
                   className="mt-1 w-full rounded border border-gray-300 px-2 py-2 text-sm"
                 />
+              </label>
+              <label className="col-span-2 block text-sm">
+                <span className="text-xs text-gray-500">
+                  認定インストラクター（発行時必須）
+                </span>
+                <select
+                  value={edit.instructorId}
+                  onChange={(e) => setEdit({ ...edit, instructorId: e.target.value })}
+                  className="mt-1 w-full rounded border border-gray-300 px-2 py-2 text-sm"
+                >
+                  <option value="">選択してください</option>
+                  {instructors
+                    .filter((i) => i.isActive !== false)
+                    .filter((i) => !edit.trainingTypeId
+                      || (Array.isArray(i.certifications) && i.certifications.includes(edit.trainingTypeId)))
+                    .map((i) => (
+                      <option key={i.id} value={i.id}>{i.name}</option>
+                    ))}
+                  {/* 既存レコードの instructorId が現在のマスタに無い（isActive=false 含む）場合でも選択状態を維持 */}
+                  {edit.instructorId && !instructors.some((i) => i.id === edit.instructorId) && (
+                    <option value={edit.instructorId}>
+                      {edit.instructorName || edit.instructorId}（マスタに無い・レガシー）
+                    </option>
+                  )}
+                </select>
+                <span className="mt-1 block text-[11px] text-gray-500">
+                  研修種別に紐付くアクティブな講師のみ候補表示。未選択のまま「発行して印刷」は実行できません。
+                </span>
               </label>
               <label className="block text-sm">
                 <span className="text-xs text-gray-500">研修実施日</span>

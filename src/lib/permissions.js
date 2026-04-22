@@ -291,6 +291,13 @@ export function canRecordPayment(p) { return isAdmin(p) }
 /** 研修種別マスタ・研修案件の閲覧・作成・編集（RT のみ） */
 export function canManageTraining(p) { return isAdmin(p) }
 
+/**
+ * 認定インストラクターマスタの管理（PR-B 導入 2026-04-22）
+ * RT（admin/master）のみ。閲覧自体は認証済み全員可能（rules 側で制御）
+ * UI 側でマスタ追加・編集・無効化できるのは admin/master のみ。
+ */
+export function canManageInstructor(p) { return isAdmin(p) }
+
 // ====== assertCan（保存処理側のガード） ======
 /**
  * 実行前に呼び、false なら throw する。

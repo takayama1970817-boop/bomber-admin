@@ -52,6 +52,8 @@ const EMPTY_NEW = {
   dealerPersonName: '',
   trainingTypeId: '',
   trainingScheduledDate: '',
+  instructorId: '', // PR-B: 認定インストラクター（発行時必須）
+  instructorName: '', // PR-B: スナップショット
   note: '',
 }
 
@@ -63,6 +65,7 @@ export default function TrainingApplications() {
   const [dealers, setDealers] = useState([])
   const [salons, setSalons] = useState([])
   const [dealerSalonsLinks, setDealerSalonsLinks] = useState([]) // PR-A: 代理店↔サロン紐付け（companyName ベース）
+  const [instructors, setInstructors] = useState([]) // PR-B: 認定インストラクター一覧
   const [loading, setLoading] = useState(true)
   const [message, setMessage] = useState('')
   const [showNew, setShowNew] = useState(false)
@@ -85,19 +88,22 @@ export default function TrainingApplications() {
   async function loadAll() {
     setLoading(true)
     try {
-      const [appsSnap, typesSnap, dealersSnap, salonsSnap, linksSnap] = await Promise.all([
+      const [appsSnap, typesSnap, dealersSnap, salonsSnap, linksSnap, instSnap] = await Promise.all([
         getDocs(query(collection(db, 'trainingApplications'), orderBy('applicationDate', 'desc'))),
         getDocs(query(collection(db, 'trainingTypes'), orderBy('sortOrder', 'asc'))),
         getDocs(collection(db, 'dealers')).catch(() => ({ docs: [] })),
         getDocs(collection(db, 'salons')).catch(() => ({ docs: [] })),
         // PR-A: dealerSalons（companyName ⇔ dealerCode 紐付け）
         getDocs(collection(db, 'dealerSalons')).catch(() => ({ docs: [] })),
+        // PR-B: 認定インストラクター一覧
+        getDocs(query(collection(db, 'certifiedInstructors'), orderBy('name', 'asc'))).catch(() => ({ docs: [] })),
       ])
       setRows(appsSnap.docs.map((d) => ({ id: d.id, ...d.data() })))
       setTypes(typesSnap.docs.map((d) => ({ id: d.id, ...d.data() })))
       setDealers(dealersSnap.docs.map((d) => ({ id: d.id, ...d.data() })))
       setSalons(salonsSnap.docs.map((d) => ({ id: d.id, ...d.data() })))
       setDealerSalonsLinks(linksSnap.docs.map((d) => ({ id: d.id, ...d.data() })))
+      setInstructors(instSnap.docs.map((d) => ({ id: d.id, ...d.data() })))
     } catch (e) {
       console.error(e)
       setMessage(`読み込みエラー: ${e.message}`)
@@ -296,6 +302,9 @@ export default function TrainingApplications() {
         trainingName: selectedType?.name || '',
         trainingScheduledDate: scheduled,
         trainingCompletedDate: null,
+        // PR-B: 認定インストラクター（未選択でも申込登録は可、発行時に必須チェック）
+        instructorId: newForm.instructorId || null,
+        instructorName: newForm.instructorName || '',
         status: initialStatus,
         note: newForm.note || '',
         shippedAt: null,
@@ -593,6 +602,38 @@ export default function TrainingApplications() {
                   onChange={(e) => setNewForm({ ...newForm, trainingScheduledDate: e.target.value })}
                   className="mt-1 w-full rounded border border-gray-300 px-2 py-2 text-sm"
                 />
+              </label>
+              <label className="col-span-2 block text-sm">
+                <span className="text-xs text-gray-500">
+                  認定インストラクター（発行時必須・選択式）
+                  {!newForm.trainingTypeId && <span className="ml-1 text-amber-600">先に研修種別を選んでください</span>}
+                </span>
+                <select
+                  value={newForm.instructorId}
+                  onChange={(e) => {
+                    const id = e.target.value
+                    const inst = instructors.find((x) => x.id === id)
+                    setNewForm({
+                      ...newForm,
+                      instructorId: id,
+                      instructorName: inst?.name || '',
+                    })
+                  }}
+                  disabled={!newForm.trainingTypeId}
+                  className="mt-1 w-full rounded border border-gray-300 px-2 py-2 text-sm disabled:bg-gray-50"
+                >
+                  <option value="">選択してください</option>
+                  {instructors
+                    .filter((i) => i.isActive !== false)
+                    .filter((i) => !newForm.trainingTypeId
+                      || (Array.isArray(i.certifications) && i.certifications.includes(newForm.trainingTypeId)))
+                    .map((i) => (
+                      <option key={i.id} value={i.id}>{i.name}</option>
+                    ))}
+                </select>
+                <span className="mt-1 block text-[11px] text-gray-500">
+                  選択した研修種別を担当できるアクティブな講師のみ表示されます（/admin/certified-instructors で管理）。
+                </span>
               </label>
 
               <label className="block text-sm">
