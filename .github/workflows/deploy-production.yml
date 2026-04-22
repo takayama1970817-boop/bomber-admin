@@ -61,12 +61,12 @@ jobs:
           fetch-depth: 1
 
       # -----------------------------------------------
-      # 2. Setup Node (20 LTS)
+      # 2. Setup Node (22 LTS)
       # -----------------------------------------------
-      - name: Setup Node.js 20
+      - name: Setup Node.js 22
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           cache: 'npm'
 
       # -----------------------------------------------
@@ -82,12 +82,37 @@ jobs:
         run: npm run build
 
       # -----------------------------------------------
-      # 5. Authenticate with Firebase (service account JSON)
+      # 5. Preflight: secret 未設定を早期に検知
+      #    "must specify exactly one of workload_identity_provider or
+      #    credentials_json" エラーは secret が空のときに起きる。
+      #    原因を分かりやすくするため、auth step に入る前に明示的にチェック。
+      # -----------------------------------------------
+      - name: Check FIREBASE_SERVICE_ACCOUNT_BOMBER_ADMIN secret presence
+        env:
+          SA_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_BOMBER_ADMIN }}
+        run: |
+          if [ -z "$SA_JSON" ]; then
+            echo "::error::Secret FIREBASE_SERVICE_ACCOUNT_BOMBER_ADMIN が未設定か空です。"
+            echo "::error::GitHub リポジトリ Settings > Secrets and variables > Actions に"
+            echo "::error::FIREBASE_SERVICE_ACCOUNT_BOMBER_ADMIN という名前で"
+            echo "::error::サービスアカウントの JSON キー全文を登録してください。"
+            exit 1
+          fi
+          echo "✅ Secret is set (length: ${#SA_JSON} bytes)"
+
+      # -----------------------------------------------
+      # 6. Authenticate with Firebase (service account JSON)
+      #    credentials_json に JSON 全文を渡す方式。
+      #    create_credentials_file と export_environment_variables を
+      #    明示的に true にして firebase CLI から GOOGLE_APPLICATION_CREDENTIALS
+      #    経由でも参照できるようにする。
       # -----------------------------------------------
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
         with:
           credentials_json: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_BOMBER_ADMIN }}
+          create_credentials_file: true
+          export_environment_variables: true
 
       # -----------------------------------------------
       # 6. Install Firebase CLI
