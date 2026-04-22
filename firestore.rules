@@ -91,6 +91,17 @@ service cloud.firestore {
         || (data.subRole is string && (data.subRole == 'admin' || data.subRole == 'staff'));
     }
 
+    // assignedDealerCodes の型チェック。
+    // staff の閲覧スコープ用フィールド（dealerCode の配列）。
+    // フィールドが存在しない場合は OK（任意フィールド）。
+    // 存在する場合は list 型であることだけ要求する（中身の文字列検証は
+    // 書き込み元のスクリプト/管理UIの責務とする。rules で配列要素を
+    // 一つずつ検証するのは表現力的にコストが高い）。
+    function hasValidAssignedDealerCodesIfPresent(data) {
+      return !data.keys().hasAny(['assignedDealerCodes'])
+        || (data.assignedDealerCodes is list);
+    }
+
     // ========================================
     // users コレクション
     // 本人は自分のドキュメントだけ読める
@@ -101,16 +112,24 @@ service cloud.firestore {
       allow get:    if isSignedIn();
       allow list:   if isSignedIn();
       // create 時は role が dealer/salon なら subRole 必須（strict モード整合）
+      // assignedDealerCodes は任意フィールドだが、含める場合は list 型に限定
       allow create: if (isAdmin()
                         || (isSelf(uid)
                             && request.resource.data.role in ['staff', 'dealer', 'warehouse', 'salon', 'client']
                             && request.resource.data.uid == uid))
-                     && hasRequiredSubRoleForInvite(request.resource.data);
+                     && hasRequiredSubRoleForInvite(request.resource.data)
+                     && hasValidAssignedDealerCodesIfPresent(request.resource.data);
       // update も dealer/salon に昇格するケースで subRole を要求する
+      // assignedDealerCodes の更新は admin のみ意図しているが、rules では
+      // 「list 型である」ことだけ強制し、書き込み権限自体は既存の
+      // (isAdmin || isSelf without role-change) ロジックに委ねる。
+      // self による更新で assignedDealerCodes を変えてしまう余地は残るが、
+      // 現状 UI に該当機能はなく、PR3-B の管理 UI で admin 限定にする。
       allow update: if (isAdmin()
                         || (isSelf(uid)
                             && request.resource.data.role == resource.data.role))
-                     && hasRequiredSubRoleForInvite(request.resource.data);
+                     && hasRequiredSubRoleForInvite(request.resource.data)
+                     && hasValidAssignedDealerCodesIfPresent(request.resource.data);
       allow delete: if isAdmin();
     }
 
@@ -846,6 +865,18 @@ service cloud.firestore {
     // - read: 本社 admin のみ
     // ========================================
     match /dealerAggregationLogs/{logId} {
+      allow read:  if isAdmin();
+      allow write: if false;
+    }
+
+    // ========================================
+    // staffAssignmentBackfillLogs コレクション
+    // staff の assignedDealerCodes 一括付与スクリプトの監査ログ
+    // - write: 完全禁止（scripts/backfill-staff-assigned-dealers.mjs が
+    //          Admin SDK で書き込む）
+    // - read:  本社 admin のみ
+    // ========================================
+    match /staffAssignmentBackfillLogs/{logId} {
       allow read:  if isAdmin();
       allow write: if false;
     }
