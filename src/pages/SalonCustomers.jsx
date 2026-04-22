@@ -68,6 +68,16 @@ export default function SalonCustomers() {
   const [editing, setEditing] = useState(null)
   const [selectedId, setSelectedId] = useState(null)
   const [showImport, setShowImport] = useState(false)
+  // 成功時トースト（3秒で自動消去）。失敗時は従来どおり alert を使うため success 用のみ。
+  const [toast, setToast] = useState(null)
+  const showToast = (message) => {
+    setToast({ message, id: Date.now() })
+  }
+  useEffect(() => {
+    if (!toast) return
+    const timer = setTimeout(() => setToast(null), 3000)
+    return () => clearTimeout(timer)
+  }, [toast])
 
   const loadCustomers = async () => {
     if (!companyName) { setLoading(false); return }
@@ -315,7 +325,15 @@ export default function SalonCustomers() {
           customer={selected}
           onClose={() => setSelectedId(null)}
           onChanged={loadCustomers}
+          showToast={showToast}
         />
+      )}
+
+      {/* 成功時トースト（画面右上固定・3秒で自動消去） */}
+      {toast && (
+        <div className="fixed top-4 right-4 z-[60] rounded-lg bg-green-600 px-4 py-3 text-sm font-medium text-white shadow-lg">
+          ✓ {toast.message}
+        </div>
       )}
 
       {showForm && (
@@ -549,7 +567,7 @@ function CustomerForm({ companyName, editing, onClose, onSaved }) {
 // ============================
 // 顧客詳細パネル（来店履歴 + レコメンド統合）
 // ============================
-function CustomerDetail({ customer, onClose, onChanged }) {
+function CustomerDetail({ customer, onClose, onChanged, showToast }) {
   const { profile } = useAuth()
   const allowAddVisit = canAddVisit(profile)
   // canEditVisit は visit ごとに判定する（salonStaff は自分作成分のみ可）
@@ -676,6 +694,7 @@ function CustomerDetail({ customer, onClose, onChanged }) {
       await recomputeCustomerAggregates()
       await loadVisits()
       onChanged && onChanged()
+      showToast && showToast('来店記録を削除しました')
     } catch (e) {
       console.error('来店削除失敗:', e)
       alert('削除に失敗しました: ' + e.message)
@@ -916,12 +935,15 @@ function CustomerDetail({ customer, onClose, onChanged }) {
           editing={editingVisit}
           onClose={() => { setShowVisitForm(false); setEditingVisit(null) }}
           onSaved={async () => {
+            const wasEditing = !!editingVisit
             setShowVisitForm(false)
             setEditingVisit(null)
             await loadVisits()
             // 編集時はサマリー再計算（新規登録時は VisitForm 内で increment 済み）
-            if (editingVisit) await recomputeCustomerAggregates()
+            if (wasEditing) await recomputeCustomerAggregates()
             onChanged && onChanged()
+            // 成功時トースト（編集 / 新規で文言を切り替え）
+            showToast && showToast(wasEditing ? '来店記録を更新しました' : '来店を登録しました')
           }}
         />
       )}
