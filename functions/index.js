@@ -226,3 +226,66 @@ exports.bcartProxy = onRequest(
     }
   }
 )
+// ================================
+// 受注メール速報（Webhook）
+// ================================
+exports.handleOrderEmail = onRequest(
+  { region: 'asia-northeast1', cors: true },
+  async (req, res) => {
+    try {
+      const db = getFirestore()
+
+      const text = req.body?.text || ''
+
+      if (!text) {
+        res.status(400).send('No email body')
+        return
+      }
+
+      const get = (regex) => {
+        const m = text.match(regex)
+        return m ? m[1].trim() : null
+      }
+
+      const orderId = get(/注文番号：(\d+)/)
+      const orderDate = get(/注文日時：([\d\- :]+)/)
+      const amountRaw = get(/注文総額：([\d,]+)円/)
+      const companyName = get(/会社名：(.+)/)
+      const customerName = get(/担当者：(.+?) 様/)
+
+      const amount = amountRaw
+        ? parseInt(amountRaw.replace(/,/g, ''), 10)
+        : null
+
+      if (!orderId) {
+        res.status(400).send('Invalid format')
+        return
+      }
+
+      const ref = db.collection('orderAlerts').doc(orderId)
+      const exists = await ref.get()
+
+      if (exists.exists) {
+        res.status(200).send('Already exists')
+        return
+      }
+
+      await ref.set({
+        orderId,
+        orderDate,
+        companyName,
+        customerName,
+        amount,
+        source: 'email',
+        status: 'pending',
+        dealerCode: null,
+        createdAt: new Date(),
+      })
+
+      res.status(200).send('OK')
+    } catch (e) {
+      console.error(e)
+      res.status(500).send('ERROR')
+    }
+  }
+)
