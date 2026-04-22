@@ -81,6 +81,7 @@ export default function TrainingApplicationDetail() {
   const [documents, setDocuments] = useState([])
   const [docHistory, setDocHistory] = useState([])
   const [types, setTypes] = useState([])
+  const [dealers, setDealers] = useState([]) // PR-A: 代理店選択用
   const [companySettings, setCompanySettings] = useState(null)
   const [loading, setLoading] = useState(true)
   const [message, setMessage] = useState('')
@@ -137,7 +138,7 @@ export default function TrainingApplicationDetail() {
         receivedAt: toInputDate(d.receivedAt),
       })
 
-      const [histSnap, typesSnap, docsSnap, docHistSnap, companySnap, stampSnap] = await Promise.all([
+      const [histSnap, typesSnap, docsSnap, docHistSnap, companySnap, stampSnap, dealersSnap] = await Promise.all([
         getDocs(query(
           collection(db, 'trainingApplications', id, 'history'),
           orderBy('createdAt', 'desc'),
@@ -151,11 +152,14 @@ export default function TrainingApplicationDetail() {
         // 発行者情報は RT（ロイヤルトラスト）固定で読み取り。請求書・見積書と同じ設定元を流用。
         getDoc(doc(db, 'settings', 'rt_company')).catch(() => null),
         getDoc(doc(db, 'settings', 'rt_companyStamp')).catch(() => null),
+        // PR-A: 代理店選択用（手入力廃止）
+        getDocs(collection(db, 'dealers')).catch(() => ({ docs: [] })),
       ])
       setHistory(histSnap.docs.map((h) => ({ id: h.id, ...h.data() })))
       setTypes(typesSnap.docs.map((t) => ({ id: t.id, ...t.data() })))
       setDocuments(docsSnap.docs.map((d) => ({ id: d.id, ...d.data() })))
       setDocHistory(docHistSnap.docs.map((h) => ({ id: h.id, ...h.data() })))
+      setDealers(dealersSnap.docs.map((d) => ({ id: d.id, ...d.data() })))
 
       const companyData = companySnap?.exists() ? companySnap.data() : {}
       const stampData = stampSnap?.exists() ? stampSnap.data() : {}
@@ -193,8 +197,21 @@ export default function TrainingApplicationDetail() {
         setMessage('受講者名は必須です')
         return
       }
+      if (data.applicationType === 'dealer' && !edit.dealerCode) {
+        setMessage('代理店経由の申込では代理店（dealerCode）の選択が必須です。手入力は廃止されました。')
+        return
+      }
       setBusy(true)
       const nextType = types.find((t) => t.id === edit.trainingTypeId)
+      // PR-A: dealerName は選択された dealers レコードから自動取得（スナップショット保存）
+      const resolvedDealer = edit.dealerCode
+        ? dealers.find((d) => d.dealerCode === edit.dealerCode)
+        : null
+      const dealerNameAuto = resolvedDealer?.companyName
+        || resolvedDealer?.name
+        || resolvedDealer?.dealerName
+        || edit.dealerName // 既存レコードの値を尊重（PR-A 以前の手入力データの非破壊性）
+        || ''
       const payload = {
         attendeeName: edit.attendeeName.trim(),
         attendeeContact: edit.attendeeContact,
@@ -202,7 +219,7 @@ export default function TrainingApplicationDetail() {
         salonName: edit.salonName,
         salonRepresentativeName: edit.salonRepresentativeName,
         dealerCode: data.applicationType === 'dealer' ? edit.dealerCode : '',
-        dealerName: data.applicationType === 'dealer' ? edit.dealerName : '',
+        dealerName: data.applicationType === 'dealer' ? dealerNameAuto : '',
         dealerPersonName: data.applicationType === 'dealer' ? edit.dealerPersonName : '',
         trainingTypeId: edit.trainingTypeId,
         trainingTypeCode: nextType?.code || '',
@@ -718,26 +735,43 @@ export default function TrainingApplicationDetail() {
 
           {data.applicationType === 'dealer' && (
             <section className="rounded-lg border border-gray-200 bg-white p-4">
-              <h2 className="mb-3 text-sm font-bold text-gray-700">代理店情報</h2>
+              <h2 className="mb-3 text-sm font-bold text-gray-700">
+                代理店情報 <span className="text-[11px] font-normal text-gray-500">（PR-A: 手入力は廃止・選択のみ）</span>
+              </h2>
               <div className="grid grid-cols-2 gap-3">
                 <label className="block text-sm">
-                  <span className="text-xs text-gray-500">代理店コード</span>
-                  <input
-                    type="text"
+                  <span className="text-xs text-gray-500">代理店（必須・選択）</span>
+                  <select
                     value={edit.dealerCode}
                     onChange={(e) => setEdit({ ...edit, dealerCode: e.target.value })}
                     className="mt-1 w-full rounded border border-gray-300 px-2 py-2 font-mono text-sm"
-                  />
+                  >
+                    <option value="">選択してください</option>
+                    {dealers
+                      .filter((d) => d.dealerCode)
+                      .map((d) => (
+                        <option key={d.id} value={d.dealerCode}>
+                          [{d.dealerCode}] {d.companyName || d.name || d.dealerName || d.id}
+                        </option>
+                      ))}
+                    {/* 既存レコードに dealers 一覧から消失したコードが残っている場合でも選択状態を保持 */}
+                    {edit.dealerCode && !dealers.some((d) => d.dealerCode === edit.dealerCode) && (
+                      <option value={edit.dealerCode}>
+                        [{edit.dealerCode}] （dealers 一覧に無いコード・レガシーデータ）
+                      </option>
+                    )}
+                  </select>
                 </label>
-                <label className="block text-sm">
-                  <span className="text-xs text-gray-500">代理店名</span>
-                  <input
-                    type="text"
-                    value={edit.dealerName}
-                    onChange={(e) => setEdit({ ...edit, dealerName: e.target.value })}
-                    className="mt-1 w-full rounded border border-gray-300 px-2 py-2 text-sm"
-                  />
-                </label>
+                <div className="block text-sm">
+                  <span className="text-xs text-gray-500">代理店名（自動表示）</span>
+                  <div className="mt-1 w-full rounded border border-gray-200 bg-gray-50 px-2 py-2 text-sm text-gray-700">
+                    {(() => {
+                      const d = dealers.find((x) => x.dealerCode === edit.dealerCode)
+                      const auto = d?.companyName || d?.name || d?.dealerName || ''
+                      return auto || edit.dealerName || <span className="text-gray-400">未選択</span>
+                    })()}
+                  </div>
+                </div>
                 <label className="col-span-2 block text-sm">
                   <span className="text-xs text-gray-500">代理店担当者名</span>
                   <input
