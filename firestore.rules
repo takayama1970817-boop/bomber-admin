@@ -327,11 +327,30 @@ service cloud.firestore {
     // ========================================
     match /allowedEmails/{docId} {
       allow read:  if true;
-      // write 時に dealer/salon 招待なら subRole 必須。
-      // 管理者は admin なのですぐ通常書き込みできるが、subRole 欠損の招待レコードは
-      // 後続のログイン時にユーザーが lockout されてしまうためここで阻止する。
-      allow write: if isAdmin()
-                    && hasRequiredSubRoleForInvite(request.resource.data);
+
+      // create / update は admin のみ。dealer/salon 招待なら subRole 必須。
+      // 管理者が subRole 欠損レコードを作ると後続のログイン時にユーザーが
+      // lockout されてしまうためここで阻止する。
+      allow create, update: if isAdmin()
+                             && hasRequiredSubRoleForInvite(request.resource.data);
+
+      // 本人による「ログイン記録フィールドのみ」の自己更新を許可。
+      // 初回ログイン時に AuthContext が loggedIn / lastLoginAt / firstLoginAt を
+      // 自己書き込みする。email フィールドでの所有権確認 + 変更フィールドの
+      // whitelist でそれ以外の改ざん（role 昇格など）を防ぐ。
+      allow update: if isSignedIn()
+                     && request.auth.token.email is string
+                     && resource.data.email == request.auth.token.email.lower()
+                     && request.resource.data.diff(resource.data).affectedKeys()
+                          .hasOnly(['loggedIn', 'lastLoginAt', 'firstLoginAt'])
+                     // 他フィールドは必ず不変（role 昇格などの悪用を防ぐ）
+                     && request.resource.data.email == resource.data.email
+                     && request.resource.data.role == resource.data.role;
+
+      // delete は admin のみ（request.resource が存在しないため独立ルール。
+      // かつて write 一括だった頃は hasRequiredSubRoleForInvite が評価エラーに
+      // なり常時拒否だった問題への恒久対策）。
+      allow delete: if isAdmin();
     }
 
     // ========================================

@@ -6,6 +6,7 @@ import {
   getRedirectResult,
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
+  fetchSignInMethodsForEmail,
   signOut as fbSignOut,
 } from 'firebase/auth'
 import {
@@ -16,6 +17,7 @@ import {
   query,
   serverTimestamp,
   setDoc,
+  updateDoc,
   where,
 } from 'firebase/firestore'
 import { auth, db, googleProvider } from '../lib/firebase.js'
@@ -45,6 +47,38 @@ async function isAllowedEmail(email) {
   return allSnap.docs.some(
     (d) => d.data().email?.toLowerCase() === email.toLowerCase(),
   )
+}
+
+// 初回/毎回ログイン時に allowedEmails の自己ログイン記録フィールドを更新する。
+// rules 側で「loggedIn / lastLoginAt / firstLoginAt の3フィールドだけ」に
+// 書き込みを限定しているため、role 昇格などの改ざんは発生しない。
+// 失敗しても認証自体は成功済みなので画面進行を止めない（ログだけ残す）。
+async function markAllowedEmailLoggedIn(email) {
+  if (!email) return
+  try {
+    const snap = await getDocs(
+      query(
+        collection(db, 'allowedEmails'),
+        where('email', '==', email.toLowerCase()),
+      ),
+    )
+    if (snap.empty) return
+    const docSnap = snap.docs[0]
+    const data = docSnap.data()
+    const patch = {
+      loggedIn: true,
+      lastLoginAt: serverTimestamp(),
+    }
+    // firstLoginAt は未設定時のみセット（初回ログインの記録）
+    if (!data.firstLoginAt) {
+      patch.firstLoginAt = serverTimestamp()
+    }
+    await updateDoc(doc(db, 'allowedEmails', docSnap.id), patch)
+  } catch (e) {
+    // rules で弾かれたケース（セッション不整合など）もここに来る。
+    // 認証フロー本体は既に成功しているのでエラーは握りつぶし、ログだけ残す。
+    console.warn('[AuthContext] allowedEmails ログイン記録更新に失敗:', e.message)
+  }
 }
 
 // 機能権限のデフォルト（後方互換用）
@@ -100,7 +134,9 @@ export function AuthProvider({ children }) {
           if (!allowed) {
             await fbSignOut(auth)
             setAuthError(
-              'このアカウントはアクセスが許可されていません。管理者にお問い合わせください。',
+              'このメールアドレスはまだ招待されていません。\n'
+              + '本社管理者にサロン招待を依頼してください。\n'
+              + '（招待済みの場合はメールアドレスのスペルをご確認ください）',
             )
             setUser(null)
             setProfile(null)
@@ -123,6 +159,8 @@ export function AuthProvider({ children }) {
           const snap = await getDoc(ref)
           if (snap.exists()) {
             setProfile({ uid: fbUser.uid, ...snap.data() })
+            // 通常ログインでも lastLoginAt を更新しておく（休眠検知に使える）
+            await markAllowedEmailLoggedIn(fbUser.email)
           } else {
             // allowedEmails から role と companyName を取得
             const allowSnap = await getDocs(
@@ -160,8 +198,24 @@ export function AuthProvider({ children }) {
               })
               await fbSignOut(auth)
               setAuthError(
-                'このアカウントは権限（管理者/スタッフ）が設定されていません。\n'
-                + '招待をやり直すよう管理者にお問い合わせください。',
+                '招待時の権限設定が未完了です。\n'
+                + '本社管理者に「管理者」または「スタッフ」の権限設定を依頼してください。',
+              )
+              setUser(null)
+              setProfile(null)
+              return
+            }
+            // salon/dealer 以外の role でも subRole 値が 'admin' / 'staff' 以外で
+            // 書き込まれていたら拒否（permissions.js strict モード整合）。
+            if (initialSubRole && initialSubRole !== 'admin' && initialSubRole !== 'staff') {
+              console.error('[AuthContext] 不正な subRole 値のため初回作成を拒否:', {
+                email: fbUser.email,
+                subRole: initialSubRole,
+              })
+              await fbSignOut(auth)
+              setAuthError(
+                '招待時の権限設定に不正な値が含まれています。\n'
+                + '本社管理者に権限の再設定を依頼してください。',
               )
               setUser(null)
               setProfile(null)
@@ -182,6 +236,8 @@ export function AuthProvider({ children }) {
             }
             await setDoc(ref, data)
             setProfile({ ...data })
+            // 初回ログイン成立 → allowedEmails の loggedIn/firstLoginAt/lastLoginAt を記録
+            await markAllowedEmailLoggedIn(fbUser.email)
           }
         } else {
           setUser(null)
@@ -201,35 +257,114 @@ export function AuthProvider({ children }) {
     setAuthError(null)
     // モバイルではリダイレクト方式（ポップアップがブロックされるため）
     const isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent)
-    if (isMobile) {
-      return signInWithRedirect(auth, googleProvider)
+    try {
+      if (isMobile) {
+        return await signInWithRedirect(auth, googleProvider)
+      }
+      return await signInWithPopup(auth, googleProvider)
+    } catch (e) {
+      // 同じメールで別プロバイダ（パスワード認証）が既に存在するケース。
+      // ユーザーに「どちらでログインすればいいか」を明示する。
+      if (e.code === 'auth/account-exists-with-different-credential') {
+        const err = new Error(
+          'このメールアドレスは既にパスワード認証で登録されています。\n'
+          + 'メールアドレスとパスワードでログインしてください。',
+        )
+        err.code = 'auth/account-exists-with-different-credential'
+        throw err
+      }
+      // ポップアップをユーザーが閉じた等はそのまま上位へ
+      throw e
     }
-    return signInWithPopup(auth, googleProvider)
   }
+
+  // 初回ログイン時の自動アカウント作成と、既存アカウントのサインインを
+  // Firebase v9+ の「invalid-credential に統一された挙動」を前提に
+  // fetchSignInMethodsForEmail で分類する実装に変更。
+  //
+  // 返り値の code（画面側で分岐する用）:
+  //   'auth/invited-not-found'      … allowedEmails 未登録（loginWithEmail では出さない。
+  //                                    後段の onAuthStateChanged 側で弾く）
+  //   'auth/google-only-account'    … Google でのみ登録されている
+  //   'auth/wrong-password'         … パスワードが違う
+  //   'auth/weak-password'          … 新規作成時のパスワードが弱すぎる
+  //   'auth/invalid-email'          … メール形式が不正
+  //   'auth/operation-not-allowed'  … プロバイダ未有効（管理者設定ミス）
   const loginWithEmail = async (email, password) => {
     setAuthError(null)
+    // まず既存アカウントでのサインインを試みる。
     try {
       return await signInWithEmailAndPassword(auth, email, password)
     } catch (e) {
-      if (e.code === 'auth/user-not-found') {
-        // ユーザーが存在しない → 初回ログイン → アカウント自動作成
-        return await createUserWithEmailAndPassword(auth, email, password)
-      }
-      if (e.code === 'auth/invalid-credential') {
-        // Firebase v9+ では user-not-found も invalid-credential で返る場合がある
-        // まず新規作成を試み、email-already-in-use ならパスワード間違い
+      // invalid-credential は「未登録」「パスワード違い」「未確認」を統合した
+      // 曖昧なエラー。fetchSignInMethodsForEmail で実状を判別する。
+      if (e.code === 'auth/invalid-credential'
+          || e.code === 'auth/user-not-found'
+          || e.code === 'auth/wrong-password') {
+        let methods = []
         try {
-          return await createUserWithEmailAndPassword(auth, email, password)
-        } catch (e2) {
-          if (e2.code === 'auth/email-already-in-use') {
-            // アカウントは存在する＝パスワードが間違い
-            const err = new Error('メールアドレスまたはパスワードが正しくありません')
-            err.code = 'auth/wrong-password'
-            throw err
-          }
-          throw e2
+          methods = await fetchSignInMethodsForEmail(auth, email)
+        } catch (fetchErr) {
+          // fetch 自体が失敗した場合は原則エラーを素通し（ログのみ）
+          console.warn('fetchSignInMethodsForEmail 失敗:', fetchErr.message)
         }
+
+        if (methods.length === 0) {
+          // アカウント未登録 → 初回ログイン扱いで新規作成
+          try {
+            return await createUserWithEmailAndPassword(auth, email, password)
+          } catch (createErr) {
+            // 作成失敗時はコード別に返す
+            if (createErr.code === 'auth/weak-password') {
+              const err = new Error(
+                'パスワードが弱すぎます。\n'
+                + '6文字以上で、できれば英数字を混ぜてください。',
+              )
+              err.code = 'auth/weak-password'
+              throw err
+            }
+            if (createErr.code === 'auth/email-already-in-use') {
+              // 稀なレース（methodsが空だったが直後に作られた等）: パスワード違い扱い
+              const err = new Error(
+                'パスワードが正しくありません。\n'
+                + '「パスワードを忘れた場合」から再設定できます。',
+              )
+              err.code = 'auth/wrong-password'
+              throw err
+            }
+            throw createErr
+          }
+        }
+
+        if (methods.includes('password')) {
+          // パスワード認証済み → 入力パスワードが違う
+          const err = new Error(
+            'パスワードが正しくありません。\n'
+            + '「パスワードを忘れた場合」から再設定できます。',
+          )
+          err.code = 'auth/wrong-password'
+          throw err
+        }
+
+        if (methods.includes('google.com') || methods.some((m) => m.includes('google'))) {
+          // Google 専用アカウント → パスワード認証不可
+          const err = new Error(
+            'このメールアドレスは Google アカウントで登録されています。\n'
+            + '「Google アカウントでログイン」ボタンをお使いください。',
+          )
+          err.code = 'auth/google-only-account'
+          throw err
+        }
+
+        // 想定外のプロバイダのみ → 汎用エラー
+        const err = new Error(
+          'このメールアドレスは別の認証方法で登録されています。\n'
+          + '本社管理者にお問い合わせください。',
+        )
+        err.code = 'auth/unsupported-auth-method'
+        throw err
       }
+      // invalid-credential 以外（invalid-email / operation-not-allowed など）はそのまま
       throw e
     }
   }

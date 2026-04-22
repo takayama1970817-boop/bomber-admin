@@ -27,12 +27,33 @@ export default function SalonLogin() {
     try {
       await loginWithEmail(email, password)
     } catch (err) {
-      if (err.code === 'auth/wrong-password' || err.code === 'auth/invalid-credential') {
-        setError('メールアドレスまたはパスワードが正しくありません')
-      } else if (err.code === 'auth/too-many-requests') {
-        setError('ログイン試行回数が多すぎます。しばらくお待ちください')
-      } else {
-        setError(err.message || 'ログインに失敗しました')
+      // loginWithEmail 側で整形されたメッセージをそのまま表示する方針。
+      // 既知コードは明示的に case 分岐してメッセージを上書き、
+      // 未知コードは err.message をそのまま表示する。
+      switch (err.code) {
+        case 'auth/wrong-password':
+          setError('パスワードが正しくありません。\n「パスワードを忘れた場合」から再設定できます。')
+          break
+        case 'auth/google-only-account':
+          setError('このメールアドレスは Google アカウントで登録されています。\n上の「Google アカウントでログイン」ボタンをお使いください。')
+          break
+        case 'auth/account-exists-with-different-credential':
+          setError('このメールアドレスはパスワード認証で登録されています。\nメールアドレスとパスワードでログインしてください。')
+          break
+        case 'auth/weak-password':
+          setError('パスワードが弱すぎます。\n6文字以上で設定してください。')
+          break
+        case 'auth/invalid-email':
+          setError('メールアドレスの形式が正しくありません。')
+          break
+        case 'auth/too-many-requests':
+          setError('ログイン試行回数が多すぎます。しばらく時間をおいてからお試しください。')
+          break
+        case 'auth/network-request-failed':
+          setError('ネットワークエラーです。通信状態をご確認ください。')
+          break
+        default:
+          setError(err.message || 'ログインに失敗しました')
       }
     } finally {
       setLoading(false)
@@ -44,7 +65,15 @@ export default function SalonLogin() {
     try {
       await loginWithGoogle()
     } catch (err) {
-      setError(err?.code || err?.message || 'Googleログインに失敗しました')
+      if (err?.code === 'auth/account-exists-with-different-credential') {
+        setError(err.message)
+      } else if (err?.code === 'auth/popup-closed-by-user' || err?.code === 'auth/cancelled-popup-request') {
+        // ユーザーがキャンセルしたケースはエラー表示しない
+      } else if (err?.code === 'auth/popup-blocked') {
+        setError('ポップアップがブロックされました。ブラウザの設定を確認してください。')
+      } else {
+        setError(err?.message || err?.code || 'Google ログインに失敗しました')
+      }
     }
   }
 
@@ -112,7 +141,7 @@ export default function SalonLogin() {
           />
 
           {(error || authError) && (
-            <div className="mb-4 rounded-lg bg-red-50 px-4 py-2 text-sm text-red-600">
+            <div className="mb-4 whitespace-pre-line rounded-lg bg-red-50 px-4 py-2 text-sm text-red-600">
               {error || authError}
             </div>
           )}
@@ -143,8 +172,9 @@ export default function SalonLogin() {
         </div>
 
         <p className="mt-4 text-center text-xs text-gray-400">
-          初めてログインされる方は、メールアドレスとお好きなパスワードを入力してください。<br />
-          アカウントが自動で作成されます。
+          事前に本社から招待されたメールアドレスでログインしてください。<br />
+          初回のみ、お好きなパスワードを入力するとアカウントが作成されます。<br />
+          Google アカウントでもログイン可能です。
         </p>
       </div>
     </div>
