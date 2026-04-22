@@ -835,7 +835,11 @@ service cloud.firestore {
     match /certifiedInstructors/{instructorId} {
       allow read:   if isSignedIn();
       allow create, update: if isAdmin();
-      allow delete: if false;
+      // 削除は admin/master のみ許可。使用中かどうかは UI 側で
+      // trainingApplications を instructorId で引いて判定し、使用中であれば
+      // isActive=false への update に切り替える（物理削除しない）。
+      // rules では権限（admin/master）のみ担保する。
+      allow delete: if isAdmin();
     }
 
     // ========================================
