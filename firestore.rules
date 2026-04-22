@@ -91,6 +91,17 @@ service cloud.firestore {
         || (data.subRole is string && (data.subRole == 'admin' || data.subRole == 'staff'));
     }
 
+    // staff の dealerCode 単位 read 判定。
+    // 自分の users ドキュメントの assignedDealerCodes に
+    // 指定 code が含まれている staff のみ true を返す。
+    // dealerMonthlySnapshots の docId ベース判定で利用する。
+    // hasAny([code]) を使い、in 演算子は使わない。
+    function staffCanReadByDealerCode(code) {
+      return isStaff()
+        && userDoc().get('assignedDealerCodes', []) is list
+        && userDoc().get('assignedDealerCodes', []).hasAny([code]);
+    }
+
     // assignedDealerCodes の型チェック。
     // staff の閲覧スコープ用フィールド（dealerCode の配列）。
     // フィールドが存在しない場合は OK（任意フィールド）。
@@ -911,7 +922,14 @@ service cloud.firestore {
     //          PERMISSION_DENIED が出るケースがあるため避ける）
     // ========================================
     match /dealerMonthlySnapshots/{docId} {
-      allow read:  if isAdmin() || isStaff()
+      // PR3-C (Phase 2): staff の read を assignedDealerCodes スコープに絞る。
+      // - admin: 全件
+      // - staff: 自分の assignedDealerCodes に含まれる dealerCode のみ
+      // - dealer: 自社 dealerCode のみ（変更なし）
+      // 切替前提として、全 staff が assignedDealerCodes を明示設定済みであること。
+      // 設定が空配列 = その staff は snapshot を一切見られない（意図的な権限制御）。
+      allow read:  if isAdmin()
+                    || staffCanReadByDealerCode(docId.split('_')[0])
                     || (isDealer()
                         && userDoc().get('dealerCode', '') != ''
                         && docId.split('_')[0] == userDoc().dealerCode);
