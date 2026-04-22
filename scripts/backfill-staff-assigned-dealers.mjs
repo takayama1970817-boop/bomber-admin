@@ -21,6 +21,12 @@
  *   全ての dealer の dealerCode を一括付与（grandfathering）。
  *   付与後 admin が管理 UI で個別に絞り込む前提。
  *
+ * dealer データのソース:
+ *   - users コレクション where role='dealer'
+ *   - allowedEmails コレクション where role='dealer'
+ *   両方の dealerCode を union して使う。
+ *   （独立した 'dealers' コレクションは存在しない）
+ *
  * 前提:
  *   scripts/service-account.json に Firebase Admin SDK の秘密鍵
  *   （.gitignore 済み。コミットしないこと）
@@ -66,15 +72,38 @@ console.log('========================================\n')
 /** dealers から有効な dealerCode を全列挙 */
 async function fetchAllDealerCodes() {
   console.log('1. 全 dealer の dealerCode を取得中...')
-  const snap = await db.collection('dealers').get()
-  const codes = []
-  for (const d of snap.docs) {
+  // 旧版は db.collection('dealers') を見ていたが、本リポジトリには
+  // 'dealers' という独立コレクションは存在しない。
+  // dealer データは users / allowedEmails の role='dealer' で表現される。
+  //
+  // ソース・オブ・トゥルース:
+  //   1. users where role='dealer' … ログイン済みの dealer。Dealers.jsx もここから取得
+  //   2. allowedEmails where role='dealer' … 招待済みだが未ログインの dealer
+  // → union を取り、いずれかに登録があれば backfill 対象に含める
+  const [usersSnap, allowSnap] = await Promise.all([
+    db.collection('users').where('role', '==', 'dealer').get(),
+    db.collection('allowedEmails').where('role', '==', 'dealer').get(),
+  ])
+
+  const codesFromUsers = new Set()
+  for (const d of usersSnap.docs) {
     const code = (d.data().dealerCode || '').trim()
-    if (code) codes.push(code)
+    if (code) codesFromUsers.add(code)
   }
-  // 重複除去 + ソート（再実行時の差分が見やすいよう安定化）
-  const unique = [...new Set(codes)].sort()
-  console.log(`   dealers コレクション: ${snap.size}件 / 有効 dealerCode: ${unique.length}件\n`)
+  const codesFromAllow = new Set()
+  for (const d of allowSnap.docs) {
+    const code = (d.data().dealerCode || '').trim()
+    if (code) codesFromAllow.add(code)
+  }
+
+  // union + ソート（再実行時の差分が見やすいよう安定化）
+  const unique = [...new Set([...codesFromUsers, ...codesFromAllow])].sort()
+
+  console.log(
+    `   users.role=dealer: ${usersSnap.size}件 (有効code ${codesFromUsers.size})  /  `
+    + `allowedEmails.role=dealer: ${allowSnap.size}件 (有効code ${codesFromAllow.size})  /  `
+    + `union 有効 dealerCode: ${unique.length}件\n`,
+  )
   return unique
 }
 
@@ -217,9 +246,25 @@ async function verify() {
 
 async function main() {
   const allDealerCodes = await fetchAllDealerCodes()
+  // dealerCode が 0 件の場合の扱い:
+  //   - DRY_RUN: 警告のみで継続（staff 分類まで見せて状況把握を優先）
+  //   - 本番:    fail-closed で停止（grandfathering の前提が崩れた状態で書き込まない）
   if (allDealerCodes.length === 0) {
-    console.error('❌ dealerCode が 1 件も取得できませんでした。dealers コレクションを確認してください。')
-    process.exit(1)
+    if (DRY_RUN) {
+      console.warn(
+        '⚠️  dealerCode が 1 件も取得できませんでした。'
+        + ' （users.role=dealer / allowedEmails.role=dealer どちらも 0 件）\n'
+        + '   付与する内容が無いため backfill は no-op になります。'
+        + ' staff 分類のみ表示します。\n',
+      )
+    } else {
+      console.error(
+        '❌ dealerCode が 1 件も取得できませんでした。'
+        + ' （users.role=dealer / allowedEmails.role=dealer どちらも 0 件）\n'
+        + '   本番実行は中断します。dealer 登録運用を整備してから再実行してください。',
+      )
+      process.exit(1)
+    }
   }
 
   const { targets, explicitlyEmpty, alreadySet, malformed, total } = await classifyStaff()
@@ -228,7 +273,8 @@ async function main() {
   let updateResult = { updated: 0, failed: [] }
   let verifyResult = { missing: targets.length, missingIds: [] }
 
-  if (!DRY_RUN && targets.length > 0) {
+  // dealerCode が 1 件以上ある場合のみ本番更新を行う（0 件なら付与する中身が無い）
+  if (!DRY_RUN && targets.length > 0 && allDealerCodes.length > 0) {
     updateResult = await applyUpdates(targets, allDealerCodes)
     verifyResult = await verify()
   }
