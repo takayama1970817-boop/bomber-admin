@@ -19,6 +19,28 @@ function fmtDate(ts) {
   return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`
 }
 
+// 招待レコードの必須項目チェック。UI バリデーションを迂回されても
+// 保存処理の直前で弾くための二重防御。firestore.rules の
+// hasRequiredSubRoleForInvite と完全に揃える。
+// 不正時は throw して呼び出し側で catch する。
+function assertValidSalonInvite(data) {
+  if (!data || typeof data !== 'object') {
+    throw new Error('招待データが不正です')
+  }
+  if (!data.email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(data.email)) {
+    throw new Error('メールアドレスの形式が正しくありません')
+  }
+  if (!data.companyName || !String(data.companyName).trim()) {
+    throw new Error('会社名（サロン名）が必須です')
+  }
+  if (data.role !== 'salon') {
+    throw new Error('role は "salon" でなければなりません')
+  }
+  if (data.subRole !== 'admin' && data.subRole !== 'staff') {
+    throw new Error('権限は「管理者」または「スタッフ」を選択してください')
+  }
+}
+
 export default function SalonManage() {
   const [accounts, setAccounts] = useState([])
   const [dealers, setDealers] = useState([])
@@ -73,8 +95,7 @@ export default function SalonManage() {
     setInviting(true)
     setInvMsg('')
     try {
-      const ref = doc(collection(db, 'allowedEmails'))
-      await setDoc(ref, {
+      const payload = {
         email,
         salonName: salonName || company,
         companyName: company,
@@ -83,7 +104,11 @@ export default function SalonManage() {
         subRole: invSubRole, // 必須バリデーション済
         invitedAt: serverTimestamp(),
         loggedIn: false,
-      })
+      }
+      // 保存前の二重防御（UI を迂回されても必ず弾く）
+      assertValidSalonInvite(payload)
+      const ref = doc(collection(db, 'allowedEmails'))
+      await setDoc(ref, payload)
 
       setInvMsg(`${company} を登録しました`)
       setInvEmail('')
@@ -137,8 +162,7 @@ export default function SalonManage() {
       }
 
       try {
-        const ref = doc(collection(db, 'allowedEmails'))
-        await setDoc(ref, {
+        const payload = {
           email,
           salonName,
           companyName: company,
@@ -147,7 +171,11 @@ export default function SalonManage() {
           subRole: bulkSubRole, // 一括指定（必須）
           invitedAt: serverTimestamp(),
           loggedIn: false,
-        })
+        }
+        // 一括でも1件ずつ保存前バリデーションを通す
+        assertValidSalonInvite(payload)
+        const ref = doc(collection(db, 'allowedEmails'))
+        await setDoc(ref, payload)
         existingEmails.add(email)
         success++
       } catch (e) {
