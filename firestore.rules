@@ -327,11 +327,16 @@ service cloud.firestore {
     // ========================================
     match /allowedEmails/{docId} {
       allow read:  if true;
-      // write 時に dealer/salon 招待なら subRole 必須。
+      // create / update 時に dealer/salon 招待なら subRole 必須。
       // 管理者は admin なのですぐ通常書き込みできるが、subRole 欠損の招待レコードは
       // 後続のログイン時にユーザーが lockout されてしまうためここで阻止する。
-      allow write: if isAdmin()
-                    && hasRequiredSubRoleForInvite(request.resource.data);
+      //
+      // delete は request.resource が存在しないため hasRequiredSubRoleForInvite を
+      // 呼ぶと評価エラーで常時拒否になる（= サロン/代理店アカウントを削除できない）
+      // ため、delete だけ独立したルールとして分離する。
+      allow create, update: if isAdmin()
+                             && hasRequiredSubRoleForInvite(request.resource.data);
+      allow delete:         if isAdmin();
     }
 
     // ========================================
