@@ -117,6 +117,12 @@ bomber-admin/
 - React Router v6
 - Tailwind CSS v4
 
+## 開発フロー
+
+このリポジトリの共通運用ルール（ブランチ運用・PR・コミット・デプロイ・緊急時対応・AI 利用ルール）は [DEV_WORKFLOW.md](DEV_WORKFLOW.md) に集約。
+作業開始前・PR 作成前に一読すること。
+
 ## 開発支援
 
+- 開発フロー共通ルール → [DEV_WORKFLOW.md](DEV_WORKFLOW.md)
 - AI 自動 PR レビュー → [docs/ai-pr-review.md](docs/ai-pr-review.md)
