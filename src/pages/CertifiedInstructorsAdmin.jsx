@@ -2,12 +2,15 @@ import { useEffect, useMemo, useState } from 'react'
 import {
   addDoc,
   collection,
+  deleteDoc,
   doc,
   getDocs,
+  limit,
   orderBy,
   query,
   serverTimestamp,
   updateDoc,
+  where,
 } from 'firebase/firestore'
 import { db } from '../lib/firebase.js'
 import { useAuth } from '../contexts/AuthContext.jsx'
@@ -173,6 +176,49 @@ export default function CertifiedInstructorsAdmin() {
     }
   }
 
+  /**
+   * 削除（admin/master のみ）。
+   *
+   * 使用判定:
+   *   trainingApplications を instructorId == row.id で 1件 limit クエリ。
+   *   ヒットあり → 物理削除せず isActive=false に切替（案件側の snapshot は保持）
+   *   ヒットなし → deleteDoc で物理削除
+   *
+   * 判定対象は trainingApplications のみ（documents サブコレクションは trainingApplications
+   * から派生するため、上位で使用を検知できれば十分）。
+   */
+  async function handleDelete(row) {
+    try {
+      assertCan(canManageInstructor, profile)
+      if (!confirm(`「${row.name}」を削除します。\n使用中の場合は物理削除せず、無効化に切り替えます。\nよろしいですか？`)) return
+      setBusy(true)
+      const usageSnap = await getDocs(query(
+        collection(db, 'trainingApplications'),
+        where('instructorId', '==', row.id),
+        limit(1),
+      ))
+      if (usageSnap.empty) {
+        // 未使用 → 物理削除
+        await deleteDoc(doc(db, 'certifiedInstructors', row.id))
+        setMessage(`「${row.name}」を削除しました（未使用のため物理削除）`)
+      } else {
+        // 使用済み → isActive=false に切替（物理削除しない）
+        await updateDoc(doc(db, 'certifiedInstructors', row.id), {
+          isActive: false,
+          updatedAt: serverTimestamp(),
+          updatedBy: profile?.uid || null,
+        })
+        setMessage(`「${row.name}」は研修案件で使用中のため、削除せず無効化に切り替えました`)
+      }
+      await load()
+    } catch (e) {
+      console.error(e)
+      setMessage(`削除エラー: ${e.message}`)
+    } finally {
+      setBusy(false)
+    }
+  }
+
   if (!canEdit) {
     return <div className="p-6 text-sm text-red-600">この画面の閲覧権限がありません。</div>
   }
@@ -267,9 +313,16 @@ export default function CertifiedInstructorsAdmin() {
                     </button>
                     <button
                       onClick={() => toggleActive(r)}
-                      className="text-sm text-gray-500 hover:underline"
+                      className="mr-2 text-sm text-gray-500 hover:underline"
                     >
                       {r.isActive !== false ? '無効化' : '有効化'}
+                    </button>
+                    <button
+                      onClick={() => handleDelete(r)}
+                      disabled={busy}
+                      className="text-sm text-red-600 hover:underline disabled:opacity-50"
+                    >
+                      削除
                     </button>
                   </td>
                 </tr>
