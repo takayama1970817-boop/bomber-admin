@@ -5,6 +5,7 @@
 import { collection, getDocs, query, orderBy, where, Timestamp } from 'firebase/firestore'
 import { db } from './firebase.js'
 import { fetchOrdersByMonth, fetchOrderProductsBatch, fetchAllCustomers } from './bcartApi.js'
+import { filterValidOrders } from './ordersFilter.js'
 
 const CAMPAIGN_BUCKETS = ['ミカエル', 'エンジェル', '単品販売', '6+1']
 
@@ -22,7 +23,9 @@ async function fetchOrders(start, end) {
     orderBy('orderDate', 'desc'),
   )
   const snap = await getDocs(q)
-  return snap.docs.map((d) => ({ id: d.id, ...d.data() }))
+  // 旧データ（isDeprecated === true）は集計対象から除外する。
+  // 月次売上 / 前月比 / 推移すべてここから派生するため必須。
+  return filterValidOrders(snap.docs.map((d) => ({ id: d.id, ...d.data() })))
 }
 
 /**

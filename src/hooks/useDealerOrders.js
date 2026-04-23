@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { collection, getDocs, limit, orderBy, query, where } from 'firebase/firestore'
 import { db } from '../lib/firebase.js'
+import { filterValidOrders } from '../lib/ordersFilter.js'
 
 /**
  * dealer 自身の注文を Firestore から取得する Hook。
@@ -40,7 +41,8 @@ export default function useDealerOrders(user, filters) {
     getDocs(q)
       .then((snap) => {
         if (cancelled) return
-        setOrders(snap.docs.map((d) => ({ id: d.id, ...d.data() })))
+        // 旧データ（isDeprecated === true）は表示・件数から除外する
+        setOrders(filterValidOrders(snap.docs.map((d) => ({ id: d.id, ...d.data() }))))
       })
       .catch((e) => {
         console.error('useDealerOrders fetch error:', e)
