@@ -61,15 +61,21 @@ export default function CertifiedInstructorsAdmin() {
   async function load() {
     setLoading(true)
     try {
-      const [instSnap, typesSnap, dealersSnap, salonsSnap] = await Promise.all([
+      const [instSnap, typesSnap, usersSnap, salonsSnap] = await Promise.all([
         getDocs(query(collection(db, 'certifiedInstructors'), orderBy('name', 'asc'))),
         getDocs(query(collection(db, 'trainingTypes'), orderBy('sortOrder', 'asc'))),
-        getDocs(collection(db, 'dealers')).catch(() => ({ docs: [] })),
+        // 修正（2026-04-22）: 代理店は users コレクションから role=dealer を抽出
+        // （既存 Dealers.jsx / SalonManage.jsx と同パターン、`dealers` コレクションは存在しない）
+        getDocs(collection(db, 'users')).catch(() => ({ docs: [] })),
         getDocs(collection(db, 'salons')).catch(() => ({ docs: [] })),
       ])
       setRows(instSnap.docs.map((d) => ({ id: d.id, ...d.data() })))
       setTypes(typesSnap.docs.map((d) => ({ id: d.id, ...d.data() })))
-      setDealers(dealersSnap.docs.map((d) => ({ id: d.id, ...d.data() })))
+      setDealers(
+        usersSnap.docs
+          .map((d) => ({ id: d.id, ...d.data() }))
+          .filter((u) => u.role === 'dealer' && u.dealerCode),
+      )
       setSalons(salonsSnap.docs.map((d) => ({ id: d.id, ...d.data() })))
     } catch (e) {
       console.error(e)
