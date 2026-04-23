@@ -1,47 +1,102 @@
 /**
  * BカートAPI → Firestore 同期スクリプト
- * 使い方: node scripts/bcart-sync.mjs
+ * 使い方: node scripts/bcart-sync.mjs --project=bomber-admin --days=7 --dry-run
+ *
+ * 必須:
+ *   --project=PROJECT_ID            対象 Firebase project_id を明示。
+ *                                   service-account.json の project_id と一致しない場合は即時終了。
  *
  * オプション:
- *   --year=2026       同期対象年（デフォルト: 2026）
- *   --all             全期間を同期
- *   --skip-products   受注明細の取得をスキップ
+ *   --service-account=PATH          使用する service account JSON のパス（既定: scripts/service-account.json）
+ *   --year=2026                     同期対象年（デフォルト: 2026）
+ *   --all                           全期間を同期
+ *   --days=7                        直近N日のみ同期（--year/--all より優先）
+ *   --skip-products                 受注明細の取得をスキップ
+ *   --dry-run                       書き込まず集計のみ
+ *
+ * 例:
+ *   # テスト DB で動作確認
+ *   node scripts/bcart-sync.mjs --project=bomber-admin-test --service-account=scripts/service-account.json --days=7 --dry-run
+ *
+ *   # 本番 DB へ同期
+ *   node scripts/bcart-sync.mjs --project=bomber-admin --service-account=scripts/service-account-prod.json --days=7
  */
-import { initializeApp } from 'firebase/app'
-import { getAuth, signInWithEmailAndPassword } from 'firebase/auth'
+import { readFileSync, existsSync } from 'node:fs'
+import { resolve, isAbsolute } from 'node:path'
+import { initializeApp, cert } from 'firebase-admin/app'
 import {
   getFirestore,
-  collection,
-  getDocs,
-  doc,
-  writeBatch,
+  FieldValue,
   Timestamp,
-  serverTimestamp,
-} from 'firebase/firestore'
-import {
-  BCART_BASE,
-  getBcartToken,
-  getFirebaseConfig,
-  getScriptCredentials,
-} from './_env.mjs'
+} from 'firebase-admin/firestore'
+import { BCART_BASE, getBcartToken } from './_env.mjs'
 
 // === 設定 ===
 const BCART_TOKEN = getBcartToken()
 const PAGE_SIZE = 20
 
-const firebaseConfig = getFirebaseConfig()
-const { email: SCRIPT_EMAIL, password: SCRIPT_PASSWORD } = getScriptCredentials()
+// === CLI 引数パース（service account / project は SDK 初期化前に必要なので先に処理）===
+const cliArgs = process.argv.slice(2)
+function getFlagValue(name) {
+  const hit = cliArgs.find((a) => a.startsWith(`${name}=`))
+  return hit ? hit.split('=').slice(1).join('=') : null
+}
 
-const app = initializeApp(firebaseConfig)
-const auth = getAuth(app)
-const db = getFirestore(app)
+// --project は誤実行防止のため必須。service-account.json の project_id と一致しないと exit。
+const REQUIRED_PROJECT_ID = getFlagValue('--project')
+if (!REQUIRED_PROJECT_ID) {
+  console.error('❌ --project=PROJECT_ID は必須です。')
+  console.error('   例: --project=bomber-admin-test （テスト）')
+  console.error('       --project=bomber-admin      （本番）')
+  process.exit(1)
+}
 
-const args = process.argv.slice(2)
+// --service-account でファイルパスを切替可能。既定は scripts/service-account.json。
+const SA_FLAG = getFlagValue('--service-account')
+const SERVICE_ACCOUNT_PATH = SA_FLAG
+  ? (isAbsolute(SA_FLAG) ? SA_FLAG : resolve(process.cwd(), SA_FLAG))
+  : new URL('./service-account.json', import.meta.url)
+
+if (!existsSync(SERVICE_ACCOUNT_PATH)) {
+  console.error(`❌ service account JSON が見つかりません: ${SERVICE_ACCOUNT_PATH}`)
+  console.error('   Firebase Console → プロジェクト設定 → サービスアカウント → 新しい秘密鍵 で取得してください。')
+  process.exit(1)
+}
+
+const serviceAccount = JSON.parse(readFileSync(SERVICE_ACCOUNT_PATH, 'utf8'))
+
+// project_id 厳格チェック: SA と --project が食い違えば即時終了（fail-closed）。
+if (serviceAccount.project_id !== REQUIRED_PROJECT_ID) {
+  console.error('❌ project_id 不一致のため停止します（誤実行防止）。')
+  console.error(`   --project              : ${REQUIRED_PROJECT_ID}`)
+  console.error(`   service account        : ${serviceAccount.project_id}`)
+  console.error(`   service account file   : ${SERVICE_ACCOUNT_PATH}`)
+  process.exit(1)
+}
+
+console.log('========================================')
+console.log('  Firebase Admin SDK 初期化')
+console.log(`  project_id     : ${serviceAccount.project_id}`)
+console.log(`  client_email   : ${serviceAccount.client_email}`)
+console.log(`  service account: ${SERVICE_ACCOUNT_PATH}`)
+console.log('========================================\n')
+
+initializeApp({ credential: cert(serviceAccount), projectId: serviceAccount.project_id })
+const db = getFirestore()
+// Admin SDK は serverTimestamp を FieldValue 経由で扱うため、互換 alias を用意
+const serverTimestamp = () => FieldValue.serverTimestamp()
+
+const args = cliArgs
 const yearArg = args.find((a) => a.startsWith('--year='))
+const daysArg = args.find((a) => a.startsWith('--days='))
 const syncAll = args.includes('--all')
 const skipProducts = args.includes('--skip-products')
 const dryRun = args.includes('--dry-run')
 const TARGET_YEAR = yearArg ? parseInt(yearArg.split('=')[1]) : 2026
+// --days=N が指定されたときだけ「直近Nモード」として扱う。
+// year / all より優先し、findStartOffsetByDate で開始 offset を決める。
+const RECENT_DAYS = daysArg ? parseInt(daysArg.split('=')[1]) : null
+const recentMode = Number.isFinite(RECENT_DAYS) && RECENT_DAYS > 0
 
 // === レート制限対応 fetch ===
 async function bcartFetch(endpoint, params = {}) {
@@ -66,12 +121,18 @@ async function bcartFetch(endpoint, params = {}) {
   throw new Error('レート制限が継続中。しばらく待ってから再実行してください。')
 }
 
-// === 二分探索で年の開始offsetを見つける ===
-async function findYearStartOffset(year) {
-  const targetDate = `${year}-01-01`
+// === 二分探索で「ordered_at >= targetDate」となる最初の offset を見つける ===
+//
+// Bカート orders API は ordered_at 昇順（古い順）を返す前提。
+// findYearStartOffset(year) はこの一般化版に置き換えた薄いラッパ。
+//
+// TODO: Bカート API 側に ordered_at の範囲指定パラメータ（例: from/to/since 等）
+//       が存在するか公式ドキュメントを確認し、可能なら API 側フィルタに切替えて
+//       本探索自体を不要にする。現状は param 名が不明なため二分探索方式で安全に絞る。
+async function findStartOffsetByDate(targetDate) {
   const meta = await bcartFetch('orders', { limit: 1, offset: 0 })
   const total = meta.meta?.total || 0
-  if (total === 0) return 0
+  if (total === 0) return { startOffset: 0, total: 0 }
 
   let lo = 0
   let hi = total
@@ -87,23 +148,46 @@ async function findYearStartOffset(year) {
       hi = aligned
     }
   }
-  return lo
+  return { startOffset: lo, total }
+}
+
+async function findYearStartOffset(year) {
+  const { startOffset } = await findStartOffsetByDate(`${year}-01-01`)
+  return startOffset
 }
 
 // === メイン処理 ===
 async function main() {
-  const yearLabel = syncAll ? '全期間' : `${TARGET_YEAR}年`
+  const yearLabel = recentMode
+    ? `直近${RECENT_DAYS}日`
+    : (syncAll ? '全期間' : `${TARGET_YEAR}年`)
   console.log(`=== BカートAPI → Firestore 同期（${yearLabel}） ===\n`)
 
-  // 0. Firebase認証
-  console.log('0. Firebase認証中...')
-  await signInWithEmailAndPassword(auth, SCRIPT_EMAIL, SCRIPT_PASSWORD)
-  console.log('   認証OK\n')
+  // 0. Firebase認証（Admin SDK 初期化はモジュールロード時に完了済み）
+  console.log('0. Firebase認証: Admin SDK (service-account.json)\n')
 
   // 1. 注文データ取得
+  // Bカート orders API は ordered_at 昇順（古い順）。offset=0 は最古。
+  // 直近Nモード・年指定モードのいずれも、二分探索で「cutoff 以降の最初の offset」を見つけ、
+  // そこから前進して読み切る方式に統一する。
   console.log('1. 注文データ取得中...')
+
+  // 直近Nモード用の cutoff（YYYY-MM-DD）。
+  let cutoffStr = null
+  if (recentMode) {
+    const cutoff = new Date()
+    cutoff.setDate(cutoff.getDate() - RECENT_DAYS)
+    cutoffStr = cutoff.toISOString().slice(0, 10)
+  }
+
   let startOffset = 0
-  if (!syncAll) {
+  if (recentMode) {
+    console.log(`   直近${RECENT_DAYS}日モード cutoff (>=): ${cutoffStr}`)
+    console.log(`   開始位置を二分探索中...`)
+    const { startOffset: so, total: t } = await findStartOffsetByDate(cutoffStr)
+    startOffset = so
+    console.log(`   開始offset: ${startOffset} / 全${t}件`)
+  } else if (!syncAll) {
     console.log(`   ${TARGET_YEAR}年の開始位置を検索中...`)
     startOffset = await findYearStartOffset(TARGET_YEAR)
     console.log(`   開始offset: ${startOffset}`)
@@ -114,6 +198,12 @@ async function main() {
   const orders = []
   let offset = startOffset
   let passedFilter = false
+  // 安全策: 直近Nモードで想定外に大量ページングしないよう上限を設ける。
+  // 1ページ20件 × 50ページ = 最大 1000件 で打ち切り。
+  // 通常の「直近7日」運用ではこのキャップに到達しないが、
+  // 二分探索のバグ等でページングが暴走した場合のフェイルセーフ。
+  const MAX_RECENT_PAGES = 50
+  let recentPageCount = 0
 
   while (true) {
     const data = await bcartFetch('orders', { limit: PAGE_SIZE, offset })
@@ -121,10 +211,15 @@ async function main() {
     if (!items || items.length === 0) break
 
     for (const item of items) {
-      if (syncAll || (item.ordered_at >= yearStart && item.ordered_at < yearEnd)) {
+      const inRange = recentMode
+        ? item.ordered_at >= cutoffStr
+        : (syncAll || (item.ordered_at >= yearStart && item.ordered_at < yearEnd))
+      if (inRange) {
         orders.push(item)
         passedFilter = true
       } else if (passedFilter) {
+        // 古い順なので、いったん範囲に入ってから外れることは通常ない。
+        // year モードで yearEnd を超えた場合のみここに来る。
         break
       }
     }
@@ -135,6 +230,17 @@ async function main() {
     }
     if (passedFilter && items.length < PAGE_SIZE) break
     if (items.length < PAGE_SIZE) break
+
+    if (recentMode) {
+      recentPageCount++
+      if (recentPageCount >= MAX_RECENT_PAGES) {
+        console.warn(
+          `   ⚠️  MAX_RECENT_PAGES=${MAX_RECENT_PAGES} に到達したため打ち切ります。`
+          + ' （取得済み ' + orders.length + ' 件）',
+        )
+        break
+      }
+    }
     offset += PAGE_SIZE
   }
   console.log(`   → ${yearLabel}受注: ${orders.length}件\n`)
@@ -178,7 +284,7 @@ async function main() {
   // 3. Firestore既存データ確認
   // 速報 (bcart-email) 行を昇格更新できるよう、id と source を保持する
   console.log('3. Firestore既存データ確認中...')
-  const existingSnap = await getDocs(collection(db, 'orders'))
+  const existingSnap = await db.collection('orders').get()
   // bcartCode と bcartOrderNumber は同値のことが多いが、旧データで異なる
   // ケースがあるため両方を Map キーに入れて dedup 判定の取りこぼしを防ぐ。
   // どちらか一方しか入っていない古い行も同じ既存 entry を指すよう冗長登録する。
@@ -186,8 +292,19 @@ async function main() {
   let emailCount = 0
   let apiCount = 0
   let otherCount = 0
+  let deprecatedCount = 0
   existingSnap.docs.forEach((d) => {
     const data = d.data()
+    // 旧データ（isDeprecated === true）は existing 判定から除外する。
+    // 同じ bcartCode を持つ deprecated 行が残っていても、新規取り込み・
+    // メール→API 昇格が deprecated 行を existing と誤判定してスキップされる
+    // のを防ぐため。
+    // TODO: deprecated 行と新規行の bcartCode 衝突が残った場合は、
+    //       後続の cleanup スクリプト or 手動で deprecated 行を物理削除する。
+    if (data.isDeprecated === true) {
+      deprecatedCount++
+      return
+    }
     const entry = { id: d.id, source: data.source || '' }
     if (data.bcartCode) existingByCode.set(data.bcartCode, entry)
     if (data.bcartOrderNumber) existingByCode.set(data.bcartOrderNumber, entry)
@@ -195,10 +312,14 @@ async function main() {
     else if (data.source === 'bcart-api') apiCount++
     else otherCount++
   })
-  console.log(`   既存 orders: ${existingSnap.size}件（bcart-email=${emailCount} / bcart-api=${apiCount} / その他=${otherCount}）\n`)
+  console.log(
+    `   既存 orders: ${existingSnap.size}件`
+    + `（bcart-email=${emailCount} / bcart-api=${apiCount} / その他=${otherCount}`
+    + ` / deprecated除外=${deprecatedCount}）\n`,
+  )
 
   // 4. サロンマップ
-  const salonSnap = await getDocs(collection(db, 'salons'))
+  const salonSnap = await db.collection('salons').get()
   const salonMap = {}
   salonSnap.docs.forEach((d) => {
     const data = d.data()
@@ -209,7 +330,7 @@ async function main() {
   const dryLabel = dryRun ? '（DRY_RUN: 書き込まず集計のみ）' : ''
   console.log(`4. Firestore書き込み${dryRun ? '（シミュレーション）' : ''}...${dryLabel}`)
   let imported = 0, promoted = 0, skipped = 0, newSalons = 0
-  let batch = writeBatch(db)
+  let batch = db.batch()
   let batchCount = 0
 
   // 月別集計
@@ -249,7 +370,7 @@ async function main() {
         monthlyStats[month].total += (order.final_price || 0)
 
         if (!dryRun) {
-          const orderRef = doc(db, 'orders', existing.id)
+          const orderRef = db.collection('orders').doc(existing.id)
           batch.update(orderRef, {
             orderDate: Timestamp.fromDate(new Date(order.ordered_at)),
             total: order.final_price || 0,
@@ -267,7 +388,7 @@ async function main() {
             promotedFromEmailAt: serverTimestamp(),
           })
 
-          const logRef = doc(collection(db, 'bcartPromotionLogs'))
+          const logRef = db.collection('bcartPromotionLogs').doc()
           batch.set(logRef, {
             bcartCode: code,
             beforeSource: 'bcart-email',
@@ -289,7 +410,7 @@ async function main() {
       if (!dryRun && batchCount >= 450) {
         await batch.commit()
         console.log(`   ... ${imported}件新規 / ${promoted}件昇格 書き込み済み`)
-        batch = writeBatch(db)
+        batch = db.batch()
         batchCount = 0
       }
       continue
@@ -302,7 +423,7 @@ async function main() {
     let salonId = salonMap[companyName]
     if (!salonId) {
       if (!dryRun) {
-        const salonRef = doc(collection(db, 'salons'))
+        const salonRef = db.collection('salons').doc()
         salonId = salonRef.id
         salonMap[companyName] = salonId
         batch.set(salonRef, {
@@ -327,7 +448,7 @@ async function main() {
     }
 
     if (!dryRun) {
-      const orderRef = doc(collection(db, 'orders'))
+      const orderRef = db.collection('orders').doc()
       batch.set(orderRef, {
         salonId,
         orderDate: Timestamp.fromDate(new Date(order.ordered_at)),
@@ -355,7 +476,7 @@ async function main() {
     if (!dryRun && batchCount >= 450) {
       await batch.commit()
       console.log(`   ... ${imported}件新規 / ${promoted}件昇格 書き込み済み`)
-      batch = writeBatch(db)
+      batch = db.batch()
       batchCount = 0
     }
   }
@@ -370,7 +491,7 @@ async function main() {
   console.log('========================================')
   console.log(`  API取得:       ${orders.length}件`)
   console.log(`  新規取り込み:  ${imported}件${dryRun ? '（書き込みなし）' : ''}`)
-  console.log(`  昇格（速報→正式）: ${promoted}件${dryRun ? '（書き込みなし）' : ''}`)
+  console.log(`  昇格(速報→正式): ${promoted}件${dryRun ? '（書き込みなし）' : ''}`)
   console.log(`  スキップ:      ${skipped}件（既に正式）`)
   console.log(`  新規サロン:    ${newSalons}件${dryRun ? '（書き込みなし）' : ''}`)
 

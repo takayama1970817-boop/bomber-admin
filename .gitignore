@@ -38,6 +38,7 @@ functions/.env
 
 # Firebase Admin SDK サービスアカウント（絶対コミット禁止）
 scripts/service-account.json
+scripts/service-account-*.json
 scripts/*-service-account.json
 *-firebase-adminsdk-*.json
 
