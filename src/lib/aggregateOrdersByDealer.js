@@ -21,6 +21,7 @@
  *     未指定または該当なしのときは空文字。
  */
 import { filterValidOrders } from './ordersFilter.js'
+import { computeOrderStats } from './orderStats.js'
 
 const UNASSIGNED = '（未割当）'
 
@@ -31,40 +32,58 @@ function toDate(orderDate) {
   return Number.isNaN(d.getTime()) ? null : d
 }
 
+/**
+ * 代理店別 orders 集計。dealerCode 単位でグルーピングし、
+ * 各グループに対して computeOrderStats を適用する。
+ *
+ * 戻り値は後方互換のため従来フィールド (count / total / salonCount / lastOrderDate)
+ * を維持しつつ、orderStats 由来のフィールドを additive に追加する。
+ *
+ * 各エントリの主要フィールド:
+ *   dealerCode, dealerName,
+ *   count            : 受注件数（全件 = orderStats.orderCount）
+ *   total            : 受注総額（返品含む = orderStats.revenue）
+ *   salonCount       : 配下サロン数 (distinct companyName)
+ *   lastOrderDate    : 最終発注日
+ *   stats            : computeOrderStats の戻り値（min/max/avg/return 等を含む）
+ */
 export function aggregateOrdersByDealer(rawOrders, opts = {}) {
   const orders = filterValidOrders(rawOrders)
   const nameMap = opts.dealerNameByCode instanceof Map
     ? opts.dealerNameByCode
     : new Map()
 
-  const map = new Map()
+  // dealerCode → orders[] のグループ化
+  const groups = new Map()
+  // 並行して dealerCode → 補助情報 (lastOrderDate / salonNames) を構築
+  const meta = new Map()
+
   for (const o of orders) {
     const code = String(o.dealerCode || '').trim() || UNASSIGNED
-    if (!map.has(code)) {
-      map.set(code, {
-        dealerCode: code,
-        count: 0,
-        total: 0,
-        lastOrderDate: null,
-        salonNames: new Set(),
-      })
+    if (!groups.has(code)) {
+      groups.set(code, [])
+      meta.set(code, { lastOrderDate: null, salonNames: new Set() })
     }
-    const e = map.get(code)
-    e.count += 1
-    e.total += Number(o.total) || 0
-    if (o.companyName) e.salonNames.add(o.companyName)
+    groups.get(code).push(o)
+    const m = meta.get(code)
+    if (o.companyName) m.salonNames.add(o.companyName)
     const d = toDate(o.orderDate)
-    if (d && (!e.lastOrderDate || d > e.lastOrderDate)) e.lastOrderDate = d
+    if (d && (!m.lastOrderDate || d > m.lastOrderDate)) m.lastOrderDate = d
   }
 
-  return [...map.values()].map((e) => ({
-    dealerCode: e.dealerCode,
-    dealerName: e.dealerCode === UNASSIGNED ? '' : (nameMap.get(e.dealerCode) || ''),
-    count: e.count,
-    total: e.total,
-    salonCount: e.salonNames.size,
-    lastOrderDate: e.lastOrderDate,
-  }))
+  return [...groups.entries()].map(([code, list]) => {
+    const stats = computeOrderStats(list)
+    const m = meta.get(code)
+    return {
+      dealerCode: code,
+      dealerName: code === UNASSIGNED ? '' : (nameMap.get(code) || ''),
+      count: stats.orderCount,
+      total: stats.revenue,
+      salonCount: m.salonNames.size,
+      lastOrderDate: m.lastOrderDate,
+      stats,
+    }
+  })
 }
 
 export const UNASSIGNED_DEALER_CODE = UNASSIGNED
