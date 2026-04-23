@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { collection, getDocs, orderBy, query, where, Timestamp } from 'firebase/firestore'
 import { db } from '../lib/firebase.js'
 import { filterValidOrders } from '../lib/ordersFilter.js'
+import { computeOrderStats } from '../lib/orderStats.js'
 
 /**
  * 代理店ダッシュボード用メトリクス Hook（Phase 3-1 v2）
@@ -64,8 +65,11 @@ export default function useDealerDashboard(user) {
   }, [user?.dealerCode])
 
   const metrics = useMemo(() => computeMetrics(orders), [orders])
+  // 共通 stats（売上・最低/最高/平均・返品など）。最終的な KPI は metrics.kpis を使うが、
+  // 集計の正本は orderStats に寄せて、両者がズレないようにする。
+  const summary = useMemo(() => computeOrderStats(orders), [orders])
 
-  return { loading, error, ...metrics, ordersCount: orders.length }
+  return { loading, error, ...metrics, ordersCount: orders.length, summary }
 }
 
 // =====================================================
