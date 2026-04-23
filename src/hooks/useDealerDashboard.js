@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { collection, getDocs, orderBy, query, where, Timestamp } from 'firebase/firestore'
 import { db } from '../lib/firebase.js'
+import { filterValidOrders } from '../lib/ordersFilter.js'
 
 /**
  * 代理店ダッシュボード用メトリクス Hook（Phase 3-1 v2）
@@ -47,7 +48,9 @@ export default function useDealerDashboard(user) {
     getDocs(q)
       .then((snap) => {
         if (cancelled) return
-        setOrders(snap.docs.map((d) => ({ id: d.id, ...d.data() })))
+        // 旧データ（isDeprecated === true）はメトリクス計算から除外する。
+        // 最終発注日・売上・件数すべてここから派生するため必須。
+        setOrders(filterValidOrders(snap.docs.map((d) => ({ id: d.id, ...d.data() }))))
       })
       .catch((e) => {
         console.error('useDealerDashboard fetch error:', e)

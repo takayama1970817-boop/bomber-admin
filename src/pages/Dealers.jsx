@@ -21,6 +21,8 @@ import { downloadKbRulesXlsx } from '../lib/generateKbRulesXlsx.js'
 import { downloadKbRulesPdf } from '../lib/generateKbRulesPdf.js'
 import { useAuth } from '../contexts/AuthContext.jsx'
 import { canInvite, canEditDealerAccount, assertCan } from '../lib/permissions.js'
+import { filterValidOrders } from '../lib/ordersFilter.js'
+import { aggregateOrdersByDealer } from '../lib/aggregateOrdersByDealer.js'
 
 const APP_URL = 'https://bomber-admin.web.app'
 
@@ -48,6 +50,8 @@ export default function Dealers() {
   const [sortAsc, setSortAsc] = useState(false)
 
   // 全注文 + 代理店アカウントを取得
+  // 集計は dealerCode 単位（共通ヘルパー aggregateOrdersByDealer）。
+  // dealerCode → 会社名 のマップは allowedEmails(role=dealer) から構築する。
   useEffect(() => {
     ;(async () => {
       try {
@@ -55,37 +59,24 @@ export default function Dealers() {
           getDocs(query(collection(db, 'orders'), orderBy('orderDate', 'desc'))),
           getDocs(collection(db, 'allowedEmails')),
         ])
-        const all = orderSnap.docs.map((d) => ({ id: d.id, ...d.data() }))
+        // 旧データ（isDeprecated === true）は集計対象から除外する
+        const all = filterValidOrders(orderSnap.docs.map((d) => ({ id: d.id, ...d.data() })))
         setAllOrders(all)
-        setDealerAccounts(
-          emailSnap.docs
-            .map((d) => ({ id: d.id, ...d.data() }))
-            .filter((d) => d.role === 'dealer' && d.dealerCode),
-        )
 
-        // 代理店ごとに集計
-        const map = {}
-        for (const o of all) {
-          const name = o.companyName || '（会社名なし）'
-          if (!map[name]) {
-            map[name] = {
-              name,
-              count: 0,
-              total: 0,
-              lastOrder: null,
-              lastOrderDate: null,
-            }
-          }
-          map[name].count++
-          map[name].total += Number(o.total) || 0
-          const oDate = o.orderDate?.toDate ? o.orderDate.toDate() : o.orderDate ? new Date(o.orderDate) : null
-          if (oDate && (!map[name].lastOrderDate || oDate > map[name].lastOrderDate)) {
-            map[name].lastOrderDate = oDate
-            map[name].lastOrder = o.orderDate
+        const dealerAccountList = emailSnap.docs
+          .map((d) => ({ id: d.id, ...d.data() }))
+          .filter((d) => d.role === 'dealer' && d.dealerCode)
+        setDealerAccounts(dealerAccountList)
+
+        // dealerCode → 会社名（最初に見つかったものを採用）
+        const dealerNameByCode = new Map()
+        for (const d of dealerAccountList) {
+          if (!dealerNameByCode.has(d.dealerCode)) {
+            dealerNameByCode.set(d.dealerCode, d.companyName || '')
           }
         }
 
-        setDealers(Object.values(map))
+        setDealers(aggregateOrdersByDealer(all, { dealerNameByCode }))
       } catch (e) {
         console.error('注文データ取得エラー:', e)
       } finally {
@@ -94,13 +85,15 @@ export default function Dealers() {
     })()
   }, [])
 
-  // ソート
+  // ソート（dealerCode 単位）
   const sorted = [...dealers].sort((a, b) => {
     let cmp = 0
-    if (sortKey === 'name') cmp = a.name.localeCompare(b.name, 'ja')
+    if (sortKey === 'dealerCode') cmp = a.dealerCode.localeCompare(b.dealerCode, 'ja')
+    else if (sortKey === 'dealerName') cmp = (a.dealerName || '').localeCompare(b.dealerName || '', 'ja')
+    else if (sortKey === 'salonCount') cmp = a.salonCount - b.salonCount
     else if (sortKey === 'count') cmp = a.count - b.count
     else if (sortKey === 'total') cmp = a.total - b.total
-    else if (sortKey === 'lastOrder') cmp = (a.lastOrderDate || 0) - (b.lastOrderDate || 0)
+    else if (sortKey === 'lastOrder') cmp = (a.lastOrderDate?.getTime() || 0) - (b.lastOrderDate?.getTime() || 0)
     return sortAsc ? cmp : -cmp
   })
 
@@ -403,10 +396,18 @@ export default function Dealers() {
     }
   }
 
-  // 代理店クリック → 注文一覧表示
-  const selectDealer = (name) => {
-    setSelected(name)
-    setOrders(allOrders.filter((o) => (o.companyName || '（会社名なし）') === name))
+  // 代理店クリック → 注文一覧表示（dealerCode で絞り込み）
+  // selected には dealerCode を保持。詳細表示の見出し等は dealers から再引き当て。
+  const selectDealer = (dealerCode) => {
+    setSelected(dealerCode)
+    // 未割当グループは dealerCode 空のレコード集合
+    setOrders(
+      allOrders.filter((o) => {
+        const code = String(o.dealerCode || '').trim()
+        if (dealerCode === '（未割当）') return code === ''
+        return code === dealerCode
+      }),
+    )
   }
 
   if (loading) {
@@ -419,7 +420,10 @@ export default function Dealers() {
 
   // 代理店詳細（注文一覧）
   if (selected) {
-    const dealer = dealers.find((d) => d.name === selected)
+    const dealer = dealers.find((d) => d.dealerCode === selected)
+    const headline = dealer?.dealerName
+      ? `${dealer.dealerName}（${dealer.dealerCode}）`
+      : (dealer?.dealerCode || selected)
     return (
       <div>
         <button
@@ -429,11 +433,12 @@ export default function Dealers() {
           ← 代理店一覧に戻る
         </button>
 
-        <h1 className="mb-1 text-2xl font-bold text-gray-900">{selected}</h1>
-        <div className="mb-6 flex gap-6 text-sm text-gray-500">
+        <h1 className="mb-1 text-2xl font-bold text-gray-900">{headline}</h1>
+        <div className="mb-6 flex flex-wrap gap-6 text-sm text-gray-500">
+          <span>配下サロン数：<strong className="text-gray-900">{dealer?.salonCount || 0}社</strong></span>
           <span>注文数：<strong className="text-gray-900">{dealer?.count || 0}件</strong></span>
           <span>累計売上：<strong className="text-gray-900">{fmtYen(dealer?.total)}</strong></span>
-          <span>最終注文：<strong className="text-gray-900">{fmtDate(dealer?.lastOrder)}</strong></span>
+          <span>最終注文：<strong className="text-gray-900">{fmtDate(dealer?.lastOrderDate)}</strong></span>
         </div>
 
         {/* 月別集計 */}
@@ -1166,16 +1171,28 @@ export default function Dealers() {
         </div>
       )}
 
-      {/* 全会社一覧（注文データベース） */}
+      {/* 代理店一覧（dealerCode 単位 / 共通ヘルパー aggregateOrdersByDealer 由来） */}
       <div className="overflow-auto rounded-xl border border-gray-200 bg-white">
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-gray-100 bg-gray-50 text-left text-xs text-gray-500">
               <th
                 className="cursor-pointer px-4 py-3 hover:text-gray-900"
-                onClick={() => handleSort('name')}
+                onClick={() => handleSort('dealerCode')}
               >
-                会社名{sortIcon('name')}
+                代理店コード{sortIcon('dealerCode')}
+              </th>
+              <th
+                className="cursor-pointer px-4 py-3 hover:text-gray-900"
+                onClick={() => handleSort('dealerName')}
+              >
+                代理店名{sortIcon('dealerName')}
+              </th>
+              <th
+                className="cursor-pointer px-4 py-3 text-right hover:text-gray-900"
+                onClick={() => handleSort('salonCount')}
+              >
+                配下サロン数{sortIcon('salonCount')}
               </th>
               <th
                 className="cursor-pointer px-4 py-3 text-right hover:text-gray-900"
@@ -1200,16 +1217,18 @@ export default function Dealers() {
           <tbody>
             {sorted.map((d) => (
               <tr
-                key={d.name}
-                onClick={() => selectDealer(d.name)}
+                key={d.dealerCode}
+                onClick={() => selectDealer(d.dealerCode)}
                 className="cursor-pointer border-b border-gray-50 hover:bg-indigo-50"
               >
-                <td className="px-4 py-3 font-medium text-gray-900">{d.name}</td>
+                <td className="px-4 py-3 font-mono text-xs text-gray-900">{d.dealerCode}</td>
+                <td className="px-4 py-3 font-medium text-gray-900">{d.dealerName || '—'}</td>
+                <td className="px-4 py-3 text-right">{d.salonCount}社</td>
                 <td className="px-4 py-3 text-right">{d.count}件</td>
                 <td className="px-4 py-3 text-right font-bold text-gray-900">
                   {fmtYen(d.total)}
                 </td>
-                <td className="px-4 py-3 text-gray-500">{fmtDate(d.lastOrder)}</td>
+                <td className="px-4 py-3 text-gray-500">{fmtDate(d.lastOrderDate)}</td>
               </tr>
             ))}
           </tbody>

@@ -4,6 +4,18 @@ import { collection, getDocs, query, where, orderBy } from 'firebase/firestore'
 import { db } from '../lib/firebase.js'
 import { useAuth } from '../contexts/AuthContext.jsx'
 import { useChatUnread } from '../hooks/useChatUnread.js'
+import { filterValidOrders } from '../lib/ordersFilter.js'
+import { aggregateOrdersByDealer } from '../lib/aggregateOrdersByDealer.js'
+
+function fmtYen(n) {
+  if (n == null) return '—'
+  return '¥' + Number(n).toLocaleString()
+}
+
+function fmtDate(d) {
+  if (!d) return '—'
+  return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`
+}
 
 const CALENDAR_ID = 'lurbkjiegacljh0v92ubc4h8sk@group.calendar.google.com'
 const API_KEY = import.meta.env.VITE_FIREBASE_API_KEY
@@ -92,6 +104,8 @@ export default function Dashboard() {
   const [monthlySales, setMonthlySales] = useState([])
   const [salesLoading, setSalesLoading] = useState(true)
   const [newOrderCount, setNewOrderCount] = useState(0)
+  // 代理店別サマリ（共通ヘルパー aggregateOrdersByDealer 由来）
+  const [dealerSummary, setDealerSummary] = useState([])
 
   useEffect(() => {
     const id = setInterval(() => setNow(new Date()), 60000)
@@ -134,22 +148,44 @@ export default function Dashboard() {
     if (!isAdmin) { setSalesLoading(false); return }
     const loadSales = async () => {
       try {
-        const snap = await getDocs(collection(db, 'orders'))
+        // orders + 代理店アカウント（dealerCode → 会社名のマップ用）を並列取得
+        const [snap, emailSnap] = await Promise.all([
+          getDocs(collection(db, 'orders')),
+          getDocs(collection(db, 'allowedEmails')),
+        ])
+
+        // 旧データ（isDeprecated === true）は集計対象から除外する
+        const validOrders = filterValidOrders(snap.docs.map((d) => ({ id: d.id, ...d.data() })))
+
         const monthMap = {}
         let pendingCount = 0
-        snap.docs.forEach((d) => {
-          const data = d.data()
+        // 未処理件数の判定は全 orders（deprecated 含む）で行うと過剰カウントになるため、
+        // 月別売上と同じく validOrders に対してカウントする。
+        for (const data of validOrders) {
           if (!data.status || data.status === 'new') pendingCount++
           const orderDate = data.orderDate?.toDate?.() || (data.orderDate ? new Date(data.orderDate) : null)
-          if (!orderDate) return
+          if (!orderDate) continue
           const key = `${orderDate.getFullYear()}-${String(orderDate.getMonth() + 1).padStart(2, '0')}`
           if (!monthMap[key]) monthMap[key] = { month: key, count: 0, total: 0 }
           monthMap[key].count++
           monthMap[key].total += (data.total || 0)
-        })
+        }
         setNewOrderCount(pendingCount)
-        const sorted = Object.values(monthMap).sort((a, b) => b.month.localeCompare(a.month))
-        setMonthlySales(sorted)
+        const sortedSales = Object.values(monthMap).sort((a, b) => b.month.localeCompare(a.month))
+        setMonthlySales(sortedSales)
+
+        // 代理店別サマリ（dealerCode 単位 / 共通ヘルパー由来）
+        const dealerNameByCode = new Map()
+        for (const ed of emailSnap.docs) {
+          const d = ed.data()
+          if (d.role === 'dealer' && d.dealerCode && !dealerNameByCode.has(d.dealerCode)) {
+            dealerNameByCode.set(d.dealerCode, d.companyName || '')
+          }
+        }
+        const summary = aggregateOrdersByDealer(validOrders, { dealerNameByCode })
+        // 初期ソート: 売上降順
+        summary.sort((a, b) => b.total - a.total)
+        setDealerSummary(summary)
       } catch (e) { console.error('売上読込エラー:', e) }
       finally { setSalesLoading(false) }
     }
@@ -403,6 +439,49 @@ export default function Dashboard() {
                   )
                 })()}
               </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* 代理店別サマリ（admin のみ・売上降順） */}
+      {isAdmin && (
+        <div className="mt-6">
+          <div className="mb-3 flex items-center justify-between">
+            <h2 className="text-sm font-bold text-gray-700">🏢 代理店別サマリ</h2>
+            <button onClick={() => navigate('/admin/dealers')}
+              className="text-xs text-indigo-600 hover:underline">代理店管理を開く →</button>
+          </div>
+          <div className="overflow-auto rounded-2xl border border-gray-200 bg-white">
+            {salesLoading ? (
+              <div className="px-6 py-8 text-center text-sm text-gray-400">読み込み中...</div>
+            ) : dealerSummary.length === 0 ? (
+              <div className="px-6 py-8 text-center text-sm text-gray-400">代理店別データがありません</div>
+            ) : (
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-gray-100 bg-gray-50 text-left text-xs text-gray-500">
+                    <th className="px-4 py-3">代理店コード</th>
+                    <th className="px-4 py-3">代理店名</th>
+                    <th className="px-4 py-3 text-right">売上</th>
+                    <th className="px-4 py-3 text-right">件数</th>
+                    <th className="px-4 py-3 text-right">配下サロン数</th>
+                    <th className="px-4 py-3">最終発注日</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {dealerSummary.map((d) => (
+                    <tr key={d.dealerCode} className="border-b border-gray-50 hover:bg-indigo-50">
+                      <td className="px-4 py-3 font-mono text-xs text-gray-900">{d.dealerCode}</td>
+                      <td className="px-4 py-3 text-gray-900">{d.dealerName || '—'}</td>
+                      <td className="px-4 py-3 text-right font-bold text-gray-900">{fmtYen(d.total)}</td>
+                      <td className="px-4 py-3 text-right">{d.count}件</td>
+                      <td className="px-4 py-3 text-right">{d.salonCount}社</td>
+                      <td className="px-4 py-3 text-gray-500">{fmtDate(d.lastOrderDate)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             )}
           </div>
         </div>
