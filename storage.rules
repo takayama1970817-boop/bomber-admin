@@ -21,18 +21,23 @@ service firebase.storage {
                    && request.resource.contentType == 'application/pdf';
     }
 
-    // 研修発行物 PDF（ディプロマ / 認定サロン賞）PR-3 導入
+    // 研修発行物 PDF（ディプロマ / 認定サロン賞）PR-3 導入 / 2026-04-22 修正
     // - path: training-documents/{appId}/{filename}
     // - read: admin/master のみ（発行物は機密・受講者個人情報を含む）
     // - write: admin/master のみ
-    // - 10MB 以下 / PDF のみ
+    // - 20MB 以下 / PDF のみ（kickback-pdfs と同等に揃えた。html2canvas scale=2 の PNG
+    //   埋め込みで 5〜10MB を超えるケースを考慮し、旧 10MB 制限で permission denied
+    //   になるのを回避）
+    // - contentType マッチは前方一致にして `application/pdf; charset=...` のような
+    //   ブラウザ付加で弾かれないようにする（Firebase SDK が Blob.type=application/pdf
+    //   でアップロードする想定だが、念のため保険）
     match /training-documents/{appId}/{fileName} {
       allow read: if request.auth != null
                    && firestore.get(/databases/(default)/documents/users/$(request.auth.uid)).data.role in ['admin', 'master'];
       allow write: if request.auth != null
                    && firestore.get(/databases/(default)/documents/users/$(request.auth.uid)).data.role in ['admin', 'master']
-                   && request.resource.size < 10 * 1024 * 1024
-                   && request.resource.contentType == 'application/pdf';
+                   && request.resource.size < 20 * 1024 * 1024
+                   && request.resource.contentType.matches('application/pdf.*');
     }
   }
 }

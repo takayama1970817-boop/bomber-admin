@@ -88,10 +88,12 @@ export default function TrainingApplications() {
   async function loadAll() {
     setLoading(true)
     try {
-      const [appsSnap, typesSnap, dealersSnap, salonsSnap, linksSnap, instSnap] = await Promise.all([
+      const [appsSnap, typesSnap, usersSnap, salonsSnap, linksSnap, instSnap] = await Promise.all([
         getDocs(query(collection(db, 'trainingApplications'), orderBy('applicationDate', 'desc'))),
         getDocs(query(collection(db, 'trainingTypes'), orderBy('sortOrder', 'asc'))),
-        getDocs(collection(db, 'dealers')).catch(() => ({ docs: [] })),
+        // 修正（2026-04-22）: `dealers` コレクションは存在しない。代理店は users コレクションの
+        // `role === 'dealer' && dealerCode` で抽出する（既存 Dealers.jsx / SalonManage.jsx と同パターン）。
+        getDocs(collection(db, 'users')).catch(() => ({ docs: [] })),
         getDocs(collection(db, 'salons')).catch(() => ({ docs: [] })),
         // PR-A: dealerSalons（companyName ⇔ dealerCode 紐付け）
         getDocs(collection(db, 'dealerSalons')).catch(() => ({ docs: [] })),
@@ -100,7 +102,14 @@ export default function TrainingApplications() {
       ])
       setRows(appsSnap.docs.map((d) => ({ id: d.id, ...d.data() })))
       setTypes(typesSnap.docs.map((d) => ({ id: d.id, ...d.data() })))
-      setDealers(dealersSnap.docs.map((d) => ({ id: d.id, ...d.data() })))
+      // users から role=dealer かつ dealerCode を持つものだけ抽出（dealerCode を必須にすることで
+      // subRole 未付与のゴミデータも除外）。select では dealerCode で保存し、表示名は
+      // companyName → name → dealerName → uid の優先順で解決する。
+      setDealers(
+        usersSnap.docs
+          .map((d) => ({ id: d.id, ...d.data() }))
+          .filter((u) => u.role === 'dealer' && u.dealerCode),
+      )
       setSalons(salonsSnap.docs.map((d) => ({ id: d.id, ...d.data() })))
       setDealerSalonsLinks(linksSnap.docs.map((d) => ({ id: d.id, ...d.data() })))
       setInstructors(instSnap.docs.map((d) => ({ id: d.id, ...d.data() })))

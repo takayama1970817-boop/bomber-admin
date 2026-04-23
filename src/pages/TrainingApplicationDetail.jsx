@@ -156,8 +156,9 @@ export default function TrainingApplicationDetail() {
         // 発行者情報は RT（ロイヤルトラスト）固定で読み取り。請求書・見積書と同じ設定元を流用。
         getDoc(doc(db, 'settings', 'rt_company')).catch(() => null),
         getDoc(doc(db, 'settings', 'rt_companyStamp')).catch(() => null),
-        // PR-A: 代理店選択用（手入力廃止）
-        getDocs(collection(db, 'dealers')).catch(() => ({ docs: [] })),
+        // PR-A / 2026-04-22 修正: 代理店一覧は users コレクションから role=dealer を抽出
+        // （`dealers` コレクションは存在しない）
+        getDocs(collection(db, 'users')).catch(() => ({ docs: [] })),
         // PR-B: 認定インストラクター一覧（isActive の絞り込みは UI 側で実施）
         getDocs(query(collection(db, 'certifiedInstructors'), orderBy('name', 'asc'))).catch(() => ({ docs: [] })),
       ])
@@ -165,7 +166,12 @@ export default function TrainingApplicationDetail() {
       setTypes(typesSnap.docs.map((t) => ({ id: t.id, ...t.data() })))
       setDocuments(docsSnap.docs.map((d) => ({ id: d.id, ...d.data() })))
       setDocHistory(docHistSnap.docs.map((h) => ({ id: h.id, ...h.data() })))
-      setDealers(dealersSnap.docs.map((d) => ({ id: d.id, ...d.data() })))
+      // users から role=dealer && dealerCode で抽出（既存 Dealers.jsx と同パターン）
+      setDealers(
+        dealersSnap.docs
+          .map((d) => ({ id: d.id, ...d.data() }))
+          .filter((u) => u.role === 'dealer' && u.dealerCode),
+      )
       setInstructors(instSnap.docs.map((d) => ({ id: d.id, ...d.data() })))
 
       const companyData = companySnap?.exists() ? companySnap.data() : {}
