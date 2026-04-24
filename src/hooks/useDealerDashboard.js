@@ -126,6 +126,11 @@ function computeMetrics(orders) {
   const productMap = new Map() // 商品別
   const monthlyRevenue = new Map() // 月次推移
   const UNKNOWN_KEY = '__unknown__'
+  // 商品明細カバレッジ計測（当月分・items 配列が 1 件以上ある doc 数 / 当月 doc 総数）
+  // bcart-sync の --skip-products や、外部経路で書き込まれた items 欠損 doc が
+  // どの程度あるかを UI に表示するため。
+  let productCoverageWithItems = 0
+  let productCoverageTotal = 0
 
   for (const o of orders) {
     const d = orderDateToDate(o.orderDate)
@@ -157,18 +162,22 @@ function computeMetrics(orders) {
     // 月次推移（全サロン合算）
     monthlyRevenue.set(m, (monthlyRevenue.get(m) || 0) + total)
 
-    // 商品別（当月のみ）
-    if (m === curMonth && Array.isArray(o.items)) {
-      for (const it of o.items) {
-        const pn = (it.name || it.productName || '（不明）').trim()
-        if (!pn || /紙袋|送料|手数料/.test(pn)) continue
-        const qty = Number(it.qty) || 0
-        const price = Number(it.price) || 0
-        const sub = qty * price
-        if (!productMap.has(pn)) productMap.set(pn, { amount: 0, count: 0 })
-        const p = productMap.get(pn)
-        p.amount += sub
-        p.count += qty
+    // 商品別（当月のみ）+ 当月の items カバレッジ計測
+    if (m === curMonth) {
+      productCoverageTotal += 1
+      if (Array.isArray(o.items) && o.items.length > 0) {
+        productCoverageWithItems += 1
+        for (const it of o.items) {
+          const pn = (it.name || it.productName || '（不明）').trim()
+          if (!pn || /紙袋|送料|手数料/.test(pn)) continue
+          const qty = Number(it.qty) || 0
+          const price = Number(it.price) || 0
+          const sub = qty * price
+          if (!productMap.has(pn)) productMap.set(pn, { amount: 0, count: 0 })
+          const p = productMap.get(pn)
+          p.amount += sub
+          p.count += qty
+        }
       }
     }
   }
@@ -315,6 +324,10 @@ function computeMetrics(orders) {
     monthlyTrend,
     productsRanking,
     statusDistribution,
+    productCoverage: {
+      withItems: productCoverageWithItems,
+      total: productCoverageTotal,
+    },
   }
 }
 
