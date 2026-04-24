@@ -377,6 +377,12 @@ async function main() {
             subtotal: order.total_price || 0,
             shipping: order.shipping_cost || 0,
             tax: order.tax || 0,
+            // Bカート final_price 検算用の内訳:
+            //   final_price = total_price + tax + shipping_cost + COD_cost − use_point
+            // 売上集計の正本は引き続き total（= final_price）。
+            // codCost / usePoint は表示には使わず、検算・将来分析用。
+            codCost: order.COD_cost || 0,
+            usePoint: order.use_point || 0,
             paymentMethod: order.payment || '',
             customerNote: order.customer_message || '',
             items,
@@ -456,6 +462,12 @@ async function main() {
         subtotal: order.total_price || 0,
         shipping: order.shipping_cost || 0,
         tax: order.tax || 0,
+        // Bカート final_price 検算用の内訳:
+        //   final_price = total_price + tax + shipping_cost + COD_cost − use_point
+        // 売上集計の正本は引き続き total（= final_price）。
+        // codCost / usePoint は表示には使わず、検算・将来分析用。
+        codCost: order.COD_cost || 0,
+        usePoint: order.use_point || 0,
         paymentMethod: order.payment || '',
         campaign: '',
         customerNote: order.customer_message || '',
