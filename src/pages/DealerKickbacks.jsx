@@ -175,7 +175,7 @@ export default function DealerKickbacks() {
               </div>
               <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
                 <div>
-                  <div className="text-xs text-gray-500">対象売上</div>
+                  <div className="text-xs text-gray-500">対象売上（税抜）</div>
                   <div className="mt-1 text-base font-bold text-gray-900">
                     {fmtYen(extractSalesAmount(currentKb))}
                   </div>
