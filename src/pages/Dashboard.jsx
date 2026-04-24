@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { collection, getDocs, query, where, orderBy } from 'firebase/firestore'
 import { db } from '../lib/firebase.js'
@@ -106,6 +106,16 @@ export default function Dashboard() {
   const [newOrderCount, setNewOrderCount] = useState(0)
   // 代理店別サマリ（共通ヘルパー aggregateOrdersByDealer 由来）
   const [dealerSummary, setDealerSummary] = useState([])
+  // アコーディオン展開状態（dealerCode の Set）。初期は全て閉じ。
+  const [openDealers, setOpenDealers] = useState(() => new Set())
+  const toggleDealer = (code) => {
+    setOpenDealers((prev) => {
+      const next = new Set(prev)
+      if (next.has(code)) next.delete(code)
+      else next.add(code)
+      return next
+    })
+  }
 
   useEffect(() => {
     const id = setInterval(() => setNow(new Date()), 60000)
@@ -444,7 +454,7 @@ export default function Dashboard() {
         </div>
       )}
 
-      {/* 代理店別サマリ（admin のみ・売上降順） */}
+      {/* 代理店別サマリ（admin のみ・売上降順・行クリックで詳細展開） */}
       {isAdmin && (
         <div className="mt-6">
           <div className="mb-3 flex items-center justify-between">
@@ -461,25 +471,137 @@ export default function Dashboard() {
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b border-gray-100 bg-gray-50 text-left text-xs text-gray-500">
+                    <th className="px-2 py-3 w-6"></th>
                     <th className="px-4 py-3">代理店コード</th>
                     <th className="px-4 py-3">代理店名</th>
                     <th className="px-4 py-3 text-right">売上</th>
                     <th className="px-4 py-3 text-right">件数</th>
                     <th className="px-4 py-3 text-right">配下サロン数</th>
+                    <th className="px-4 py-3 text-right">休眠サロン数</th>
                     <th className="px-4 py-3">最終発注日</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {dealerSummary.map((d) => (
-                    <tr key={d.dealerCode} className="border-b border-gray-50 hover:bg-indigo-50">
-                      <td className="px-4 py-3 font-mono text-xs text-gray-900">{d.dealerCode}</td>
-                      <td className="px-4 py-3 text-gray-900">{d.dealerName || '—'}</td>
-                      <td className="px-4 py-3 text-right font-bold text-gray-900">{fmtYen(d.total)}</td>
-                      <td className="px-4 py-3 text-right">{d.count}件</td>
-                      <td className="px-4 py-3 text-right">{d.salonCount}社</td>
-                      <td className="px-4 py-3 text-gray-500">{fmtDate(d.lastOrderDate)}</td>
-                    </tr>
-                  ))}
+                  {dealerSummary.map((d) => {
+                    const isOpen = openDealers.has(d.dealerCode)
+                    // 前月比の色分け: +10%以上 green / -10%以下 red / それ以外 yellow
+                    let diffBadge = null
+                    if (d.diffRate != null) {
+                      const pct = (d.diffRate * 100).toFixed(1)
+                      const sign = d.diffRate >= 0 ? '+' : ''
+                      const cls = d.diffRate >= 0.1
+                        ? 'bg-emerald-100 text-emerald-800'
+                        : d.diffRate <= -0.1
+                          ? 'bg-red-100 text-red-800'
+                          : 'bg-amber-100 text-amber-800'
+                      diffBadge = (
+                        <span className={`inline-block rounded px-2 py-0.5 text-xs font-bold ${cls}`}>
+                          {sign}{pct}%
+                        </span>
+                      )
+                    }
+                    const salonsShown = d.salons.slice(0, 20)
+                    const salonsTotal = d.salons.length
+                    return (
+                      <React.Fragment key={d.dealerCode}>
+                        <tr
+                          onClick={() => toggleDealer(d.dealerCode)}
+                          className="cursor-pointer border-b border-gray-50 hover:bg-indigo-50"
+                        >
+                          <td className="px-2 py-3 text-gray-400">{isOpen ? '▾' : '▸'}</td>
+                          <td className="px-4 py-3 font-mono text-xs text-gray-900">{d.dealerCode}</td>
+                          <td className="px-4 py-3 text-gray-900">{d.dealerName || '—'}</td>
+                          <td className="px-4 py-3 text-right font-bold text-gray-900">{fmtYen(d.total)}</td>
+                          <td className="px-4 py-3 text-right">{d.count}件</td>
+                          <td className="px-4 py-3 text-right">{d.salonCount}社</td>
+                          <td className={`px-4 py-3 text-right ${d.dormantCount > 0 ? 'font-bold text-red-600' : 'text-gray-500'}`}>
+                            {d.dormantCount}社
+                          </td>
+                          <td className="px-4 py-3 text-gray-500">{fmtDate(d.lastOrderDate)}</td>
+                        </tr>
+                        {isOpen && (
+                          <tr className="border-b border-gray-100 bg-indigo-50/30">
+                            <td className="px-2 py-4"></td>
+                            <td className="px-4 py-4" colSpan={7}>
+                              {/* KPI ブロック */}
+                              <div className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-5">
+                                <div className="rounded-lg border border-gray-200 bg-white p-3">
+                                  <div className="text-[10px] text-gray-500">平均受注額</div>
+                                  <div className="mt-1 text-base font-bold text-gray-900">
+                                    {fmtYen(d.stats.avgPositiveTotal)}
+                                  </div>
+                                </div>
+                                <div className="rounded-lg border border-gray-200 bg-white p-3">
+                                  <div className="text-[10px] text-gray-500">返品件数</div>
+                                  <div className="mt-1 text-base font-bold text-gray-900">
+                                    {d.stats.returnCount}件
+                                  </div>
+                                </div>
+                                <div className="rounded-lg border border-gray-200 bg-white p-3">
+                                  <div className="text-[10px] text-gray-500">返品額</div>
+                                  <div className="mt-1 text-base font-bold text-gray-900">
+                                    {fmtYen(d.stats.returnAmount)}
+                                  </div>
+                                </div>
+                                <div className="rounded-lg border border-gray-200 bg-white p-3">
+                                  <div className="text-[10px] text-gray-500">当月未発注サロン</div>
+                                  <div className={`mt-1 text-base font-bold ${d.noOrderThisMonthCount > 0 ? 'text-amber-700' : 'text-gray-900'}`}>
+                                    {d.noOrderThisMonthCount}社
+                                  </div>
+                                </div>
+                                <div className="rounded-lg border border-gray-200 bg-white p-3">
+                                  <div className="text-[10px] text-gray-500">前月比</div>
+                                  <div className="mt-1">
+                                    {diffBadge || <span className="text-sm text-gray-400">—</span>}
+                                  </div>
+                                  <div className="mt-1 text-[10px] text-gray-400">
+                                    {fmtYen(d.currentMonthSales)} / 前月 {fmtYen(d.prevMonthSales)}
+                                  </div>
+                                </div>
+                              </div>
+
+                              {/* サロン別内訳（売上降順・最大20件） */}
+                              <div className="overflow-auto rounded-lg border border-gray-200 bg-white">
+                                <div className="border-b border-gray-100 bg-gray-50 px-3 py-2 text-[11px] text-gray-500">
+                                  サロン別内訳（売上降順・上位{salonsShown.length}件
+                                  {salonsTotal > 20 ? ` / 全${salonsTotal}件中` : ''}）
+                                </div>
+                                <table className="w-full text-xs">
+                                  <thead>
+                                    <tr className="border-b border-gray-100 bg-gray-50 text-left text-[10px] text-gray-500">
+                                      <th className="px-3 py-2">サロン名</th>
+                                      <th className="px-3 py-2 text-right">件数</th>
+                                      <th className="px-3 py-2 text-right">売上</th>
+                                      <th className="px-3 py-2">最終発注日</th>
+                                      <th className="px-3 py-2 text-right">経過日数</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {salonsShown.map((s) => (
+                                      <tr key={s.companyName} className="border-b border-gray-50">
+                                        <td className="px-3 py-1.5 text-gray-900">
+                                          {s.companyName}
+                                          {s.isDormant && (
+                                            <span className="ml-2 rounded bg-red-100 px-1.5 py-0.5 text-[9px] font-bold text-red-700">休眠</span>
+                                          )}
+                                        </td>
+                                        <td className="px-3 py-1.5 text-right">{s.count}件</td>
+                                        <td className="px-3 py-1.5 text-right font-bold text-gray-900">{fmtYen(s.total)}</td>
+                                        <td className="px-3 py-1.5 text-gray-500">{fmtDate(s.lastOrderDate)}</td>
+                                        <td className={`px-3 py-1.5 text-right ${s.isDormant ? 'font-bold text-red-600' : 'text-gray-500'}`}>
+                                          {Number.isFinite(s.daysSinceLast) ? `${s.daysSinceLast}日` : '—'}
+                                        </td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
+                            </td>
+                          </tr>
+                        )}
+                      </React.Fragment>
+                    )
+                  })}
                 </tbody>
               </table>
             )}
