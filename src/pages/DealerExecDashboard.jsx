@@ -86,6 +86,7 @@ export default function DealerExecDashboard() {
   const [managedSalons, setManagedSalons] = useState([])
   const [snapshotTotalSalonCount, setSnapshotTotalSalonCount] = useState(null)
   const [bcartNames, setBcartNames] = useState(null) // Set<string> | null（未取得）
+  const [bcartRecords, setBcartRecords] = useState(null) // Array<{name, customerId, status, source}> | null
   const [bcartLoading, setBcartLoading] = useState(false)
   const [bcartError, setBcartError] = useState(null)
   const [selectedListKey, setSelectedListKey] = useState(null)
@@ -95,7 +96,7 @@ export default function DealerExecDashboard() {
     const code = profile?.dealerCode
     if (!code) {
       setAllOrders([]); setManagedSalons([]); setSnapshotTotalSalonCount(null)
-      setBcartNames(null); setBcartError(null)
+      setBcartNames(null); setBcartRecords(null); setBcartError(null)
       return
     }
     let cancelled = false
@@ -143,7 +144,8 @@ export default function DealerExecDashboard() {
     try {
       const names = await fetchDealerSalonNamesFromBcart(code)
       setBcartNames(names)
-      // raw 件数（生の Bカート 会員件数）が snapshot より新しければ採用
+      setBcartRecords(Array.isArray(names?.records) ? names.records : [])
+      // raw 件数（生の Bカート 会員件数）を最新値として反映
       const rawCount = Number(names?.rawCount)
       if (Number.isFinite(rawCount) && rawCount > 0) setSnapshotTotalSalonCount(rawCount)
     } catch (e) {
@@ -221,20 +223,25 @@ export default function DealerExecDashboard() {
       return '未発注'
     }
     if (selectedListKey === 'all') {
-      // Bcart 名簿があればそれを母集団に。orders からの実績情報をマージ
-      if (bcartNames && bcartNames.size > 0) {
-        const rows = []
-        for (const rawName of bcartNames) {
+      // Bcart records があれば 1 行 = 1 顧客で表示（重複名・空名・無効も保持）
+      if (Array.isArray(bcartRecords) && bcartRecords.length > 0) {
+        return bcartRecords.map((rec) => {
+          const rawName = rec.name || ''
           const key = normalizeCompanyName(rawName)
-          if (!key) continue
-          const s = salonIndex.get(key)
-          if (s) {
-            rows.push(toRow(s, { state: managedKeys.has(s.key) ? stateOf(s) : (s.currentSales > 0 ? '稼働' : (s.cumulativeSales > 0 ? '休眠' : '未発注')) }))
-          } else {
-            rows.push({ key, displayName: rawName, lastOrderDate: null, currentSales: 0, cumulativeSales: 0, orderCount: 0, state: '未発注' })
+          const s = key ? salonIndex.get(key) : null
+          const displayName = rawName || '名称未設定'
+          const base = s
+            ? toRow(s, { state: s.currentSales > 0 ? '稼働' : (s.cumulativeSales > 0 ? '休眠' : '未発注') })
+            : { key: rec.customerId || rawName, displayName, lastOrderDate: null, currentSales: 0, cumulativeSales: 0, orderCount: 0, state: '未発注' }
+          return {
+            ...base,
+            // 顧客ID で1行1顧客に（重複名も区別可能）
+            key: rec.customerId ? `cust:${rec.customerId}` : (base.key || displayName),
+            displayName,
+            customerId: rec.customerId || '',
+            bcartStatus: rec.status || '',
           }
-        }
-        return rows.sort((a, b) => (b.lastOrderDate?.getTime() || 0) - (a.lastOrderDate?.getTime() || 0))
+        }).sort((a, b) => (b.lastOrderDate?.getTime() || 0) - (a.lastOrderDate?.getTime() || 0))
       }
       // フォールバック: orders ユニーク
       return [...salonIndex.values()].map((s) => toRow(s, {
@@ -271,20 +278,25 @@ export default function DealerExecDashboard() {
       })
     }
     if (selectedListKey === 'dormant') {
-      // Bcart 名簿があれば「Bcart 全顧客 − 今月稼働」を母集団に
-      if (bcartNames && bcartNames.size > 0) {
+      // Bcart records があれば「全顧客 − 今月稼働」を 1行=1顧客で表示
+      if (Array.isArray(bcartRecords) && bcartRecords.length > 0) {
         const rows = []
-        for (const rawName of bcartNames) {
+        for (const rec of bcartRecords) {
+          const rawName = rec.name || ''
           const key = normalizeCompanyName(rawName)
-          if (!key) continue
-          const s = salonIndex.get(key)
-          // 今月稼働は除外
-          if (s && s.currentSales > 0) continue
-          if (s) {
-            rows.push(toRow(s, { state: s.cumulativeSales > 0 ? '休眠' : '未発注' }))
-          } else {
-            rows.push({ key, displayName: rawName, lastOrderDate: null, currentSales: 0, cumulativeSales: 0, orderCount: 0, state: '未発注' })
-          }
+          const s = key ? salonIndex.get(key) : null
+          if (s && s.currentSales > 0) continue // 今月稼働は除外
+          const displayName = rawName || '名称未設定'
+          const base = s
+            ? toRow(s, { state: s.cumulativeSales > 0 ? '休眠' : '未発注' })
+            : { key: rec.customerId || rawName, displayName, lastOrderDate: null, currentSales: 0, cumulativeSales: 0, orderCount: 0, state: '未発注' }
+          rows.push({
+            ...base,
+            key: rec.customerId ? `cust:${rec.customerId}` : (base.key || displayName),
+            displayName,
+            customerId: rec.customerId || '',
+            bcartStatus: rec.status || '',
+          })
         }
         return rows.sort((a, b) => (b.lastOrderDate?.getTime() || 0) - (a.lastOrderDate?.getTime() || 0))
       }
@@ -295,7 +307,7 @@ export default function DealerExecDashboard() {
         .sort((a, b) => (b.lastOrderDate?.getTime() || 0) - (a.lastOrderDate?.getTime() || 0))
     }
     return []
-  }, [selectedListKey, salonIndex, managedKeys, bcartNames])
+  }, [selectedListKey, salonIndex, managedKeys, bcartNames, bcartRecords])
 
   const listTitle = {
     all: 'これまでの取引サロン',
@@ -477,6 +489,7 @@ export default function DealerExecDashboard() {
                     <thead className="bg-gray-50 text-xs text-gray-600">
                       <tr>
                         <th className="px-3 py-2 text-left">サロン名</th>
+                        <th className="px-3 py-2 text-left">顧客ID</th>
                         <th className="px-3 py-2 text-left">最終注文日</th>
                         <th className="px-3 py-2 text-right">今月売上（税込）</th>
                         <th className="px-3 py-2 text-right">累計売上（税込）</th>
@@ -485,10 +498,18 @@ export default function DealerExecDashboard() {
                     </thead>
                     <tbody>
                       {listRows.length === 0 ? (
-                        <tr><td colSpan={5} className="px-3 py-6 text-center text-xs text-gray-400">該当するサロンがありません</td></tr>
+                        <tr><td colSpan={6} className="px-3 py-6 text-center text-xs text-gray-400">該当するサロンがありません</td></tr>
                       ) : listRows.map((r) => (
                         <tr key={r.key} className="border-t border-gray-100">
-                          <td className="px-3 py-2 text-gray-900">{r.displayName}</td>
+                          <td className="px-3 py-2 text-gray-900">
+                            {r.displayName}
+                            {r.bcartStatus && r.bcartStatus !== '' && (
+                              <span className="ml-2 rounded bg-red-50 px-1.5 py-0.5 text-[10px] text-red-700">
+                                {r.bcartStatus}
+                              </span>
+                            )}
+                          </td>
+                          <td className="px-3 py-2 text-xs text-gray-500">{r.customerId || '—'}</td>
                           <td className="px-3 py-2 text-gray-700">{fmtDate(r.lastOrderDate)}</td>
                           <td className="px-3 py-2 text-right font-medium text-gray-900">{fmtYen(r.currentSales)}</td>
                           <td className="px-3 py-2 text-right font-medium text-gray-900">{fmtYen(r.cumulativeSales)}</td>
