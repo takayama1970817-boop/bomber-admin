@@ -30,6 +30,10 @@ import {
   Timestamp,
 } from 'firebase-admin/firestore'
 import { BCART_BASE, getBcartToken } from './_env.mjs'
+import { normalizeCompanyName } from '../src/lib/nameNormalize.js'
+
+// companyNameKey の未知ケースプレースホルダ。集計時に __unknown__ をまとめて扱う。
+const UNKNOWN_COMPANY_KEY = '__unknown__'
 
 // === 設定 ===
 const BCART_TOKEN = getBcartToken()
@@ -344,6 +348,9 @@ async function main() {
     if (!monthlyStats[month]) monthlyStats[month] = { count: 0, total: 0 }
 
     const companyName = order.customer_comp_name || '（不明）'
+    // 集計・検索用の正規化キー（生の companyName は表示用に維持）。
+    // src/lib/nameNormalize.js と同一ロジックを使い、画面側の防御層と揃える。
+    const companyNameKey = normalizeCompanyName(companyName) || UNKNOWN_COMPANY_KEY
 
     // orders.read strict 化に備え、Bカート側の customer_parent_id を dealerCode として刻む。
     // ロジックは src/lib/dealerCodeResolver.js の resolveDealerCodeFromBcartOrder と同一。
@@ -389,6 +396,7 @@ async function main() {
             source: 'bcart-api',
             bcartOrderId: order.id,
             companyName,
+            companyNameKey,
             ...(dealerCode ? { dealerCode } : {}),
             contact: order.customer_name || '',
             promotedFromEmailAt: serverTimestamp(),
@@ -402,6 +410,7 @@ async function main() {
             orderId: existing.id,
             bcartOrderId: order.id,
             companyName,
+            companyNameKey,
             ...(dealerCode ? { dealerCode } : {}),
             via: 'scripts/bcart-sync.mjs',
             promotedAt: serverTimestamp(),
@@ -434,6 +443,7 @@ async function main() {
         salonMap[companyName] = salonId
         batch.set(salonRef, {
           name: companyName,
+          nameKey: companyNameKey,
           contact: order.customer_name || '',
           phone: order.customer_tel || '',
           email: order.customer_email || '',
@@ -477,6 +487,7 @@ async function main() {
         bcartCode: code,
         bcartOrderId: order.id,
         companyName,
+        companyNameKey,
         ...(dealerCode ? { dealerCode } : {}),
         contact: order.customer_name || '',
         createdAt: serverTimestamp(),

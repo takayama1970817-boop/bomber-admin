@@ -21,6 +21,10 @@ import { generateReceiptPdf } from '../lib/generateReceiptPdf.js'
 import { fetchAllOrders, fetchAllOrderProducts, fetchOrdersSince } from '../lib/bcartApi.js'
 import { resolveDealerCodeFromBcartOrder } from '../lib/dealerCodeResolver.js'
 import { filterValidOrders, isValidOrder } from '../lib/ordersFilter.js'
+import { normalizeCompanyName } from '../lib/nameNormalize.js'
+
+// companyNameKey の未知ケースプレースホルダ（scripts/bcart-sync.mjs と一致）
+const UNKNOWN_COMPANY_KEY = '__unknown__'
 
 /**
  * Bカート受注から dealerCode を正規化して取り出す。
@@ -133,6 +137,8 @@ export default function BcartImport() {
         for (const order of chunk) {
           const code = order.code
           const companyName = order.customer_comp_name || '（不明）'
+          // 集計・検索用の正規化キー（生の companyName は表示用に維持）
+          const companyNameKey = normalizeCompanyName(companyName) || UNKNOWN_COMPANY_KEY
           const dealerCode = resolveDealerCodeFromBcartOrder(order)
 
           const items = (prodMap[order.id] || []).map((p) => ({
@@ -162,6 +168,7 @@ export default function BcartImport() {
                 source: 'bcart-api',
                 bcartOrderId: order.id,
                 companyName,
+                companyNameKey,
                 dealerCode,
                 contact: order.customer_name || '',
                 promotedFromEmailAt: serverTimestamp(),
@@ -176,6 +183,7 @@ export default function BcartImport() {
                 orderId: existing.id,
                 bcartOrderId: order.id,
                 companyName,
+                companyNameKey,
                 dealerCode,
                 via: 'BcartImport.handleOneClickSync',
                 promotedAt: serverTimestamp(),
@@ -196,6 +204,7 @@ export default function BcartImport() {
             newSalons++
             batch.set(salonRef, {
               name: companyName,
+              nameKey: companyNameKey,
               contact: order.customer_name || '',
               phone: order.customer_tel || '',
               email: order.customer_email || '',
@@ -230,6 +239,7 @@ export default function BcartImport() {
             bcartCode: code,
             bcartOrderId: order.id,
             companyName,
+            companyNameKey,
             dealerCode,
             contact: order.customer_name || '',
             createdAt: serverTimestamp(),
@@ -320,6 +330,8 @@ export default function BcartImport() {
         for (const order of chunk) {
           const code = order.code
           const companyName = order.customer_comp_name || '（不明）'
+          // 集計・検索用の正規化キー（生の companyName は表示用に維持）
+          const companyNameKey = normalizeCompanyName(companyName) || UNKNOWN_COMPANY_KEY
           const dealerCode = resolveDealerCodeFromBcartOrder(order)
 
           const items = (prodMap[order.id] || []).map((p) => ({
@@ -348,6 +360,7 @@ export default function BcartImport() {
                 source: 'bcart-api',
                 bcartOrderId: order.id,
                 companyName,
+                companyNameKey,
                 dealerCode,
                 contact: order.customer_name || '',
                 promotedFromEmailAt: serverTimestamp(),
@@ -361,6 +374,7 @@ export default function BcartImport() {
                 orderId: existing.id,
                 bcartOrderId: order.id,
                 companyName,
+                companyNameKey,
                 dealerCode,
                 via: 'BcartImport.handleApiImport',
                 promotedAt: serverTimestamp(),
@@ -382,6 +396,7 @@ export default function BcartImport() {
             newSalons++
             batch.set(salonRef, {
               name: companyName,
+              nameKey: companyNameKey,
               contact: order.customer_name || '',
               phone: order.customer_tel || '',
               email: order.customer_email || '',
@@ -416,6 +431,7 @@ export default function BcartImport() {
             bcartCode: code,
             bcartOrderId: order.id,
             companyName,
+            companyNameKey,
             dealerCode,
             contact: order.customer_name || '',
             createdAt: serverTimestamp(),
