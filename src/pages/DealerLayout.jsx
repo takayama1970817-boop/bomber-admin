@@ -56,8 +56,14 @@ export default function DealerLayout() {
   const companyName = profile?.companyName || ''
 
   // 請求書一覧は kbGroup === 'C'（請求書方式の代理店）のみ表示
-  // kbGroup='A'/'B'（キックバック方式）や未取得は非表示にする
+  // kbGroup='A'/'B'（キックバック方式）や null / undefined は非表示
+  // （厳密比較 'C' なので、未取得・取得失敗のあいだは常に非表示）
   const showInvoices = kbGroup === 'C'
+
+  // 一時診断ログ: J0002 などで表示有無を確認するため
+  // 原因切り分けが済んだら削除してよい
+  console.log('[DealerLayout] dealerCode', profile?.dealerCode)
+  console.log('[DealerLayout] kbGroup', kbGroup, 'showInvoices', showInvoices)
 
   const navItems = (
     <>
