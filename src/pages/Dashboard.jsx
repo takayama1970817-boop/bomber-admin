@@ -341,7 +341,7 @@ export default function Dashboard() {
       {isAdmin && (
         <div className="mt-6">
           <div className="mb-3 flex items-center justify-between">
-            <h2 className="text-sm font-bold text-gray-700">📊 月別売上</h2>
+            <h2 className="text-sm font-bold text-gray-700">📊 月別売上（税込）</h2>
             <button onClick={() => navigate('/admin/orders')}
               className="text-xs text-indigo-600 hover:underline">注文一覧を開く →</button>
           </div>
@@ -458,7 +458,7 @@ export default function Dashboard() {
       {isAdmin && (
         <div className="mt-6">
           <div className="mb-3 flex items-center justify-between">
-            <h2 className="text-sm font-bold text-gray-700">🏢 代理店別サマリ</h2>
+            <h2 className="text-sm font-bold text-gray-700">🏢 代理店別サマリ（税込）</h2>
             <button onClick={() => navigate('/admin/dealers')}
               className="text-xs text-indigo-600 hover:underline">代理店管理を開く →</button>
           </div>
@@ -474,7 +474,7 @@ export default function Dashboard() {
                     <th className="px-2 py-3 w-6"></th>
                     <th className="px-4 py-3">代理店コード</th>
                     <th className="px-4 py-3">代理店名</th>
-                    <th className="px-4 py-3 text-right">売上</th>
+                    <th className="px-4 py-3 text-right">売上（税込）</th>
                     <th className="px-4 py-3 text-right">件数</th>
                     <th className="px-4 py-3 text-right">配下サロン数</th>
                     <th className="px-4 py-3 text-right">休眠サロン数</th>
@@ -526,7 +526,7 @@ export default function Dashboard() {
                               {/* KPI ブロック */}
                               <div className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-5">
                                 <div className="rounded-lg border border-gray-200 bg-white p-3">
-                                  <div className="text-[10px] text-gray-500">平均受注額</div>
+                                  <div className="text-[10px] text-gray-500">平均受注額（税込）</div>
                                   <div className="mt-1 text-base font-bold text-gray-900">
                                     {fmtYen(d.stats.avgPositiveTotal)}
                                   </div>
@@ -571,7 +571,7 @@ export default function Dashboard() {
                                     <tr className="border-b border-gray-100 bg-gray-50 text-left text-[10px] text-gray-500">
                                       <th className="px-3 py-2">サロン名</th>
                                       <th className="px-3 py-2 text-right">件数</th>
-                                      <th className="px-3 py-2 text-right">売上</th>
+                                      <th className="px-3 py-2 text-right">売上（税込）</th>
                                       <th className="px-3 py-2">最終発注日</th>
                                       <th className="px-3 py-2 text-right">経過日数</th>
                                     </tr>

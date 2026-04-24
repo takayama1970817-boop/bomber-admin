@@ -118,7 +118,7 @@ export default function DealerExecDashboard() {
 
           {/* 月次売上推移 */}
           <div className="rounded-2xl border border-gray-200 bg-white p-5">
-            <div className="mb-3 text-sm font-bold text-gray-900">直近 6ヶ月 売上推移</div>
+            <div className="mb-3 text-sm font-bold text-gray-900">直近 6ヶ月 売上推移（税込）</div>
             <div className="flex h-44 items-end justify-between gap-3">
               {monthlyTrend.map((t) => {
                 const h = (t.revenue / maxTrend) * 100
@@ -146,7 +146,7 @@ export default function DealerExecDashboard() {
             {/* 商品別売上 Top 10 */}
             <div className="rounded-2xl border border-gray-200 bg-white p-5">
               <div className="mb-3 text-sm font-bold text-gray-900">
-                商品別売上 Top 10（{fmtMonth(kpis.curMonth)}）
+                商品別売上 Top 10（{fmtMonth(kpis.curMonth)}・税抜）
               </div>
               {/*
                 商品明細カバレッジ:
@@ -272,8 +272,8 @@ export default function DealerExecDashboard() {
                   <thead className="bg-gray-50 text-xs text-gray-600">
                     <tr>
                       <th className="px-4 py-2 text-left">サロン名</th>
-                      <th className="px-4 py-2 text-right">{fmtMonth(kpis.curMonth)}売上</th>
-                      <th className="px-4 py-2 text-right">{fmtMonth(kpis.prevMonth)}売上</th>
+                      <th className="px-4 py-2 text-right">{fmtMonth(kpis.curMonth)}売上（税込）</th>
+                      <th className="px-4 py-2 text-right">{fmtMonth(kpis.prevMonth)}売上（税込）</th>
                       <th className="px-4 py-2 text-right">前月比</th>
                       <th className="px-4 py-2 text-left">最終発注</th>
                       <th className="px-4 py-2 text-left">状態</th>
