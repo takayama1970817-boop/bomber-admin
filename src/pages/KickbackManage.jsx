@@ -737,53 +737,126 @@ export default function KickbackManage() {
     e.target.value = ''
   }
 
-  // 計算結果を保存
-  const handleSave = async () => {
+  // 保存ペイロードを組み立て（下書き・送信で共通）
+  const buildKickbackPayload = (status) => {
+    const code = selectedCode || ''
+    return {
+      dealerCode: code,
+      dealerName: selectedDealer?.companyName || code,
+      month,
+      status, // 'draft' | 'sent'
+      entries: calcResult.entries,
+      totalKickback: calcResult.totalKickback,
+      totalSales: calcResult.totalSales,
+      paperBagTotal: calcResult.paperBagTotal || 0,
+      systemFee: calcResult.systemFee || 0,
+      kbOrderCount: calcResult.kbOrderCount || 0,
+      paymentFee: calcResult.paymentFee || 0,
+      creditCount: calcResult.creditCount || 0,
+      subtotalAfterDeductions: calcResult.subtotalAfterDeductions || calcResult.totalKickback,
+      tax: calcResult.tax || 0,
+      grandTotal: calcResult.grandTotal || calcResult.totalKickback,
+      dealerOrderSubtotal: calcResult.dealerOrderSubtotal || 0,
+      dealerOrderTax: calcResult.dealerOrderTax || 0,
+      dealerOrderTotal: calcResult.dealerOrderTotal || 0,
+      dealerOrderCount: calcResult.dealerOrderCount || 0,
+      dealerOrderItems: calcResult.dealerOrderItems || [],
+      netSettlement: calcResult.netSettlement ?? (calcResult.grandTotal || calcResult.totalKickback),
+      adjustments: adjustments.filter((a) => a.label && a.amount !== 0),
+      adjustmentTotal: adjustments.reduce((s, a) => s + (a.amount || 0), 0),
+      finalSettlement: (calcResult.dealerOrderTotal > 0 ? calcResult.netSettlement : calcResult.grandTotal) + adjustments.reduce((s, a) => s + (a.amount || 0), 0),
+      stampDataUrl: stampDataUrl || null,
+      companyInfo: companyInfo || null,
+      bankInfo: selectedDealer?.bankInfo || null,
+      source: calcSource === 'api' ? 'bcart-api' : 'csv-import',
+    }
+  }
+
+  // 同月同代理店の既存清算書を検索
+  const findExistingKickback = async (code, targetMonth) => {
+    const q = query(
+      collection(db, 'kickbacks'),
+      where('dealerCode', '==', code),
+      where('month', '==', targetMonth),
+    )
+    const snap = await getDocs(q)
+    return snap.docs.map((d) => ({ id: d.id, ...d.data() }))
+  }
+
+  // 保存済み一覧を再読込
+  const refreshStatements = async (code) => {
+    const q = query(
+      collection(db, 'kickbacks'),
+      where('dealerCode', '==', code),
+    )
+    const snap = await getDocs(q)
+    const docs = snap.docs.map((d) => ({ id: d.id, ...d.data() }))
+    docs.sort((a, b) => (b.month || '').localeCompare(a.month || ''))
+    setStatements(docs)
+  }
+
+  // 【下書き保存】Firestore への保存のみ。メール送信・PDF生成は行わない
+  const handleSaveDraft = async () => {
     if (!calcResult || calcResult.entries.length === 0) return
     const code = selectedCode || ''
     if (!code) { alert('代理店コードを選択してください'); return }
-    if (!confirm(`${month} のキックバック清算書を保存しますか？`)) return
 
     try {
-      await addDoc(collection(db, 'kickbacks'), {
-        dealerCode: code,
-        dealerName: selectedDealer?.companyName || code,
-        month,
-        entries: calcResult.entries,
-        totalKickback: calcResult.totalKickback,
-        totalSales: calcResult.totalSales,
-        paperBagTotal: calcResult.paperBagTotal || 0,
-        systemFee: calcResult.systemFee || 0,
-        kbOrderCount: calcResult.kbOrderCount || 0,
-        paymentFee: calcResult.paymentFee || 0,
-        creditCount: calcResult.creditCount || 0,
-        subtotalAfterDeductions: calcResult.subtotalAfterDeductions || calcResult.totalKickback,
-        tax: calcResult.tax || 0,
-        grandTotal: calcResult.grandTotal || calcResult.totalKickback,
-        dealerOrderSubtotal: calcResult.dealerOrderSubtotal || 0,
-        dealerOrderTax: calcResult.dealerOrderTax || 0,
-        dealerOrderTotal: calcResult.dealerOrderTotal || 0,
-        dealerOrderCount: calcResult.dealerOrderCount || 0,
-        dealerOrderItems: calcResult.dealerOrderItems || [],
-        netSettlement: calcResult.netSettlement ?? (calcResult.grandTotal || calcResult.totalKickback),
-        adjustments: adjustments.filter((a) => a.label && a.amount !== 0),
-        adjustmentTotal: adjustments.reduce((s, a) => s + (a.amount || 0), 0),
-        finalSettlement: (calcResult.dealerOrderTotal > 0 ? calcResult.netSettlement : calcResult.grandTotal) + adjustments.reduce((s, a) => s + (a.amount || 0), 0),
-        stampDataUrl: stampDataUrl || null,
-        companyInfo: companyInfo || null,
-        bankInfo: selectedDealer?.bankInfo || null,
-        source: calcSource === 'api' ? 'bcart-api' : 'csv-import',
-        createdAt: serverTimestamp(),
-      })
+      const existing = await findExistingKickback(code, month)
+      // status 未設定の既存レコードは 'sent' 扱い（後方互換）
+      const sentDoc = existing.find((e) => (e.status || 'sent') === 'sent')
+      if (sentDoc) {
+        alert(
+          `${month} は既に送信済みの清算書があります（${fmtYen(sentDoc.totalKickback)}）。\n` +
+          '下書き上書きはできません。必要なら先に既存の清算書を削除してください。'
+        )
+        return
+      }
+      if (!confirm(`${month} のキックバック清算書を【下書き保存】しますか？（メールは送信されません）`)) return
 
-      const q = query(
-        collection(db, 'kickbacks'),
-        where('dealerCode', '==', code),
-      )
-      const snap = await getDocs(q)
-      const docs = snap.docs.map((d) => ({ id: d.id, ...d.data() }))
-      docs.sort((a, b) => (b.month || '').localeCompare(a.month || ''))
-      setStatements(docs)
+      const draftDoc = existing.find((e) => e.status === 'draft')
+      const payload = buildKickbackPayload('draft')
+      if (draftDoc) {
+        await updateDoc(doc(db, 'kickbacks', draftDoc.id), { ...payload, updatedAt: serverTimestamp() })
+      } else {
+        await addDoc(collection(db, 'kickbacks'), { ...payload, createdAt: serverTimestamp() })
+      }
+
+      await refreshStatements(code)
+      setCalcResult(null)
+      setCalcSource(null)
+      alert('下書き保存しました（メール送信はされていません）')
+    } catch (e) {
+      alert('下書き保存に失敗しました: ' + e.message)
+    }
+  }
+
+  // 【送信】Firestore 保存（status='sent'）＋ PDF生成 ＋ notifyKickback 実行
+  const handleSaveAndSend = async () => {
+    if (!calcResult || calcResult.entries.length === 0) return
+    const code = selectedCode || ''
+    if (!code) { alert('代理店コードを選択してください'); return }
+
+    try {
+      const existing = await findExistingKickback(code, month)
+      const sentDoc = existing.find((e) => (e.status || 'sent') === 'sent')
+      if (sentDoc) {
+        if (!confirm(
+          `${month} は既に送信済みの清算書があります（${fmtYen(sentDoc.totalKickback)}）。\n` +
+          '本当に重複送信しますか？'
+        )) return
+      }
+      if (!confirm(`${month} のキックバック清算書を【送信】しますか？\n代理店にメールが送られます。`)) return
+
+      const draftDoc = existing.find((e) => e.status === 'draft')
+      const payload = buildKickbackPayload('sent')
+      if (draftDoc) {
+        await updateDoc(doc(db, 'kickbacks', draftDoc.id), { ...payload, updatedAt: serverTimestamp() })
+      } else {
+        await addDoc(collection(db, 'kickbacks'), { ...payload, createdAt: serverTimestamp() })
+      }
+
+      await refreshStatements(code)
       setCalcResult(null)
       setCalcSource(null)
 
@@ -805,7 +878,7 @@ export default function KickbackManage() {
 
         const ccAddr = prompt('CC（自分で確認用、空欄可）:', '')
         const notifyFn = httpsCallable(functions, 'notifyKickback')
-        const payload = {
+        const payloadFn = {
           dealerCode: code,
           dealerName: selectedDealer?.companyName || code,
           month,
@@ -813,15 +886,15 @@ export default function KickbackManage() {
           pdfBase64: base64,
           pdfFileName: fileName,
         }
-        if (ccAddr) payload.ccEmail = ccAddr
-        const result = await notifyFn(payload)
-        alert(`保存＆メール送信完了（${result.data.email}${ccAddr ? ` / CC: ${ccAddr}` : ''}）\nPDFパスワード: ${password}`)
+        if (ccAddr) payloadFn.ccEmail = ccAddr
+        const result = await notifyFn(payloadFn)
+        alert(`送信完了（${result.data.email}${ccAddr ? ` / CC: ${ccAddr}` : ''}）\nPDFパスワード: ${password}`)
       } catch (emailErr) {
         console.error('通知メール送信エラー:', emailErr)
-        alert('保存しました（メール送信に失敗: ' + emailErr.message + '）')
+        alert('Firestore 保存は完了しましたが、メール送信に失敗しました: ' + emailErr.message)
       }
     } catch (e) {
-      alert('保存に失敗しました: ' + e.message)
+      alert('送信処理に失敗しました: ' + e.message)
     }
   }
 
@@ -1142,10 +1215,18 @@ export default function KickbackManage() {
                 CSVダウンロード
               </button>
               <button
-                onClick={handleSave}
-                className="rounded-lg bg-indigo-600 px-5 py-2 text-sm font-bold text-white hover:bg-indigo-700"
+                onClick={handleSaveDraft}
+                className="rounded-lg border border-gray-400 bg-white px-4 py-2 text-sm font-bold text-gray-700 hover:bg-gray-50"
+                title="Firestoreに下書き保存のみ（メール送信なし）"
               >
-                保存してFirestoreに登録
+                下書き保存
+              </button>
+              <button
+                onClick={handleSaveAndSend}
+                className="rounded-lg bg-indigo-600 px-5 py-2 text-sm font-bold text-white hover:bg-indigo-700"
+                title="保存＋PDF生成＋代理店へメール送信"
+              >
+                送信（PDF＋メール）
               </button>
               <button
                 onClick={() => { setCalcResult(null); setCalcSource(null) }}
@@ -1418,6 +1499,14 @@ export default function KickbackManage() {
                             {stmt.source === 'bcart-api' ? 'API' : 'CSV'}
                           </span>
                         )}
+                        {/* status バッジ（未設定は後方互換で「送信済」扱い） */}
+                        <span className={`ml-2 rounded px-1.5 py-0.5 text-[10px] ${
+                          stmt.status === 'draft'
+                            ? 'bg-amber-100 text-amber-700'
+                            : 'bg-gray-100 text-gray-700'
+                        }`}>
+                          {stmt.status === 'draft' ? '下書き' : '送信済'}
+                        </span>
                       </div>
                       <div className="flex items-center gap-3">
                         <button
