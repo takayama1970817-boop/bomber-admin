@@ -4,13 +4,6 @@ import useDealerOrders from '../hooks/useDealerOrders.js'
 import DealerOrdersTable from '../components/DealerOrdersTable.jsx'
 import DealerOrderDetailModal from '../components/DealerOrderDetailModal.jsx'
 
-const STATUS_FILTERS = [
-  { value: 'all', label: 'すべて' },
-  { value: 'processing', label: '処理中' },
-  { value: 'shipped', label: '出荷済み' },
-  { value: 'cancelled', label: 'キャンセル' },
-]
-
 /**
  * 代理店 注文一覧画面（Phase 1）
  *
@@ -19,13 +12,18 @@ const STATUS_FILTERS = [
  *   - データソースは Firestore のみ（BカートAPIは使わない）
  *   - Read-only。編集・更新機能なし
  *   - シンプル・高速・安全を優先
+ *
+ * ステータス管理は代理店側では行わない方針（2026-04-24 確定）。
+ *   - 代理店側では注文ステータスを編集不可
+ *   - ステータス列・フィルタは非表示（Bカート側で管理）
+ *   - 「処理中」固定表示による誤解を防ぐため表示を撤去
  */
 export default function DealerOrders() {
   const { profile } = useAuth()
-  const [filters, setFilters] = useState({ status: 'all' })
   const [selectedOrder, setSelectedOrder] = useState(null)
 
-  const { orders, allOrders, loading, error } = useDealerOrders(profile, filters)
+  // ステータスフィルタは非表示方針のため 'all' 固定
+  const { orders, allOrders, loading, error } = useDealerOrders(profile, { status: 'all' })
 
   return (
     <div className="mx-auto max-w-6xl space-y-5">
@@ -36,23 +34,9 @@ export default function DealerOrders() {
         </p>
       </div>
 
-      {/* ステータスフィルタ */}
-      <div className="flex flex-wrap items-center gap-2 rounded-xl border border-gray-200 bg-white p-3">
-        <span className="text-xs text-gray-500">ステータス：</span>
-        {STATUS_FILTERS.map((f) => (
-          <button
-            key={f.value}
-            onClick={() => setFilters({ status: f.value })}
-            className={`rounded-lg border px-3 py-1 text-xs font-medium transition-colors ${
-              filters.status === f.value
-                ? 'border-indigo-500 bg-indigo-500 text-white'
-                : 'border-gray-300 bg-white text-gray-700 hover:bg-gray-50'
-            }`}
-          >
-            {f.label}
-          </button>
-        ))}
-        <div className="ml-auto text-xs text-gray-500">
+      {/* 件数サマリ（ステータスフィルタは非表示） */}
+      <div className="flex items-center justify-end rounded-xl border border-gray-200 bg-white p-3">
+        <div className="text-xs text-gray-500">
           {loading ? '—' : `${orders.length} / ${allOrders.length} 件`}
         </div>
       </div>
