@@ -172,7 +172,8 @@ export async function fetchDealerSalonNamesFromBcart(dealerCode, options = {}) {
   const forceRefresh = options.forceRefresh ?? false
   const onProgress = options.onProgress
 
-  const cacheKey = `dealerSalonNames:${dealerCode}:v3`
+  // v4: records（生レコード配列）を追加してカード/一覧の件数一致を可能に
+  const cacheKey = `dealerSalonNames:${dealerCode}:v4`
   const today = new Date().toISOString().slice(0, 10)
 
   if (!forceRefresh) {
@@ -183,6 +184,7 @@ export async function fetchDealerSalonNamesFromBcart(dealerCode, options = {}) {
         if (cached.date === today && Array.isArray(cached.names)) {
           const s = new Set(cached.names)
           s.rawCount = cached.rawCount ?? cached.names.length
+          s.records = Array.isArray(cached.records) ? cached.records : []
           return s
         }
       }
@@ -190,7 +192,8 @@ export async function fetchDealerSalonNamesFromBcart(dealerCode, options = {}) {
   }
 
   const names = new Set()
-  let customerCount = 0 // 生の会員件数（同名を別カウント）
+  const records = [] // 生レコード: {name, customerId, status, source}
+  let customerCount = 0
 
   // ① 会員一覧 API（最優先：発注未経験のサロンも捕捉できる）
   try {
@@ -200,20 +203,27 @@ export async function fetchDealerSalonNamesFromBcart(dealerCode, options = {}) {
     })
     const dealerCodeStr = String(dealerCode).trim()
     for (const c of customers) {
-      // 親会員ID（仕様揺れに対応、数値/文字列/前後空白を吸収）
       const parentRaw = c.parent_id ?? c.customer_parent_id ?? c.parent_member_id ?? ''
       const parent = String(parentRaw).trim()
       if (parent && parent === dealerCodeStr) {
         customerCount += 1
         const n = (c.comp_name || c.customer_comp_name || c.name || c.customer_name || '').trim()
+        const cid = c.id ?? c.customer_id ?? null
         if (n) names.add(n)
+        records.push({
+          name: n,
+          customerId: cid != null ? String(cid) : '',
+          memberCode: c.member_code || '',
+          status: c.status || '',
+          source: 'customers',
+        })
       }
     }
   } catch (e) {
     console.warn('Bカート会員API失敗、受注データから派生:', e.message)
   }
 
-  // ② 受注データから派生（会員API取れなくても最近発注しているサロンは拾う）
+  // ② 受注データから派生（会員APIが取れなかった場合の補填）
   const now = new Date()
   for (let i = 0; i < fallbackMonths; i += 1) {
     let ty = now.getFullYear()
@@ -227,28 +237,37 @@ export async function fetchDealerSalonNamesFromBcart(dealerCode, options = {}) {
         .filter((o) => String(o.customer_parent_id || '') === String(dealerCode))
         .forEach((o) => {
           const n = o.customer_comp_name || o.comp_name || o.customer_name
-          if (n) names.add(n)
+          if (n && !names.has(n)) {
+            names.add(n)
+            records.push({
+              name: n,
+              customerId: String(o.customer_id || ''),
+              memberCode: '',
+              status: '',
+              source: 'orders',
+            })
+          }
         })
     } catch (e) {
       console.warn('bcart fetch skipped for', ymStr, e.message)
     }
   }
 
-  // 受注派生分を加算（会員APIが取れた場合は customerCount が主、取れない場合は 0 のまま）
-  // 受注派生で拾ったもののうち、既に names にない分は新規なのでカウント増やす
-  const rawCount = customerCount > 0 ? customerCount : names.size
+  const rawCount = customerCount > 0 ? customerCount : records.length
 
   try {
     localStorage.setItem(cacheKey, JSON.stringify({
       date: today,
       names: Array.from(names),
       rawCount,
+      records,
     }))
   } catch (e) { /* ignore */ }
 
-  // Set に rawCount プロパティを付与して返す（後方互換）
+  // Set に拡張プロパティを付与（後方互換：既存呼び出しは Set として動く）
   const result = new Set(names)
   result.rawCount = rawCount
+  result.records = records
   return result
 }
 
