@@ -38,7 +38,7 @@ export default function DealerLayout() {
       <Item to="/dealer/salons" label="所属サロン管理" onClick={closeMenu} />
       <Item to="/dealer/orders" label="注文一覧" onClick={closeMenu} />
       <Item to="/dealer/invoices" label="請求書一覧" onClick={closeMenu} />
-      <Item to="/dealer/kickbacks" label="キックバック清算" onClick={closeMenu} />
+      <Item to="/dealer/kickbacks" label="清算書一覧" onClick={closeMenu} />
       <Item to="/dealer/chat" label="チャット" onClick={closeMenu} />
       <Item to="/dealer/documents" label="資料ダウンロード" onClick={closeMenu} />
     </>
