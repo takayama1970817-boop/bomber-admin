@@ -16,6 +16,8 @@ import { db } from '../lib/firebase.js'
 import { useAuth } from '../contexts/AuthContext.jsx'
 import { calcTax } from '../lib/taxCalc.js'
 import { buildDocLayout, openPrintPreview } from '../lib/docGenerator.js'
+import { filterValidOrders } from '../lib/ordersFilter.js'
+import { computeOrderStats } from '../lib/orderStats.js'
 
 // ── ステータス定義 ──
 const STATUSES = [
@@ -807,7 +809,8 @@ export default function OrderManage() {
         getDocs(collection(db, 'salons')),
       ])
 
-      setOrders(orderSnap.docs.map((d) => ({ id: d.id, ...d.data() })))
+      // 旧データ（isDeprecated === true）は受注管理の対象から除外する
+      setOrders(filterValidOrders(orderSnap.docs.map((d) => ({ id: d.id, ...d.data() }))))
 
       const salonMap = {}
       salonSnap.docs.forEach((d) => {
@@ -848,28 +851,23 @@ export default function OrderManage() {
   }, [orders, filterStatus, searchText, salons])
 
   // ── 集計 ──
+  // 当月の件数・売上は computeOrderStats(当月subset) に寄せる（正本を一本化）。
+  // newCount はステータス未処理の件数のため、status 条件で orders 全体を絞る。
   const stats = useMemo(() => {
     const now = new Date()
     const thisMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
 
-    let newCount = 0
-    let monthCount = 0
-    let monthTotal = 0
-
-    orders.forEach((o) => {
-      if (!o.status || o.status === 'new') newCount++
-
+    const monthOrders = orders.filter((o) => {
       const d = o.orderDate?.toDate ? o.orderDate.toDate() : o.orderDate ? new Date(o.orderDate) : null
-      if (d) {
-        const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
-        if (key === thisMonth) {
-          monthCount++
-          monthTotal += o.total || 0
-        }
-      }
+      if (!d) return false
+      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
+      return key === thisMonth
     })
 
-    return { newCount, monthCount, monthTotal }
+    const monthStats = computeOrderStats(monthOrders)
+    const newCount = orders.filter((o) => !o.status || o.status === 'new').length
+
+    return { newCount, monthCount: monthStats.orderCount, monthTotal: monthStats.revenue }
   }, [orders])
 
   // ── ステータス変更 ──

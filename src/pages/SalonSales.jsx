@@ -11,6 +11,8 @@ import {
 import { db } from '../lib/firebase.js'
 import { useAuth } from '../contexts/AuthContext.jsx'
 import { fetchOrdersSince, fetchAllOrderProducts, fetchAllCustomers } from '../lib/bcartApi.js'
+import { filterValidOrders } from '../lib/ordersFilter.js'
+import { normalizeCompanyName, pickDisplayName } from '../lib/nameNormalize.js'
 
 const fmtYen = (n) => `¥${Number(n || 0).toLocaleString('ja-JP')}`
 const fmtDate = (t) => {
@@ -96,7 +98,8 @@ export default function SalonSales() {
         getDocs(collection(db, 'orders')),
         getDocs(collection(db, 'salons')),
       ])
-      setOrders(orderSnap.docs.map((d) => ({ id: d.id, ...d.data() })))
+      // 旧データ（isDeprecated === true）は集計対象から除外する
+      setOrders(filterValidOrders(orderSnap.docs.map((d) => ({ id: d.id, ...d.data() }))))
       setSalons(salonSnap.docs.map((d) => ({ id: d.id, ...d.data() })))
     } catch (e) {
       console.error('受注読み込みエラー:', e)
@@ -108,15 +111,23 @@ export default function SalonSales() {
   useEffect(() => { load() }, [load])
 
   // サロン一覧（Bカート会員 + companyNameのユニーク + salons コレクションを統合）
+  // 表記揺れ吸収: normalizeCompanyName でキー化し、代表名は pickDisplayName で選定
+  // （"Salon'de  A" と "salon'de  A" を同一サロンに集約）
   const salonOptions = useMemo(() => {
-    const set = new Set()
-    salons.forEach((s) => { if (s.name) set.add(s.name) })
-    orders.forEach((o) => { if (o.companyName) set.add(o.companyName) })
-    bcartCustomers.forEach((c) => {
-      const name = c.comp_name || c.company_name || c.name
-      if (name) set.add(name)
-    })
-    return Array.from(set).sort((a, b) => a.localeCompare(b, 'ja'))
+    const buckets = new Map() // normKey -> Map<rawName, count>
+    const add = (name) => {
+      if (!name) return
+      const k = normalizeCompanyName(name)
+      if (!k) return
+      if (!buckets.has(k)) buckets.set(k, new Map())
+      const m = buckets.get(k)
+      m.set(name, (m.get(name) || 0) + 1)
+    }
+    salons.forEach((s) => add(s.name))
+    orders.forEach((o) => add(o.companyName))
+    bcartCustomers.forEach((c) => add(c.comp_name || c.company_name || c.name))
+    const display = [...buckets.values()].map((m) => pickDisplayName(m.entries()))
+    return display.sort((a, b) => a.localeCompare(b, 'ja'))
   }, [salons, orders, bcartCustomers])
 
   // Bカート会員一覧を取得
@@ -319,7 +330,11 @@ export default function SalonSales() {
       return blob.includes(norm(kw))
     }
 
-    if (selectedSalon) list = list.filter((o) => o.companyName === selectedSalon)
+    // サロン選択は normalizeCompanyName で比較（表記揺れ吸収）
+    if (selectedSalon) {
+      const selKey = normalizeCompanyName(selectedSalon)
+      list = list.filter((o) => normalizeCompanyName(o.companyName) === selKey)
+    }
     if (filterRepLast)  list = list.filter((o) => matchBlob(o, filterRepLast))
     if (filterRepFirst) list = list.filter((o) => matchBlob(o, filterRepFirst))
     if (filterRepLastKana)  list = list.filter((o) => matchBlob(o, filterRepLastKana))
