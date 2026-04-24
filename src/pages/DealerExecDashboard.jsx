@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { collection, doc, getDoc, getDocs, orderBy, query, where, limit } from 'firebase/firestore'
+import { collection, doc, getDoc, getDocs, query, where } from 'firebase/firestore'
 import { db } from '../lib/firebase.js'
 import { useAuth } from '../contexts/AuthContext.jsx'
 import useDealerDashboard, { activeRateColor, STATUS_BADGE } from '../hooks/useDealerDashboard.js'
@@ -112,21 +112,22 @@ export default function DealerExecDashboard() {
         console.warn('[DealerExec] orders/dealerSalons 取得失敗:', e.message)
       }
 
-      // dealerMonthlySnapshots から最新月の totalSalonCount を取得（Bカート 親フィルタ集計済み）
+      // dealerMonthlySnapshots/{code}_{YYYY-MM} を直接 docId で参照
+      // （where + orderBy だと Firestore 複合 index が必要になるため avoid）
       try {
-        const snapQuery = query(
-          collection(db, 'dealerMonthlySnapshots'),
-          where('dealerCode', '==', code),
-          orderBy('month', 'desc'),
-          limit(1),
-        )
-        const snap = await getDocs(snapQuery)
-        if (cancelled) return
-        if (!snap.empty) {
-          const data = snap.docs[0].data()
-          const cnt = Number(data.totalSalonCount)
-          if (Number.isFinite(cnt) && cnt > 0) setSnapshotTotalSalonCount(cnt)
+        const now = new Date()
+        let cnt = null
+        for (let i = 0; i < 6 && cnt == null; i += 1) {
+          const d = new Date(now.getFullYear(), now.getMonth() - i, 1)
+          const ym = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
+          const ref = doc(db, 'dealerMonthlySnapshots', `${code}_${ym}`)
+          const snap = await getDoc(ref)
+          if (snap.exists()) {
+            const v = Number(snap.data().totalSalonCount)
+            if (Number.isFinite(v) && v > 0) cnt = v
+          }
         }
+        if (!cancelled && cnt != null) setSnapshotTotalSalonCount(cnt)
       } catch (e) {
         console.warn('[DealerExec] dealerMonthlySnapshots 取得失敗:', e.message)
       }
