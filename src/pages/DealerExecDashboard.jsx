@@ -220,34 +220,47 @@ export default function DealerExecDashboard() {
   // サロン単位の重複解消リスト（サロン名 正規化キーで1行=1サロン）
   // 同名複数 customer_id は、優先度「最終注文日 → 累計売上 → customerId（大きい=新しい）」で1件に集約。
   // 古い customer_id 側は非表示（hiddenIds に記録）。
+  //
+  // 重要: salonIndex（orders 由来の実績情報）をここで明示的に merge する。
+  // これにより、listRows 側で再ルックアップする必要がなく、キー不整合の
+  // 隠れバグを避ける。orderLastDate / currentSales / cumulativeSales はここで確定。
   const uniqueSalons = useMemo(() => {
     if (!Array.isArray(bcartRecords) || bcartRecords.length === 0) return null
+
+    // salonIndex から「raw name」で引けるセカンダリインデックスも作る（キー不一致時のフォールバック）
+    const byRawName = new Map()
+    for (const s of salonIndex.values()) {
+      if (s.displayName) byRawName.set(s.displayName, s)
+    }
+
+    const lookup = (rawName) => {
+      if (!rawName) return null
+      const normKey = normalizeCompanyName(rawName)
+      return salonIndex.get(normKey) || byRawName.get(rawName) || byRawName.get(rawName.trim()) || null
+    }
+
     const groups = new Map() // key → records[]
     const anonymous = []
     for (const rec of bcartRecords) {
       const nm = (rec.name || '').trim()
-      if (!nm) {
-        anonymous.push(rec); continue
-      }
+      if (!nm) { anonymous.push(rec); continue }
       const key = normalizeCompanyName(nm)
       if (!key) { anonymous.push(rec); continue }
       if (!groups.has(key)) groups.set(key, [])
       groups.get(key).push(rec)
     }
+
     const rows = []
     for (const [key, recs] of groups) {
-      const s = salonIndex.get(key)
-      const lastOrderMs = s?.lastOrderDate?.getTime?.() || 0
-      const cumulative = s?.cumulativeSales || 0
-      // salonIndex は name 単位でマージ済みなので同一値だが、将来 customer_id 単位集計にした際に備えてロジックを記述
+      // このサロン（key）に紐づく orders 集計情報を確定
+      const idx = salonIndex.get(key) || lookup(recs[0].name)
+      const lastOrderMs = idx?.lastOrderDate?.getTime?.() || 0
+      const cumulative = idx?.cumulativeSales || 0
       const sorted = [...recs].sort((a, b) => {
-        // 1. 最終注文日 desc（現状は全員同値）
         const al = lastOrderMs, bl = lastOrderMs
         if (al !== bl) return bl - al
-        // 2. 累計売上 desc（現状は全員同値）
         const ac = cumulative, bc = cumulative
         if (ac !== bc) return bc - ac
-        // 3. customerId desc（大きい=新しい）
         const ai = Number(a.customerId) || 0
         const bi = Number(b.customerId) || 0
         return bi - ai
@@ -256,25 +269,37 @@ export default function DealerExecDashboard() {
       const hidden = sorted.slice(1)
       rows.push({
         key,
-        rec: best,
         name: best.name,
+        displayName: best.name || '名称未設定',
         customerId: best.customerId || '',
         bcartStatus: best.status || '',
         groupCount: recs.length,
         hiddenIds: hidden.map((r) => r.customerId).filter(Boolean),
+        // orders から merge（明示・ここで確定）
+        lastOrderDate: idx?.lastOrderDate || null,
+        currentSales: idx?.currentSales || 0,
+        cumulativeSales: idx?.cumulativeSales || 0,
+        orderCount: idx?.orderCount || 0,
+        _hasOrderHistory: !!idx,
       })
     }
-    // 名称未設定は customerId 単独で1行ずつ保持
+
+    // 名称未設定: customerId 単独、orders とは紐付かない
     for (const a of anonymous) {
       const pseudoKey = `anon:${a.customerId || Math.random().toString(36).slice(2)}`
       rows.push({
         key: pseudoKey,
-        rec: a,
         name: '',
+        displayName: '名称未設定',
         customerId: a.customerId || '',
         bcartStatus: a.status || '',
         groupCount: 1,
         hiddenIds: [],
+        lastOrderDate: null,
+        currentSales: 0,
+        cumulativeSales: 0,
+        orderCount: 0,
+        _hasOrderHistory: false,
       })
     }
     return rows
@@ -311,25 +336,21 @@ export default function DealerExecDashboard() {
     // 状態算出: 当月発注あり=稼働、最終注文から 31〜90日=休眠、91日以上=要フォロー、履歴なし=未発注
     const stateOf = (s) => statusFromDays(s.currentSales, s.lastOrderDate)
     if (selectedListKey === 'all') {
-      // uniqueSalons があれば 1 行 = 1 サロン で表示
+      // uniqueSalons は既に orders と merge 済み。再ルックアップ不要。
       if (Array.isArray(uniqueSalons) && uniqueSalons.length > 0) {
-        return uniqueSalons.map((u) => {
-          const rawName = u.name || ''
-          const s = u.key && !u.key.startsWith('anon:') ? salonIndex.get(u.key) : null
-          const displayName = rawName || '名称未設定'
-          const base = s
-            ? toRow(s, { state: stateOf(s) })
-            : { key: u.key, displayName, lastOrderDate: null, currentSales: 0, cumulativeSales: 0, orderCount: 0, state: '未発注' }
-          return {
-            ...base,
-            key: u.key,
-            displayName,
-            customerId: u.customerId || '',
-            bcartStatus: u.bcartStatus || '',
-            groupCount: u.groupCount,
-            hiddenIds: u.hiddenIds,
-          }
-        }).sort((a, b) => (b.lastOrderDate?.getTime() || 0) - (a.lastOrderDate?.getTime() || 0))
+        return uniqueSalons.map((u) => ({
+          key: u.key,
+          displayName: u.displayName,
+          lastOrderDate: u.lastOrderDate,
+          currentSales: u.currentSales,
+          cumulativeSales: u.cumulativeSales,
+          orderCount: u.orderCount,
+          customerId: u.customerId,
+          bcartStatus: u.bcartStatus,
+          groupCount: u.groupCount,
+          hiddenIds: u.hiddenIds,
+          state: statusFromDays(u.currentSales, u.lastOrderDate),
+        })).sort((a, b) => (b.lastOrderDate?.getTime() || 0) - (a.lastOrderDate?.getTime() || 0))
       }
       // フォールバック: orders ユニーク
       return [...salonIndex.values()].map((s) => toRow(s, {
@@ -377,25 +398,23 @@ export default function DealerExecDashboard() {
         return aDate - bDate // 古い順 (asc)
       }
       if (Array.isArray(uniqueSalons) && uniqueSalons.length > 0) {
-        const rows = []
-        for (const u of uniqueSalons) {
-          const s = u.key && !u.key.startsWith('anon:') ? salonIndex.get(u.key) : null
-          if (s && s.currentSales > 0) continue
-          const displayName = u.name || '名称未設定'
-          const base = s
-            ? toRow(s, { state: stateOf(s) })
-            : { key: u.key, displayName, lastOrderDate: null, currentSales: 0, cumulativeSales: 0, orderCount: 0, state: '未発注' }
-          rows.push({
-            ...base,
+        // uniqueSalons は既に orders と merge 済み。currentSales>0（今月稼働）を除外。
+        return uniqueSalons
+          .filter((u) => !(u.currentSales > 0))
+          .map((u) => ({
             key: u.key,
-            displayName,
-            customerId: u.customerId || '',
-            bcartStatus: u.bcartStatus || '',
+            displayName: u.displayName,
+            lastOrderDate: u.lastOrderDate,
+            currentSales: u.currentSales,
+            cumulativeSales: u.cumulativeSales,
+            orderCount: u.orderCount,
+            customerId: u.customerId,
+            bcartStatus: u.bcartStatus,
             groupCount: u.groupCount,
             hiddenIds: u.hiddenIds,
-          })
-        }
-        return rows.sort(cmpDormant)
+            state: statusFromDays(u.currentSales, u.lastOrderDate),
+          }))
+          .sort(cmpDormant)
       }
       return [...salonIndex.values()]
         .filter((s) => s.cumulativeSales > 0 && s.currentSales === 0)
