@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { collection, getDocs, query, where } from 'firebase/firestore'
+import { collection, doc, getDoc, getDocs, orderBy, query, where, limit } from 'firebase/firestore'
 import { db } from '../lib/firebase.js'
 import { useAuth } from '../contexts/AuthContext.jsx'
 import useDealerDashboard, { activeRateColor, STATUS_BADGE } from '../hooks/useDealerDashboard.js'
 import { normalizeCompanyName } from '../lib/nameNormalize.js'
+import { fetchDealerSalonNamesFromBcart } from '../lib/dashboardAggregator.js'
 
 const fmtYen = (n) => `¥${Math.round(Number(n) || 0).toLocaleString()}`
 const fmtPct = (n) => (n == null ? '—' : `${(n * 100).toFixed(1)}%`)
@@ -80,15 +81,23 @@ export default function DealerExecDashboard() {
 
   const [statusFilter, setStatusFilter] = useState('all')
 
-  // サロン状況：全履歴 orders と dealerSalons を一括取得して各指標を導出
+  // サロン状況：全履歴 orders + dealerSalons + 月次snapshot を取得
   const [allOrders, setAllOrders] = useState([])
   const [managedSalons, setManagedSalons] = useState([])
+  const [snapshotTotalSalonCount, setSnapshotTotalSalonCount] = useState(null)
+  const [bcartNames, setBcartNames] = useState(null) // Set<string> | null（未取得）
+  const [bcartLoading, setBcartLoading] = useState(false)
+  const [bcartError, setBcartError] = useState(null)
   const [selectedListKey, setSelectedListKey] = useState(null)
   // 'all' | 'managed' | 'active' | 'rate' | 'dormant'
 
   useEffect(() => {
     const code = profile?.dealerCode
-    if (!code) { setAllOrders([]); setManagedSalons([]); return }
+    if (!code) {
+      setAllOrders([]); setManagedSalons([]); setSnapshotTotalSalonCount(null)
+      setBcartNames(null); setBcartError(null)
+      return
+    }
     let cancelled = false
     ;(async () => {
       try {
@@ -100,11 +109,48 @@ export default function DealerExecDashboard() {
         setAllOrders(ordSnap.docs.map((d) => ({ id: d.id, ...d.data() })))
         setManagedSalons(dsSnap.docs.map((d) => ({ id: d.id, ...d.data() })))
       } catch (e) {
-        console.warn('[DealerExec] サロン構成データ取得失敗:', e.message)
+        console.warn('[DealerExec] orders/dealerSalons 取得失敗:', e.message)
+      }
+
+      // dealerMonthlySnapshots から最新月の totalSalonCount を取得（Bカート 親フィルタ集計済み）
+      try {
+        const snapQuery = query(
+          collection(db, 'dealerMonthlySnapshots'),
+          where('dealerCode', '==', code),
+          orderBy('month', 'desc'),
+          limit(1),
+        )
+        const snap = await getDocs(snapQuery)
+        if (cancelled) return
+        if (!snap.empty) {
+          const data = snap.docs[0].data()
+          const cnt = Number(data.totalSalonCount)
+          if (Number.isFinite(cnt) && cnt > 0) setSnapshotTotalSalonCount(cnt)
+        }
+      } catch (e) {
+        console.warn('[DealerExec] dealerMonthlySnapshots 取得失敗:', e.message)
       }
     })()
     return () => { cancelled = true }
   }, [profile?.dealerCode])
+
+  // Bcart 名簿を遅延取得（一覧クリック時に呼ぶ）
+  const ensureBcartNames = async () => {
+    const code = profile?.dealerCode
+    if (!code || bcartNames || bcartLoading) return
+    setBcartLoading(true); setBcartError(null)
+    try {
+      const names = await fetchDealerSalonNamesFromBcart(code)
+      setBcartNames(names)
+      // raw 件数（生の Bカート 会員件数）が snapshot より新しければ採用
+      const rawCount = Number(names?.rawCount)
+      if (Number.isFinite(rawCount) && rawCount > 0) setSnapshotTotalSalonCount(rawCount)
+    } catch (e) {
+      setBcartError(e?.message || 'Bcart 名簿取得に失敗しました')
+    } finally {
+      setBcartLoading(false)
+    }
+  }
 
   // サロンインデックス: companyName 正規化キー → { displayName, cumulativeSales, currentSales, lastOrderDate, orderCount }
   const salonIndex = useMemo(() => {
@@ -144,7 +190,9 @@ export default function DealerExecDashboard() {
   }, [managedSalons])
 
   // 各指標の値
-  const allTimeSalonCount = salonIndex.size
+  // 「これまでの取引サロン」は Bcart 親=代理店 の会員数（snapshot キャッシュ）を 1次に。
+  // snapshot 取得前 / 失敗時は orders ユニーク（過小評価だがフォールバック）。
+  const allTimeSalonCount = snapshotTotalSalonCount ?? salonIndex.size
   const dealerSalonsCount = managedKeys.size
   const currentActiveCount = useMemo(
     () => [...salonIndex.values()].filter((s) => s.currentSales > 0).length,
@@ -153,6 +201,7 @@ export default function DealerExecDashboard() {
   const dormantCount = Math.max(0, allTimeSalonCount - currentActiveCount)
   const showRate = dealerSalonsCount > 0
   const rate = showRate ? currentActiveCount / dealerSalonsCount : null
+  const showManagedTile = dealerSalonsCount > 0 // 未設定時はタイル自体を非表示にする
 
   // 指標別サロン一覧
   const listRows = useMemo(() => {
@@ -171,6 +220,22 @@ export default function DealerExecDashboard() {
       return '未発注'
     }
     if (selectedListKey === 'all') {
+      // Bcart 名簿があればそれを母集団に。orders からの実績情報をマージ
+      if (bcartNames && bcartNames.size > 0) {
+        const rows = []
+        for (const rawName of bcartNames) {
+          const key = normalizeCompanyName(rawName)
+          if (!key) continue
+          const s = salonIndex.get(key)
+          if (s) {
+            rows.push(toRow(s, { state: managedKeys.has(s.key) ? stateOf(s) : (s.currentSales > 0 ? '稼働' : (s.cumulativeSales > 0 ? '休眠' : '未発注')) }))
+          } else {
+            rows.push({ key, displayName: rawName, lastOrderDate: null, currentSales: 0, cumulativeSales: 0, orderCount: 0, state: '未発注' })
+          }
+        }
+        return rows.sort((a, b) => (b.lastOrderDate?.getTime() || 0) - (a.lastOrderDate?.getTime() || 0))
+      }
+      // フォールバック: orders ユニーク
       return [...salonIndex.values()].map((s) => toRow(s, {
         state: managedKeys.has(s.key) ? stateOf(s) : '管理対象外',
       })).sort((a, b) => (b.lastOrderDate?.getTime() || 0) - (a.lastOrderDate?.getTime() || 0))
@@ -205,13 +270,31 @@ export default function DealerExecDashboard() {
       })
     }
     if (selectedListKey === 'dormant') {
+      // Bcart 名簿があれば「Bcart 全顧客 − 今月稼働」を母集団に
+      if (bcartNames && bcartNames.size > 0) {
+        const rows = []
+        for (const rawName of bcartNames) {
+          const key = normalizeCompanyName(rawName)
+          if (!key) continue
+          const s = salonIndex.get(key)
+          // 今月稼働は除外
+          if (s && s.currentSales > 0) continue
+          if (s) {
+            rows.push(toRow(s, { state: s.cumulativeSales > 0 ? '休眠' : '未発注' }))
+          } else {
+            rows.push({ key, displayName: rawName, lastOrderDate: null, currentSales: 0, cumulativeSales: 0, orderCount: 0, state: '未発注' })
+          }
+        }
+        return rows.sort((a, b) => (b.lastOrderDate?.getTime() || 0) - (a.lastOrderDate?.getTime() || 0))
+      }
+      // フォールバック: orders 履歴のみから
       return [...salonIndex.values()]
         .filter((s) => s.cumulativeSales > 0 && s.currentSales === 0)
         .map((s) => toRow(s, { state: managedKeys.has(s.key) ? '休眠' : '管理対象外' }))
         .sort((a, b) => (b.lastOrderDate?.getTime() || 0) - (a.lastOrderDate?.getTime() || 0))
     }
     return []
-  }, [selectedListKey, salonIndex, managedKeys])
+  }, [selectedListKey, salonIndex, managedKeys, bcartNames])
 
   const listTitle = {
     all: 'これまでの取引サロン',
@@ -294,7 +377,7 @@ export default function DealerExecDashboard() {
               <KpiCard
                 label="これまでの取引サロン"
                 value={`${allTimeSalonCount} 店`}
-                sub="過去に1回以上注文のあったサロン"
+                sub={snapshotTotalSalonCount != null ? 'Bカート 顧客全件（最新スナップショット）' : '過去に1回以上注文のあったサロン'}
               />
             )}
             {/* スロット4: 今月動いているサロン */}
@@ -316,15 +399,20 @@ export default function DealerExecDashboard() {
                 label="これまでの取引サロン"
                 value={`${allTimeSalonCount} 店`}
                 active={selectedListKey === 'all'}
-                onClick={() => setSelectedListKey(selectedListKey === 'all' ? null : 'all')}
+                onClick={() => {
+                  const next = selectedListKey === 'all' ? null : 'all'
+                  setSelectedListKey(next)
+                  if (next === 'all') ensureBcartNames()
+                }}
               />
-              <StatTile
-                label="管理対象サロン"
-                value={dealerSalonsCount > 0 ? `${dealerSalonsCount} 店` : '未設定'}
-                active={selectedListKey === 'managed'}
-                onClick={dealerSalonsCount > 0 ? () => setSelectedListKey(selectedListKey === 'managed' ? null : 'managed') : null}
-                disabled={dealerSalonsCount === 0}
-              />
+              {showManagedTile && (
+                <StatTile
+                  label="管理対象サロン"
+                  value={`${dealerSalonsCount} 店`}
+                  active={selectedListKey === 'managed'}
+                  onClick={() => setSelectedListKey(selectedListKey === 'managed' ? null : 'managed')}
+                />
+              )}
               <StatTile
                 label="今月動いているサロン"
                 value={`${currentActiveCount} 店`}
@@ -344,7 +432,11 @@ export default function DealerExecDashboard() {
                 label="休眠・掘り起こし候補"
                 value={`${dormantCount} 店`}
                 active={selectedListKey === 'dormant'}
-                onClick={() => setSelectedListKey(selectedListKey === 'dormant' ? null : 'dormant')}
+                onClick={() => {
+                  const next = selectedListKey === 'dormant' ? null : 'dormant'
+                  setSelectedListKey(next)
+                  if (next === 'dormant') ensureBcartNames()
+                }}
               />
             </div>
 
@@ -369,6 +461,16 @@ export default function DealerExecDashboard() {
                     閉じる ×
                   </button>
                 </div>
+                {(selectedListKey === 'all' || selectedListKey === 'dormant') && bcartLoading && !bcartNames && (
+                  <div className="mb-2 rounded-lg bg-indigo-50 px-3 py-2 text-xs text-indigo-800">
+                    Bカートから顧客一覧を取得しています…
+                  </div>
+                )}
+                {(selectedListKey === 'all' || selectedListKey === 'dormant') && bcartError && !bcartNames && (
+                  <div className="mb-2 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-800">
+                    Bカート 顧客一覧の取得に失敗しました（{bcartError}）。注文履歴ベースで暫定表示します。
+                  </div>
+                )}
                 <div className="overflow-hidden rounded-xl border border-gray-200">
                   <table className="min-w-full text-sm">
                     <thead className="bg-gray-50 text-xs text-gray-600">
