@@ -54,6 +54,7 @@ import { resolve, isAbsolute } from 'path'
 import { initializeApp, cert } from 'firebase-admin/app'
 import { getFirestore, FieldValue } from 'firebase-admin/firestore'
 import { BCART_BASE, getBcartToken } from './_env.mjs'
+import { buildDealerCodeMap, resolveDealerCode } from '../src/lib/dealerCodeMapping.js'
 
 // === 必須 env ガード（SDK 初期化前）===
 const EXPECTED_PROJECT_ID = process.env.EXPECTED_PROJECT_ID
@@ -87,7 +88,7 @@ const YEAR_TO = process.env.YEAR_TO || null     // YYYY-MM (exclusive)
 const DEALER_FILTER = process.env.DEALER_FILTER || null
 const LOG_COLLECTION = 'orderBackfillLogs'
 const BATCH_SIZE = 400
-const SCRIPT_VERSION = '2026-04-24.v1'
+const SCRIPT_VERSION = '2026-04-24.v2-mapping'
 
 function parseYm(s) {
   if (!s) return null
@@ -286,11 +287,19 @@ async function collectCandidates() {
 }
 
 // === マッチング + 補完対象確定 ===
-function resolveTargets(candidates, bcartMap) {
+//
+// マッピング層（src/lib/dealerCodeMapping.js）を経由して
+// Bカート customer_parent_id → アプリ dealerCode に変換する。
+//
+// - v1〜v6 のような Bカート 独自 ID → 登録があれば J0016〜J0021 等に変換
+// - 未登録の v 系 → resolveDealerCode が '' を返す（fail-closed・スキップ）
+// - J0002 等の同一 ID → そのまま使う
+function resolveTargets(candidates, bcartMap, dealerCodeMap) {
   console.log('3. Bカート突合で dealerCode 決定中...')
   const targets = []
   const unresolved = [] // Bカート側 code なし
   const noParent = []   // code あるが customer_parent_id 空
+  const unmapped = []   // v 系で fail-closed（未マッピング）
   const filteredOut = [] // DEALER_FILTER 指定で除外
 
   for (const c of candidates) {
@@ -303,23 +312,30 @@ function resolveTargets(candidates, bcartMap) {
       unresolved.push({ ...c, reason: 'Bカート side 未収集（範囲外 or 該当なし）' })
       continue
     }
-    const resolvedCode = b.parentId
-    if (!resolvedCode) {
+    const rawParent = b.parentId
+    if (!rawParent) {
       noParent.push({ ...c, reason: 'customer_parent_id 空' })
       continue
     }
-    if (DEALER_FILTER && resolvedCode !== DEALER_FILTER) {
-      filteredOut.push({ ...c, resolvedCode })
+    // マッピング適用（v1 → J0016 等。未マッピング v 系は '' を返す = fail-closed）
+    const resolvedCode = resolveDealerCode(rawParent, dealerCodeMap)
+    if (!resolvedCode) {
+      unmapped.push({ ...c, rawParent, reason: '未マッピング v 系（fail-closed）' })
       continue
     }
-    targets.push({ ...c, resolvedCode })
+    if (DEALER_FILTER && resolvedCode !== DEALER_FILTER) {
+      filteredOut.push({ ...c, resolvedCode, rawParent })
+      continue
+    }
+    targets.push({ ...c, resolvedCode, rawParent })
   }
   console.log(`   補完候補             : ${targets.length}`)
   console.log(`   Bカートに存在せず    : ${unresolved.length}`)
   console.log(`   親ID空（マッチ不可）: ${noParent.length}`)
+  console.log(`   未マッピング v 系    : ${unmapped.length} (fail-closed・スキップ)`)
   if (DEALER_FILTER) console.log(`   DEALER_FILTER で除外: ${filteredOut.length}`)
   console.log('')
-  return { targets, unresolved, noParent, filteredOut }
+  return { targets, unresolved, noParent, unmapped, filteredOut }
 }
 
 // === DRY_RUN サマリ + 本番書き込み ===
@@ -385,7 +401,7 @@ async function applyOrSummarize(targets) {
   return { updated, failed, impactTotal, byDealer: sorted }
 }
 
-async function writeAuditLog({ mode, candidateCount, targetCount, updated, failed, impactTotal, byDealer, unresolvedCount, noParentCount, filteredOutCount, skippedInDupPair = 0 }) {
+async function writeAuditLog({ mode, candidateCount, targetCount, updated, failed, impactTotal, byDealer, unresolvedCount, noParentCount, filteredOutCount, skippedInDupPair = 0, unmappedCount = 0 }) {
   try {
     const ref = await db.collection(LOG_COLLECTION).add({
       type: 'order-dealercode-backfill',
@@ -405,6 +421,7 @@ async function writeAuditLog({ mode, candidateCount, targetCount, updated, faile
       noParentCount,
       skippedInDupPair,
       filteredOutCount,
+      unmappedCount,
       impactTotal,
       byDealer: Object.fromEntries(byDealer.map(([code, e]) => [code, e])),
       scriptVersion: SCRIPT_VERSION,
@@ -417,7 +434,24 @@ async function writeAuditLog({ mode, candidateCount, targetCount, updated, faile
   }
 }
 
+async function buildDealerCodeMapFromFirestore() {
+  console.log('0. allowedEmails から dealerCode マッピング構築中...')
+  const snap = await db.collection('allowedEmails').where('role', '==', 'dealer').get()
+  const records = snap.docs.map((d) => d.data())
+  const map = buildDealerCodeMap(records)
+  console.log(`   登録 dealer: ${records.length} 件 / マッピング登録: ${map.byBcartParent.size} 件`)
+  if (map.byBcartParent.size > 0) {
+    console.log(`   登録済みマッピング:`)
+    for (const [bp, dc] of map.byBcartParent.entries()) {
+      console.log(`     ${bp} → ${dc}`)
+    }
+  }
+  console.log('')
+  return map
+}
+
 async function main() {
+  const dealerCodeMap = await buildDealerCodeMapFromFirestore()
   const bcartMap = await buildBcartParentIdMap()
   const { candidates, skippedInDupPair } = await collectCandidates()
   if (candidates.length === 0) {
@@ -426,11 +460,11 @@ async function main() {
       mode: DRY_RUN ? 'dry-run' : 'production',
       candidateCount: 0, targetCount: 0, updated: 0, failed: [],
       impactTotal: 0, byDealer: [], unresolvedCount: 0, noParentCount: 0, filteredOutCount: 0,
-      skippedInDupPair,
+      skippedInDupPair, unmappedCount: 0,
     })
     process.exit(0)
   }
-  const { targets, unresolved, noParent, filteredOut } = resolveTargets(candidates, bcartMap)
+  const { targets, unresolved, noParent, unmapped, filteredOut } = resolveTargets(candidates, bcartMap, dealerCodeMap)
   const result = await applyOrSummarize(targets)
 
   console.log('\n========================================')
@@ -440,6 +474,7 @@ async function main() {
   console.log(`  補完対象（確定）     : ${targets.length}`)
   console.log(`  Bカート側マッチなし  : ${unresolved.length}`)
   console.log(`  親ID空でスキップ     : ${noParent.length}`)
+  console.log(`  未マッピング v 系    : ${unmapped.length} (fail-closed)`)
   console.log(`  重複ペアで除外       : ${skippedInDupPair}`)
   if (DEALER_FILTER) console.log(`  DEALER_FILTER 除外   : ${filteredOut.length}`)
   console.log(`  売上影響             : ¥${result.impactTotal.toLocaleString()}`)
@@ -460,6 +495,7 @@ async function main() {
     noParentCount: noParent.length,
     skippedInDupPair,
     filteredOutCount: filteredOut.length,
+    unmappedCount: unmapped.length,
   })
 
   process.exit(result.failed.length > 0 ? 1 : 0)
