@@ -48,6 +48,19 @@ function nextMonthKey(ym) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
 }
 
+// 指定月の「翌月末」を YYYY-MM-DD で返す（支払い予定日の自動計算）
+//   例: '2026-04' → '2026-05-31'
+//   ルール: 対象月の翌月末日をキックバック支払い予定日として表示
+function scheduledPaymentDate(ym) {
+  if (!ym) return '—'
+  const [y, m] = ym.split('-').map(Number)
+  if (!y || !m) return '—'
+  // new Date(y, m+1, 0) は「翌々月の0日」= 翌月末日
+  const d = new Date(y, m + 1, 0)
+  if (Number.isNaN(d.getTime())) return '—'
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
 function KpiCard({ label, value, sub, accent }) {
   const accentClass = accent === 'primary'
     ? 'border-indigo-200 bg-indigo-50'
@@ -139,20 +152,16 @@ export default function DealerKickbacks() {
 
       {!loading && !error && (
         <>
-          {/* KPIカード4枚 */}
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-            <KpiCard
-              label={`${fmtMonth(selectedMonth)} 見込額`}
-              value={fmtYen(currentAmount)}
-              accent="primary"
-            />
+          {/* KPIカード3枚（見込額カードは廃止） */}
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
             <KpiCard
               label={`前月（${fmtMonth(prevMonthKey(selectedMonth))}）実績`}
               value={fmtYen(prevAmount)}
             />
             <KpiCard
-              label="支払予定日"
-              value={currentKb?.scheduledAt ? fmtDate(currentKb.scheduledAt) : '—'}
+              label="支払い予定日"
+              value={scheduledPaymentDate(selectedMonth)}
+              sub={`対象月（${fmtMonth(selectedMonth)}）の翌月末`}
             />
             <div className="rounded-2xl border border-gray-200 bg-white p-5">
               <div className="text-xs text-gray-500">ステータス</div>
