@@ -180,7 +180,7 @@ export default function BcartImport() {
                 bcartOrderId: order.id,
                 companyName,
                 companyNameKey,
-                dealerCode,
+                ...(dealerCode ? { dealerCode } : {}),
                 contact: order.customer_name || '',
                 promotedFromEmailAt: serverTimestamp(),
               })
@@ -195,7 +195,7 @@ export default function BcartImport() {
                 bcartOrderId: order.id,
                 companyName,
                 companyNameKey,
-                dealerCode,
+                ...(dealerCode ? { dealerCode } : {}),
                 via: 'BcartImport.handleOneClickSync',
                 promotedAt: serverTimestamp(),
               })
@@ -251,7 +251,7 @@ export default function BcartImport() {
             bcartOrderId: order.id,
             companyName,
             companyNameKey,
-            dealerCode,
+            ...(dealerCode ? { dealerCode } : {}),
             contact: order.customer_name || '',
             createdAt: serverTimestamp(),
           })
@@ -381,7 +381,7 @@ export default function BcartImport() {
                 bcartOrderId: order.id,
                 companyName,
                 companyNameKey,
-                dealerCode,
+                ...(dealerCode ? { dealerCode } : {}),
                 contact: order.customer_name || '',
                 promotedFromEmailAt: serverTimestamp(),
               })
@@ -395,7 +395,7 @@ export default function BcartImport() {
                 bcartOrderId: order.id,
                 companyName,
                 companyNameKey,
-                dealerCode,
+                ...(dealerCode ? { dealerCode } : {}),
                 via: 'BcartImport.handleApiImport',
                 promotedAt: serverTimestamp(),
               })
@@ -452,7 +452,7 @@ export default function BcartImport() {
             bcartOrderId: order.id,
             companyName,
             companyNameKey,
-            dealerCode,
+            ...(dealerCode ? { dealerCode } : {}),
             contact: order.customer_name || '',
             createdAt: serverTimestamp(),
           })
