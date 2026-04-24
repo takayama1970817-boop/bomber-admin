@@ -14,18 +14,33 @@
  *       → 見つからない場合は null を返す（呼び出し側は記録して進む）
  */
 import { collection, getDocs, query, where, limit } from 'firebase/firestore'
+import { resolveDealerCode } from './dealerCodeMapping.js'
 
 /**
  * Bカート受注オブジェクトから dealerCode を抽出。
  * Bカート側のフィールドは customer_parent_id が主ソースだが、
  * 配信バージョンによって parent_id / parent_member_id が使われるケースもある。
  *
+ * オプション dealerCodeMap を渡すと、Bカート 親会員 ID とアプリ dealerCode の
+ * マッピング層（src/lib/dealerCodeMapping.js）を経由する。
+ * 例: customer_parent_id='v1' / map={v1:'J0016'} → 'J0016'
+ *
+ * 仕様（resolveDealerCode 経由時）:
+ *   - マップにヒット → アプリ dealerCode
+ *   - 未マップかつ /^v\d+$/ → '' + warn（fail-closed）
+ *   - 未マップ・他パターン（J0002 等）→ そのまま
+ *
+ * map 未指定時は raw 値をそのまま返す（後方互換・既存呼び出し全て影響なし）。
+ *
  * @param {Object} order - Bカート受注オブジェクト
- * @returns {string} 整形済み dealerCode（見つからなければ空文字）
+ * @param {{ byBcartParent: Map<string,string> }=} dealerCodeMap - マッピング（任意）
+ * @returns {string} dealerCode（見つからない / fail-closed なら空文字）
  */
-export function resolveDealerCodeFromBcartOrder(order) {
+export function resolveDealerCodeFromBcartOrder(order, dealerCodeMap) {
   const raw = order?.customer_parent_id ?? order?.parent_id ?? order?.parent_member_id ?? ''
-  return String(raw).trim()
+  const trimmed = String(raw).trim()
+  if (!dealerCodeMap) return trimmed
+  return resolveDealerCode(trimmed, dealerCodeMap)
 }
 
 /**
