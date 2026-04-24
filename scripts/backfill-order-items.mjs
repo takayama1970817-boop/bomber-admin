@@ -75,7 +75,14 @@ const YEAR_TO = process.env.YEAR_TO || null
 const DEALER_FILTER = process.env.DEALER_FILTER || null
 const LOG_COLLECTION = 'orderItemsBackfillLogs'
 const BATCH_SIZE = 400
-const SCRIPT_VERSION = '2026-04-24.v1'
+const SCRIPT_VERSION = '2026-04-24.v2-per-order-id'
+
+// 再開可能な安全策:
+//  - SLEEP_MS         : Bカート個別問い合わせ間の delay (ms, 既定 150)
+//  - BACKFILL_MAX     : 1 回の実行で処理する order 上限（既定 0 = 制限なし）
+//  - 既処理 doc は items.length > 0 で自動 skip → 再実行で続きから再開可能
+const SLEEP_MS = Math.max(0, Number(process.env.SLEEP_MS || 150))
+const BACKFILL_MAX = Math.max(0, Number(process.env.BACKFILL_MAX || 0))
 
 if (!DRY_RUN && OPERATOR === 'unknown') {
   console.error('❌ 本番実行時は OPERATOR が必須です。')
@@ -109,6 +116,8 @@ console.log(`  operator       : ${OPERATOR}`)
 console.log(`  YEAR_FROM      : ${YEAR_FROM || '(指定なし)'}`)
 console.log(`  YEAR_TO        : ${YEAR_TO || '(指定なし)'}`)
 console.log(`  DEALER_FILTER  : ${DEALER_FILTER || '(指定なし)'}`)
+console.log(`  SLEEP_MS       : ${SLEEP_MS}`)
+console.log(`  BACKFILL_MAX   : ${BACKFILL_MAX || '(無制限)'}`)
 console.log(`  script version : ${SCRIPT_VERSION}`)
 console.log('========================================\n')
 
@@ -183,51 +192,63 @@ async function collectCandidates() {
   return { candidates, alreadyHasItems, noBcartOrderId, dealerFilterOut }
 }
 
-// === Bカート order_products を全件 walk して order_id → items[] マップを構築 ===
+// === Bカート order_products を per-order_id で個別取得 ===
 //
-// order_products は単純 offset ベースで全件取得が必要。
-// 大量取得するため、対象 bcartOrderId の Set で動的にフィルタする。
+// /order_products?order_id=X が動作確認済み（PR #66 v2 で確認）。
+// 全件走査（15,000+ ページ）を回避し、対象 bcartOrderId 数だけ問い合わせる。
+//
+// レート制限対策:
+//  - SLEEP_MS のリクエスト間 delay
+//  - bcartFetch 内で 5 回リトライ
+//  - 5 回失敗したら例外を投げる → 上位で安全停止 (途中までの結果を返す)
+//  - 既処理 doc は次回実行で自動 skip → 再開可能
+//
+// @param {Iterable<number>} targetOrderIds Bカート bcartOrderId
+// @returns {{ productMap, completedAt, abortedAt }} productMap: bcartOrderId → items[]
+//          abortedAt: レート制限で止まった bcartOrderId（null なら完走）
 async function fetchOrderProductsFor(targetOrderIds) {
-  console.log('2. Bカート order_products から対象商品を取得中...')
-  console.log(`   対象 bcartOrderId 件数: ${targetOrderIds.size}`)
-  const productMap = new Map() // bcartOrderId → items[]
-  let totalFetched = 0, totalMatched = 0
-  let opOffset = 0
-  const MAX_PAGES = 5000 // safety cap
-
-  for (let pageCount = 0; pageCount < MAX_PAGES; pageCount++) {
-    const data = await bcartFetch('order_products', { limit: PAGE_SIZE, offset: opOffset })
-    const key = Object.keys(data).find((k) => Array.isArray(data[k])) || 'order_products'
-    const items = data[key]
-    if (!items || items.length === 0) break
-    for (const p of items) {
-      totalFetched++
-      if (!targetOrderIds.has(p.order_id)) continue
-      totalMatched++
-      const item = {
-        name: p.product_name || '',
-        sku: p.jan_code || '',
-        campaign: p.set_name || '',
-        unit: p.set_unit || '',
-        price: p.unit_price || 0,
-        qty: p.order_pro_count || 1,
+  const ids = [...targetOrderIds]
+  console.log('2. Bカート order_products を per-order_id 取得中...')
+  console.log(`   対象 bcartOrderId 件数: ${ids.length} / sleep ${SLEEP_MS}ms`)
+  const productMap = new Map()
+  let processed = 0
+  let abortedAt = null
+  for (const orderId of ids) {
+    try {
+      // 1 注文の order_products は通常 5〜20 件。limit=20 で 1 ページに収まる想定。
+      // Bカート の許容上限を超えると 422 を返すため、安全側に小さく取る。
+      const data = await bcartFetch('order_products', { order_id: orderId, limit: 20 })
+      const key = Object.keys(data).find((k) => Array.isArray(data[k])) || 'order_products'
+      const items = data[key] || []
+      if (items.length > 0) {
+        const mapped = items.map((p) => ({
+          name: p.product_name || '',
+          sku: p.jan_code || '',
+          campaign: p.set_name || '',
+          unit: p.set_unit || '',
+          price: p.unit_price || 0,
+          qty: p.order_pro_count || 1,
+        }))
+        productMap.set(orderId, mapped)
       }
-      if (!productMap.has(p.order_id)) productMap.set(p.order_id, [])
-      productMap.get(p.order_id).push(item)
+      processed++
+      if (processed % 20 === 0 || processed === ids.length) {
+        console.log(`   ${processed} / ${ids.length} 件 完了`)
+      }
+    } catch (e) {
+      // レート制限などで失敗 → 安全停止
+      abortedAt = orderId
+      console.error(`   ⚠️ レート制限/API エラー (order_id=${orderId}): ${e.message}`)
+      console.error(`   ${processed} 件まで処理 / ${ids.length - processed} 件未処理 → 中断`)
+      break
     }
-    if (opOffset % 1000 === 0 || items.length < PAGE_SIZE) {
-      console.log(`   offset=${opOffset}: 走査${totalFetched}件 / マッチ${totalMatched}件 (${productMap.size} orders)`)
-    }
-    if (items.length < PAGE_SIZE) break
-    opOffset += PAGE_SIZE
-    // レート制限対策
-    await new Promise((r) => setTimeout(r, 100))
+    if (SLEEP_MS > 0) await new Promise((r) => setTimeout(r, SLEEP_MS))
   }
-  console.log(`   完了: 走査${totalFetched}件 / マッチ${totalMatched}件 / ${productMap.size}注文分の明細取得\n`)
-  return productMap
+  console.log(`   完了: ${productMap.size} 注文分の明細取得${abortedAt ? '（途中停止）' : ''}\n`)
+  return { productMap, abortedAt, processed }
 }
 
-async function writeAuditLog({ mode, candidateCount, updated, failed, noProductsCount, alreadyHasItems, noBcartOrderId }) {
+async function writeAuditLog({ mode, candidateCount, updated, failed, noProductsCount, alreadyHasItems, noBcartOrderId, abortedAt = null, processed = 0, limitApplied = 0 }) {
   try {
     const ref = await db.collection(LOG_COLLECTION).add({
       type: 'order-items-backfill',
@@ -245,6 +266,10 @@ async function writeAuditLog({ mode, candidateCount, updated, failed, noProducts
       noProductsCount,
       alreadyHasItems,
       noBcartOrderId,
+      abortedAt,
+      processedCount: processed,
+      limitApplied,
+      sleepMs: SLEEP_MS,
       scriptVersion: SCRIPT_VERSION,
     })
     console.log(`\n📝 監査ログ保存: ${LOG_COLLECTION}/${ref.id}`)
@@ -267,13 +292,19 @@ async function main() {
     process.exit(0)
   }
 
-  const targetOrderIds = new Set(candidates.map((c) => c.bcartOrderId))
-  const productMap = await fetchOrderProductsFor(targetOrderIds)
+  // BACKFILL_MAX で 1 実行あたりの上限を設ける（再開を制御）
+  const limited = BACKFILL_MAX > 0 ? candidates.slice(0, BACKFILL_MAX) : candidates
+  if (limited.length < candidates.length) {
+    console.log(`   ⚠️ BACKFILL_MAX=${BACKFILL_MAX} により ${limited.length} 件のみ処理（残り ${candidates.length - limited.length} 件は次回実行で）`)
+  }
+
+  const targetOrderIds = new Set(limited.map((c) => c.bcartOrderId))
+  const { productMap, abortedAt, processed } = await fetchOrderProductsFor(targetOrderIds)
 
   // マッチング結果
   const targets = []
   const noProducts = []
-  for (const c of candidates) {
+  for (const c of limited) {
     const items = productMap.get(c.bcartOrderId)
     if (!items || items.length === 0) {
       noProducts.push(c)
@@ -284,6 +315,8 @@ async function main() {
 
   console.log('3. 補完予定 サマリ')
   console.log(`   候補               : ${candidates.length}`)
+  console.log(`   今回処理対象       : ${limited.length} (BACKFILL_MAX 反映)`)
+  console.log(`   API 完走           : ${abortedAt ? '途中停止 (order_id=' + abortedAt + ')' : '完走'}`)
   console.log(`   補完対象（確定）   : ${targets.length}`)
   console.log(`   Bカート 商品なし   : ${noProducts.length}`)
   let totalItemCount = 0
@@ -304,6 +337,7 @@ async function main() {
     await writeAuditLog({
       mode: 'dry-run', candidateCount: candidates.length, updated: 0, failed: [],
       noProductsCount: noProducts.length, alreadyHasItems, noBcartOrderId,
+      abortedAt, processed, limitApplied: limited.length,
     })
     process.exit(0)
   }
@@ -313,6 +347,7 @@ async function main() {
     await writeAuditLog({
       mode: 'production', candidateCount: candidates.length, updated: 0, failed: [],
       noProductsCount: noProducts.length, alreadyHasItems, noBcartOrderId,
+      abortedAt, processed, limitApplied: limited.length,
     })
     process.exit(0)
   }
@@ -353,6 +388,7 @@ async function main() {
   await writeAuditLog({
     mode: 'production', candidateCount: candidates.length, updated, failed,
     noProductsCount: noProducts.length, alreadyHasItems, noBcartOrderId,
+    abortedAt, processed, limitApplied: limited.length,
   })
   process.exit(failed.length > 0 ? 1 : 0)
 }
