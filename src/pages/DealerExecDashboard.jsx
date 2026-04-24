@@ -58,6 +58,7 @@ function StateBadge({ state }) {
   const map = {
     '稼働': 'bg-emerald-100 text-emerald-800',
     '休眠': 'bg-amber-100 text-amber-800',
+    '要フォロー': 'bg-red-100 text-red-700',
     '未稼働': 'bg-amber-100 text-amber-800',
     '未発注': 'bg-gray-100 text-gray-600',
     '管理対象外': 'bg-gray-100 text-gray-600',
@@ -65,6 +66,21 @@ function StateBadge({ state }) {
   }
   const cls = map[state] || 'bg-gray-100 text-gray-600'
   return <span className={`rounded px-2 py-0.5 text-[11px] font-medium ${cls}`}>{state}</span>
+}
+
+// 経過日数から状態を算出（今月発注は '稼働'、それ以外は経過日数で分岐）
+function statusFromDays(currentSales, lastOrderDate, now = new Date()) {
+  if ((Number(currentSales) || 0) > 0) return '稼働'
+  if (!lastOrderDate) return '未発注'
+  const days = Math.floor((now.getTime() - lastOrderDate.getTime()) / (1000 * 60 * 60 * 24))
+  if (days >= 91) return '要フォロー'
+  if (days >= 31) return '休眠'
+  return '稼働' // 30日以内に発注あり（当月外でも直近）→ 稼働扱い
+}
+
+function daysSince(lastOrderDate, now = new Date()) {
+  if (!lastOrderDate) return null
+  return Math.floor((now.getTime() - lastOrderDate.getTime()) / (1000 * 60 * 60 * 24))
 }
 
 // =====================================================
@@ -292,11 +308,8 @@ export default function DealerExecDashboard() {
       orderCount: s.orderCount,
       ...extras,
     })
-    const stateOf = (s) => {
-      if (s.currentSales > 0) return '稼働'
-      if (s.cumulativeSales > 0) return '休眠'
-      return '未発注'
-    }
+    // 状態算出: 当月発注あり=稼働、最終注文から 31〜90日=休眠、91日以上=要フォロー、履歴なし=未発注
+    const stateOf = (s) => statusFromDays(s.currentSales, s.lastOrderDate)
     if (selectedListKey === 'all') {
       // uniqueSalons があれば 1 行 = 1 サロン で表示
       if (Array.isArray(uniqueSalons) && uniqueSalons.length > 0) {
@@ -305,7 +318,7 @@ export default function DealerExecDashboard() {
           const s = u.key && !u.key.startsWith('anon:') ? salonIndex.get(u.key) : null
           const displayName = rawName || '名称未設定'
           const base = s
-            ? toRow(s, { state: s.currentSales > 0 ? '稼働' : (s.cumulativeSales > 0 ? '休眠' : '未発注') })
+            ? toRow(s, { state: stateOf(s) })
             : { key: u.key, displayName, lastOrderDate: null, currentSales: 0, cumulativeSales: 0, orderCount: 0, state: '未発注' }
           return {
             ...base,
@@ -354,6 +367,15 @@ export default function DealerExecDashboard() {
     }
     if (selectedListKey === 'dormant') {
       // uniqueSalons ベースで「全サロン − 今月稼働」を 1行=1サロン
+      // ソート: 最終注文が古い順（掘り起こしで優先度を見やすく）、履歴なしは最下位
+      const cmpDormant = (a, b) => {
+        const aDate = a.lastOrderDate?.getTime?.() || null
+        const bDate = b.lastOrderDate?.getTime?.() || null
+        if (aDate == null && bDate == null) return 0
+        if (aDate == null) return 1 // 履歴なしは下
+        if (bDate == null) return -1
+        return aDate - bDate // 古い順 (asc)
+      }
       if (Array.isArray(uniqueSalons) && uniqueSalons.length > 0) {
         const rows = []
         for (const u of uniqueSalons) {
@@ -361,7 +383,7 @@ export default function DealerExecDashboard() {
           if (s && s.currentSales > 0) continue
           const displayName = u.name || '名称未設定'
           const base = s
-            ? toRow(s, { state: s.cumulativeSales > 0 ? '休眠' : '未発注' })
+            ? toRow(s, { state: stateOf(s) })
             : { key: u.key, displayName, lastOrderDate: null, currentSales: 0, cumulativeSales: 0, orderCount: 0, state: '未発注' }
           rows.push({
             ...base,
@@ -373,12 +395,12 @@ export default function DealerExecDashboard() {
             hiddenIds: u.hiddenIds,
           })
         }
-        return rows.sort((a, b) => (b.lastOrderDate?.getTime() || 0) - (a.lastOrderDate?.getTime() || 0))
+        return rows.sort(cmpDormant)
       }
       return [...salonIndex.values()]
         .filter((s) => s.cumulativeSales > 0 && s.currentSales === 0)
-        .map((s) => toRow(s, { state: managedKeys.has(s.key) ? '休眠' : '管理対象外' }))
-        .sort((a, b) => (b.lastOrderDate?.getTime() || 0) - (a.lastOrderDate?.getTime() || 0))
+        .map((s) => toRow(s, { state: managedKeys.has(s.key) ? stateOf(s) : '管理対象外' }))
+        .sort(cmpDormant)
     }
     return []
   }, [selectedListKey, salonIndex, managedKeys, bcartNames, bcartRecords, uniqueSalons])
@@ -592,7 +614,21 @@ export default function DealerExecDashboard() {
                             )}
                           </td>
                           <td className="px-3 py-2 text-xs text-gray-500">{r.customerId || '—'}</td>
-                          <td className="px-3 py-2 text-gray-700">{fmtDate(r.lastOrderDate)}</td>
+                          <td className="px-3 py-2 text-gray-700">
+                            {r.lastOrderDate ? (
+                              <>
+                                <div>{fmtDate(r.lastOrderDate)}</div>
+                                <div className="text-[10px] text-gray-400">
+                                  最終注文から {daysSince(r.lastOrderDate)} 日
+                                </div>
+                              </>
+                            ) : (
+                              <>
+                                <div>—</div>
+                                <div className="text-[10px] text-gray-400">注文履歴なし</div>
+                              </>
+                            )}
+                          </td>
                           <td className="px-3 py-2 text-right font-medium text-gray-900">{fmtYen(r.currentSales)}</td>
                           <td className="px-3 py-2 text-right font-medium text-gray-900">{fmtYen(r.cumulativeSales)}</td>
                           <td className="px-3 py-2 text-center">
