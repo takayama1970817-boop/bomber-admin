@@ -68,14 +68,17 @@ function StateBadge({ state }) {
   return <span className={`rounded px-2 py-0.5 text-[11px] font-medium ${cls}`}>{state}</span>
 }
 
-// 経過日数から状態を算出（今月発注は '稼働'、それ以外は経過日数で分岐）
+// 経過日数から状態を算出
+//   30日以内 / 当月発注あり → 稼働
+//   31〜90日 → 休眠
+//   91日以上 / 履歴なし → 要フォロー（赤）
 function statusFromDays(currentSales, lastOrderDate, now = new Date()) {
   if ((Number(currentSales) || 0) > 0) return '稼働'
-  if (!lastOrderDate) return '未発注'
+  if (!lastOrderDate) return '要フォロー'
   const days = Math.floor((now.getTime() - lastOrderDate.getTime()) / (1000 * 60 * 60 * 24))
   if (days >= 91) return '要フォロー'
   if (days >= 31) return '休眠'
-  return '稼働' // 30日以内に発注あり（当月外でも直近）→ 稼働扱い
+  return '稼働'
 }
 
 function daysSince(lastOrderDate, now = new Date()) {
@@ -363,7 +366,7 @@ export default function DealerExecDashboard() {
       for (const key of managedKeys) {
         const s = salonIndex.get(key)
         if (s) rows.push(toRow(s, { state: stateOf(s) }))
-        else rows.push({ key, displayName: key, lastOrderDate: null, currentSales: 0, cumulativeSales: 0, orderCount: 0, state: '未発注' })
+        else rows.push({ key, displayName: key, lastOrderDate: null, currentSales: 0, cumulativeSales: 0, orderCount: 0, state: '要フォロー' })
       }
       return rows.sort((a, b) => b.cumulativeSales - a.cumulativeSales)
     }
@@ -634,19 +637,32 @@ export default function DealerExecDashboard() {
                           </td>
                           <td className="px-3 py-2 text-xs text-gray-500">{r.customerId || '—'}</td>
                           <td className="px-3 py-2 text-gray-700">
-                            {r.lastOrderDate ? (
-                              <>
-                                <div>{fmtDate(r.lastOrderDate)}</div>
-                                <div className="text-[10px] text-gray-400">
-                                  最終注文から {daysSince(r.lastOrderDate)} 日
-                                </div>
-                              </>
-                            ) : (
-                              <>
-                                <div>—</div>
-                                <div className="text-[10px] text-gray-400">注文履歴なし</div>
-                              </>
-                            )}
+                            {(() => {
+                              const d = r.lastOrderDate
+                              const days = daysSince(d)
+                              if (d && days != null && days >= 365) {
+                                return (
+                                  <>
+                                    <div>{fmtDate(d)}</div>
+                                    <div className="text-[10px] text-red-600">1年以上未発注</div>
+                                  </>
+                                )
+                              }
+                              if (d && days != null) {
+                                return (
+                                  <>
+                                    <div>{fmtDate(d)}</div>
+                                    <div className="text-[10px] text-gray-400">最終注文から {days} 日</div>
+                                  </>
+                                )
+                              }
+                              return (
+                                <>
+                                  <div>—</div>
+                                  <div className="text-[10px] text-red-600">1年以上未発注</div>
+                                </>
+                              )
+                            })()}
                           </td>
                           <td className="px-3 py-2 text-right font-medium text-gray-900">{fmtYen(r.currentSales)}</td>
                           <td className="px-3 py-2 text-right font-medium text-gray-900">{fmtYen(r.cumulativeSales)}</td>
