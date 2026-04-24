@@ -5,8 +5,15 @@
  *
  * 目的:
  *   ERP 新構造（erp_orders）への切替日（cutoverDate）当日に実行する。
- *   既存 orders 全件に `isDeprecated: true` と `deprecatedAt` を付与。
+ *   cutoff 日付以前の orders に `isDeprecated: true` と `deprecatedAt` を付与。
  *   以降、orders コレクションは「参照のみ」扱いとする（rules で update を制限）。
+ *
+ * 安全策（2026-04-24 追加 / PR #55）:
+ *   - EXPECTED_PROJECT_ID 必須     : service-account.json の project_id と不一致なら exit
+ *   - CUTOVER_BEFORE=YYYY-MM-DD 必須: orderDate < 指定日 のみ対象（巻き添え防止）
+ *   - 二度打ち防止                 : cutoverLogs に production 履歴があれば本番実行を拒否
+ *                                    （FORCE_RERUN=true で override 可）
+ *   - 起動時ログ強化               : project_id / client_email / cutoff / 履歴件数を表示
  *
  * 前提:
  *   1. Phase 1 Step 1〜4 の実装完了
@@ -15,13 +22,16 @@
  *
  * 使用方法:
  *   # DRY RUN（確認のみ、何も書き込まない）
- *   node scripts/cutover-orders.mjs
+ *   EXPECTED_PROJECT_ID=bomber-admin CUTOVER_BEFORE=2026-04-18 \
+ *     node scripts/cutover-orders.mjs
  *
  *   # 本番実行（監査ログ付き、社長判断で実行）
- *   DRY_RUN=false OPERATOR="社長 ボンバー" node scripts/cutover-orders.mjs
+ *   EXPECTED_PROJECT_ID=bomber-admin CUTOVER_BEFORE=2026-04-18 \
+ *     DRY_RUN=false OPERATOR="社長 ボンバー" \
+ *     node scripts/cutover-orders.mjs
  *
- *   # 特定 company のみ対象（任意）
- *   COMPANY=rt DRY_RUN=false node scripts/cutover-orders.mjs
+ *   # 本番 2回目以降（通常はブロック。本当に必要な場合のみ）
+ *   FORCE_RERUN=true DRY_RUN=false ... node scripts/cutover-orders.mjs
  *
  * 出力:
  *   - 標準出力: 対象件数 / サンプル / 失敗詳細
@@ -29,7 +39,7 @@
  */
 import { readFileSync, existsSync } from 'fs'
 import { initializeApp, cert } from 'firebase-admin/app'
-import { getFirestore, FieldValue } from 'firebase-admin/firestore'
+import { getFirestore, FieldValue, Timestamp } from 'firebase-admin/firestore'
 
 const SERVICE_ACCOUNT_PATH = new URL('./service-account.json', import.meta.url)
 if (!existsSync(SERVICE_ACCOUNT_PATH)) {
@@ -39,24 +49,90 @@ if (!existsSync(SERVICE_ACCOUNT_PATH)) {
 }
 
 const serviceAccount = JSON.parse(readFileSync(SERVICE_ACCOUNT_PATH, 'utf8'))
-initializeApp({ credential: cert(serviceAccount) })
+
+// === 必須 env ガード ===
+const EXPECTED_PROJECT_ID = process.env.EXPECTED_PROJECT_ID
+if (!EXPECTED_PROJECT_ID) {
+  console.error('❌ EXPECTED_PROJECT_ID は必須です（誤実行防止）。')
+  console.error('   例: EXPECTED_PROJECT_ID=bomber-admin-test （テスト）')
+  console.error('       EXPECTED_PROJECT_ID=bomber-admin      （本番）')
+  process.exit(1)
+}
+if (serviceAccount.project_id !== EXPECTED_PROJECT_ID) {
+  console.error('❌ project_id 不一致のため停止します（誤実行防止）。')
+  console.error(`   EXPECTED_PROJECT_ID : ${EXPECTED_PROJECT_ID}`)
+  console.error(`   service account     : ${serviceAccount.project_id}`)
+  console.error(`   service account file: ${SERVICE_ACCOUNT_PATH}`)
+  process.exit(1)
+}
+
+const CUTOVER_BEFORE = process.env.CUTOVER_BEFORE
+if (!CUTOVER_BEFORE) {
+  console.error('❌ CUTOVER_BEFORE=YYYY-MM-DD は必須です（巻き添え防止）。')
+  console.error('   orderDate < 指定日 の orders のみを対象にする境界。')
+  console.error('   例: CUTOVER_BEFORE=2026-04-18')
+  process.exit(1)
+}
+if (!/^\d{4}-\d{2}-\d{2}$/.test(CUTOVER_BEFORE)) {
+  console.error(`❌ CUTOVER_BEFORE の形式が不正: "${CUTOVER_BEFORE}" (期待: YYYY-MM-DD)`)
+  process.exit(1)
+}
+const CUTOFF_DATE = new Date(`${CUTOVER_BEFORE}T00:00:00+09:00`)
+if (Number.isNaN(CUTOFF_DATE.getTime())) {
+  console.error(`❌ CUTOVER_BEFORE のパースに失敗: "${CUTOVER_BEFORE}"`)
+  process.exit(1)
+}
+
+initializeApp({ credential: cert(serviceAccount), projectId: serviceAccount.project_id })
 const db = getFirestore()
 
 const DRY_RUN = process.env.DRY_RUN !== 'false'
 const OPERATOR = process.env.OPERATOR || 'unknown'
 const COMPANY_FILTER = process.env.COMPANY || null // 'rt' | 'rc' | null（全件）
+const FORCE_RERUN = process.env.FORCE_RERUN === 'true'
 const LOG_COLLECTION = 'cutoverLogs'
 const BATCH_SIZE = 400 // Firestore 500件制限に余裕を持たせる
+
+console.log('========================================')
+console.log('  cutover-orders.mjs')
+console.log(`  project_id        : ${serviceAccount.project_id}`)
+console.log(`  client_email      : ${serviceAccount.client_email}`)
+console.log(`  CUTOVER_BEFORE    : ${CUTOVER_BEFORE} (orderDate < ${CUTOFF_DATE.toISOString()})`)
+console.log(`  mode              : ${DRY_RUN ? 'DRY_RUN' : '本番'}`)
+console.log(`  operator          : ${OPERATOR}`)
+console.log(`  company filter    : ${COMPANY_FILTER || 'all'}`)
+console.log(`  FORCE_RERUN       : ${FORCE_RERUN}`)
+console.log('========================================\n')
 
 async function fetchTargets() {
   let q = db.collection('orders')
   if (COMPANY_FILTER) {
-    // orders に company field が入っていない古いデータも存在しうるので片方ずつ調査推奨
+    // ⚠️ 古いデータで company field 未設定のものは対象外になる。
+    //    注意喚起のためログにも出す。
+    console.warn(`⚠️  COMPANY フィルタ有効: where('company', '==', '${COMPANY_FILTER}')`)
+    console.warn('   company field が未設定の doc は対象外になります。')
     q = q.where('company', '==', COMPANY_FILTER)
   }
+  // orderDate < CUTOFF_DATE のみ対象
+  q = q.where('orderDate', '<', Timestamp.fromDate(CUTOFF_DATE))
   const snap = await q.get()
-  // 既に isDeprecated=true になっているものは除外（再実行安全）
+  // 既に isDeprecated=true のものは除外（再実行安全）
   return snap.docs.filter((d) => d.data().isDeprecated !== true)
+}
+
+/** cutoverLogs に過去の本番実行履歴があるか確認（二度打ち防止用） */
+async function hasPreviousProductionRun() {
+  try {
+    const snap = await db.collection(LOG_COLLECTION)
+      .where('type', '==', 'orders-cutover')
+      .where('mode', '==', 'production')
+      .get()
+    // updatedCount > 0 の履歴を本番実行とみなす
+    return snap.docs.some((d) => (d.data().updatedCount || 0) > 0)
+  } catch (e) {
+    console.warn('⚠️  cutoverLogs 照会失敗（二度打ちチェックスキップ）:', e.message)
+    return false
+  }
 }
 
 async function writeAuditLog({ mode, targetCount, updated, failed, deprecatedAt }) {
@@ -68,11 +144,13 @@ async function writeAuditLog({ mode, targetCount, updated, failed, deprecatedAt 
       deprecatedAt, // スクリプト実行時刻と同じ（serverTimestamp）
       operator: OPERATOR,
       companyFilter: COMPANY_FILTER || 'all',
+      cutoverBefore: CUTOVER_BEFORE,
+      expectedProjectId: EXPECTED_PROJECT_ID,
       targetCount,
       updatedCount: updated,
       failedCount: failed.length,
       failedIds: failed.map((f) => f.id).slice(0, 200),
-      scriptVersion: '2026-04-18.v1',
+      scriptVersion: '2026-04-24.v2',
     })
     console.log(`\n📝 監査ログ保存: ${LOG_COLLECTION}/${ref.id}`)
     return ref.id
@@ -83,21 +161,32 @@ async function writeAuditLog({ mode, targetCount, updated, failed, deprecatedAt 
 }
 
 async function main() {
+  // 二度打ち防止
+  const hadPrevious = await hasPreviousProductionRun()
+  if (hadPrevious) {
+    if (!DRY_RUN && !FORCE_RERUN) {
+      console.error('❌ 過去に本番実行済みです（cutoverLogs に production 履歴あり）。')
+      console.error('   本当に再実行が必要な場合のみ FORCE_RERUN=true を付けてください。')
+      process.exit(1)
+    }
+    console.log(`ℹ️  cutoverLogs に本番実行履歴あり（FORCE_RERUN=${FORCE_RERUN}）`)
+  } else {
+    console.log('ℹ️  cutoverLogs に本番実行履歴なし（初回実行相当）')
+  }
+
   if (DRY_RUN) {
     console.log('🧪 DRY RUN モード（実際には更新しません）')
     console.log('   本番: DRY_RUN=false OPERATOR="署名" node scripts/cutover-orders.mjs\n')
   } else {
-    console.log('⚠️  本番モード：既存 orders 全件に isDeprecated=true を付与します')
-    console.log(`   OPERATOR=${OPERATOR}`)
-    console.log(`   COMPANY=${COMPANY_FILTER || 'all'}\n`)
+    console.log('⚠️  本番モード：対象 orders に isDeprecated=true を付与します\n')
   }
 
   console.log('🔍 対象受注を集計中...')
   const targets = await fetchTargets()
-  console.log(`  対象: ${targets.length} 件（既に isDeprecated=true のものはスキップ済）`)
+  console.log(`  対象: ${targets.length} 件（orderDate < ${CUTOVER_BEFORE} かつ isDeprecated 未設定）`)
 
   if (targets.length === 0) {
-    console.log('\n✅ 対象なし。全件 cutover 済みです。')
+    console.log('\n✅ 対象なし。全件 cutover 済み、または境界以降のデータのみです。')
     if (!DRY_RUN) {
       await writeAuditLog({ mode: 'production', targetCount: 0, updated: 0, failed: [], deprecatedAt: null })
     }
@@ -154,11 +243,11 @@ async function main() {
 
   await writeAuditLog({ mode: 'production', targetCount: targets.length, updated, failed, deprecatedAt: new Date().toISOString() })
 
-  // 検証：isDeprecated=false が残っていないか
-  console.log('\n🔍 検証: isDeprecated 未設定が残っていないか...')
+  // 検証：isDeprecated=false が残っていないか（CUTOVER_BEFORE 境界内で）
+  console.log('\n🔍 検証: 境界内の isDeprecated 未設定が残っていないか...')
   const remain = await fetchTargets()
   if (remain.length === 0) {
-    console.log('  ✅ isDeprecated 未設定 0件')
+    console.log('  ✅ 境界内の isDeprecated 未設定 0件')
   } else {
     console.log(`  ⚠️  未設定 ${remain.length} 件残存 — 再実行してください`)
   }
