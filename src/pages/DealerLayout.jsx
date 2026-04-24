@@ -1,5 +1,7 @@
 import { useState, useEffect } from 'react'
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
+import { collection, getDocs, query, where } from 'firebase/firestore'
+import { db } from '../lib/firebase.js'
 import { useAuth } from '../contexts/AuthContext.jsx'
 
 const baseLink = 'block rounded-lg px-3 py-2.5 text-sm font-medium transition-colors'
@@ -22,14 +24,40 @@ function Item({ to, label, onClick, end }) {
 export default function DealerLayout() {
   const { profile, logout, isImpersonating, impersonation, isDealerStaff } = useAuth()
   const [menuOpen, setMenuOpen] = useState(false)
+  const [kbGroup, setKbGroup] = useState(null) // 'A' | 'B' | 'C' | null（未取得）
   const location = useLocation()
 
   useEffect(() => {
     setMenuOpen(false)
   }, [location.pathname])
 
+  // 所属代理店の kbGroup を allowedEmails から取得（メニュー表示制御用）
+  useEffect(() => {
+    const code = profile?.dealerCode
+    if (!code) { setKbGroup(null); return }
+    let cancelled = false
+    ;(async () => {
+      try {
+        const snap = await getDocs(
+          query(collection(db, 'allowedEmails'), where('dealerCode', '==', code)),
+        )
+        // 同 dealerCode 配下に複数行（owner+staff 等）ある場合に備えて kbGroup を持つ行を採用
+        const docWithKb = snap.docs.find((d) => d.data().kbGroup)
+        if (!cancelled) setKbGroup(docWithKb?.data().kbGroup || null)
+      } catch (e) {
+        console.warn('[DealerLayout] kbGroup 取得失敗:', e.message)
+        if (!cancelled) setKbGroup(null)
+      }
+    })()
+    return () => { cancelled = true }
+  }, [profile?.dealerCode])
+
   const closeMenu = () => setMenuOpen(false)
   const companyName = profile?.companyName || ''
+
+  // 請求書一覧は kbGroup === 'C'（請求書方式の代理店）のみ表示
+  // kbGroup='A'/'B'（キックバック方式）や未取得は非表示にする
+  const showInvoices = kbGroup === 'C'
 
   const navItems = (
     <>
@@ -37,7 +65,9 @@ export default function DealerLayout() {
       <Item to="/dealer/dashboard-exec" label="経営ダッシュボード" onClick={closeMenu} />
       <Item to="/dealer/salons" label="所属サロン管理" onClick={closeMenu} />
       <Item to="/dealer/orders" label="注文一覧" onClick={closeMenu} />
-      <Item to="/dealer/invoices" label="請求書一覧" onClick={closeMenu} />
+      {showInvoices && (
+        <Item to="/dealer/invoices" label="請求書一覧" onClick={closeMenu} />
+      )}
       <Item to="/dealer/kickbacks" label="清算書一覧" onClick={closeMenu} />
       <Item to="/dealer/chat" label="チャット" onClick={closeMenu} />
       <Item to="/dealer/documents" label="資料ダウンロード" onClick={closeMenu} />
