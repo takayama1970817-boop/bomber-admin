@@ -31,6 +31,7 @@ import {
 } from 'firebase-admin/firestore'
 import { BCART_BASE, getBcartToken } from './_env.mjs'
 import { normalizeCompanyName } from '../src/lib/nameNormalize.js'
+import { buildDealerCodeMap, resolveDealerCode } from '../src/lib/dealerCodeMapping.js'
 
 // companyNameKey の未知ケースプレースホルダ。集計時に __unknown__ をまとめて扱う。
 const UNKNOWN_COMPANY_KEY = '__unknown__'
@@ -330,6 +331,15 @@ async function main() {
     if (data.name) salonMap[data.name] = d.id
   })
 
+  // 4b. dealerCode マッピング（Bカート 親会員 ID → アプリ dealerCode）
+  // allowedEmails (role=dealer) の bcartParentId / dealerCode から構築。
+  // 既知マッピング: J0016=v1, J0017=v2, ..., J0021=v6
+  // 未マッピング v 系は fail-closed（dealerCode を書き込まない）
+  console.log('   dealerCode マッピング構築中...')
+  const allowedSnap = await db.collection('allowedEmails').where('role', '==', 'dealer').get()
+  const dealerCodeMap = buildDealerCodeMap(allowedSnap.docs.map((d) => d.data()))
+  console.log(`   登録 dealer: ${allowedSnap.size} 件 / マッピング: ${dealerCodeMap.byBcartParent.size} 件\n`)
+
   // 5. Firestore書き込み
   const dryLabel = dryRun ? '（DRY_RUN: 書き込まず集計のみ）' : ''
   console.log(`4. Firestore書き込み${dryRun ? '（シミュレーション）' : ''}...${dryLabel}`)
@@ -353,11 +363,12 @@ async function main() {
     const companyNameKey = normalizeCompanyName(companyName) || UNKNOWN_COMPANY_KEY
 
     // orders.read strict 化に備え、Bカート側の customer_parent_id を dealerCode として刻む。
-    // ロジックは src/lib/dealerCodeResolver.js の resolveDealerCodeFromBcartOrder と同一。
-    // Node.js スクリプトから frontend lib を import できないため、ここではインライン化する。
-    const dealerCode = String(
+    // dealerCodeMap でマッピング層を経由（v1 → J0016 等）。
+    // 未マッピング v 系は resolveDealerCode が '' を返す（fail-closed）。
+    const rawParent = String(
       order.customer_parent_id ?? order.parent_id ?? order.parent_member_id ?? '',
     ).trim()
+    const dealerCode = resolveDealerCode(rawParent, dealerCodeMap)
 
     const items = (prodMap[order.id] || []).map((p) => ({
       name: p.product_name || '',

@@ -22,6 +22,7 @@ import { fetchAllOrders, fetchAllOrderProducts, fetchOrdersSince } from '../lib/
 import { resolveDealerCodeFromBcartOrder } from '../lib/dealerCodeResolver.js'
 import { filterValidOrders, isValidOrder } from '../lib/ordersFilter.js'
 import { normalizeCompanyName } from '../lib/nameNormalize.js'
+import { buildDealerCodeMap } from '../lib/dealerCodeMapping.js'
 
 // companyNameKey の未知ケースプレースホルダ（scripts/bcart-sync.mjs と一致）
 const UNKNOWN_COMPANY_KEY = '__unknown__'
@@ -124,6 +125,15 @@ export default function BcartImport() {
         if (data.name) salonMap[data.name] = d.id
       })
 
+      // dealerCode マッピング（Bカート 親会員 ID → アプリ dealerCode）
+      // allowedEmails (role=dealer) の bcartParentId / dealerCode から構築。
+      // 既知マッピング: J0016=v1, ..., J0021=v6
+      // 未マッピング v 系は fail-closed（dealerCode を書き込まない）
+      const allowedEmailsSnap = await getDocs(collection(db, 'allowedEmails'))
+      const dealerCodeMap = buildDealerCodeMap(
+        allowedEmailsSnap.docs.map((d) => d.data()).filter((d) => d.role === 'dealer'),
+      )
+
       let imported = 0
       let promoted = 0
       let skipped = 0
@@ -139,7 +149,8 @@ export default function BcartImport() {
           const companyName = order.customer_comp_name || '（不明）'
           // 集計・検索用の正規化キー（生の companyName は表示用に維持）
           const companyNameKey = normalizeCompanyName(companyName) || UNKNOWN_COMPANY_KEY
-          const dealerCode = resolveDealerCodeFromBcartOrder(order)
+          // Bカート customer_parent_id → アプリ dealerCode（マッピング層経由）
+          const dealerCode = resolveDealerCodeFromBcartOrder(order, dealerCodeMap)
 
           const items = (prodMap[order.id] || []).map((p) => ({
             name: p.product_name || '',
@@ -321,6 +332,14 @@ export default function BcartImport() {
         if (data.name) salonMap[data.name] = d.id
       })
 
+      // dealerCode マッピング（Bカート 親会員 ID → アプリ dealerCode）
+      // 既知マッピング: J0016=v1, ..., J0021=v6
+      // 未マッピング v 系は fail-closed
+      const allowedEmailsSnap = await getDocs(collection(db, 'allowedEmails'))
+      const dealerCodeMap = buildDealerCodeMap(
+        allowedEmailsSnap.docs.map((d) => d.data()).filter((d) => d.role === 'dealer'),
+      )
+
       // バッチ書き込み（500件制限があるので分割）
       const batchSize = 200
       for (let i = 0; i < apiOrders.length; i += batchSize) {
@@ -332,7 +351,8 @@ export default function BcartImport() {
           const companyName = order.customer_comp_name || '（不明）'
           // 集計・検索用の正規化キー（生の companyName は表示用に維持）
           const companyNameKey = normalizeCompanyName(companyName) || UNKNOWN_COMPANY_KEY
-          const dealerCode = resolveDealerCodeFromBcartOrder(order)
+          // Bカート customer_parent_id → アプリ dealerCode（マッピング層経由）
+          const dealerCode = resolveDealerCodeFromBcartOrder(order, dealerCodeMap)
 
           const items = (prodMap[order.id] || []).map((p) => ({
             name: p.product_name || '',
