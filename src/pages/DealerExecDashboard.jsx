@@ -136,7 +136,16 @@ export default function DealerExecDashboard() {
     return () => { cancelled = true }
   }, [profile?.dealerCode])
 
-  // Bcart 名簿を遅延取得（一覧クリック時に呼ぶ）
+  // 起動時に Bcart 名簿をバックグラウンド取得（カード/一覧の件数が dedup 結果で即時一致するため）
+  useEffect(() => {
+    const code = profile?.dealerCode
+    if (!code) return
+    // localStorage キャッシュがあれば即時反映、無ければ数秒後に反映
+    ensureBcartNames()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [profile?.dealerCode])
+
+  // Bcart 名簿を遅延取得（一覧クリック時 / マウント時）
   const ensureBcartNames = async () => {
     const code = profile?.dealerCode
     if (!code || bcartNames || bcartLoading) return
@@ -192,10 +201,76 @@ export default function DealerExecDashboard() {
     return s
   }, [managedSalons])
 
+  // サロン単位の重複解消リスト（サロン名 正規化キーで1行=1サロン）
+  // 同名複数 customer_id は、優先度「最終注文日 → 累計売上 → customerId（大きい=新しい）」で1件に集約。
+  // 古い customer_id 側は非表示（hiddenIds に記録）。
+  const uniqueSalons = useMemo(() => {
+    if (!Array.isArray(bcartRecords) || bcartRecords.length === 0) return null
+    const groups = new Map() // key → records[]
+    const anonymous = []
+    for (const rec of bcartRecords) {
+      const nm = (rec.name || '').trim()
+      if (!nm) {
+        anonymous.push(rec); continue
+      }
+      const key = normalizeCompanyName(nm)
+      if (!key) { anonymous.push(rec); continue }
+      if (!groups.has(key)) groups.set(key, [])
+      groups.get(key).push(rec)
+    }
+    const rows = []
+    for (const [key, recs] of groups) {
+      const s = salonIndex.get(key)
+      const lastOrderMs = s?.lastOrderDate?.getTime?.() || 0
+      const cumulative = s?.cumulativeSales || 0
+      // salonIndex は name 単位でマージ済みなので同一値だが、将来 customer_id 単位集計にした際に備えてロジックを記述
+      const sorted = [...recs].sort((a, b) => {
+        // 1. 最終注文日 desc（現状は全員同値）
+        const al = lastOrderMs, bl = lastOrderMs
+        if (al !== bl) return bl - al
+        // 2. 累計売上 desc（現状は全員同値）
+        const ac = cumulative, bc = cumulative
+        if (ac !== bc) return bc - ac
+        // 3. customerId desc（大きい=新しい）
+        const ai = Number(a.customerId) || 0
+        const bi = Number(b.customerId) || 0
+        return bi - ai
+      })
+      const best = sorted[0]
+      const hidden = sorted.slice(1)
+      rows.push({
+        key,
+        rec: best,
+        name: best.name,
+        customerId: best.customerId || '',
+        bcartStatus: best.status || '',
+        groupCount: recs.length,
+        hiddenIds: hidden.map((r) => r.customerId).filter(Boolean),
+      })
+    }
+    // 名称未設定は customerId 単独で1行ずつ保持
+    for (const a of anonymous) {
+      const pseudoKey = `anon:${a.customerId || Math.random().toString(36).slice(2)}`
+      rows.push({
+        key: pseudoKey,
+        rec: a,
+        name: '',
+        customerId: a.customerId || '',
+        bcartStatus: a.status || '',
+        groupCount: 1,
+        hiddenIds: [],
+      })
+    }
+    return rows
+  }, [bcartRecords, salonIndex])
+
   // 各指標の値
-  // 「これまでの取引サロン」は Bcart 親=代理店 の会員数（snapshot キャッシュ）を 1次に。
-  // snapshot 取得前 / 失敗時は orders ユニーク（過小評価だがフォールバック）。
-  const allTimeSalonCount = snapshotTotalSalonCount ?? salonIndex.size
+  // 「これまでの取引サロン」はサロン単位（重複名マージ済み）で表示。
+  //   優先度:
+  //     1. uniqueSalons.length（Bcart 名簿から dedup した件数）
+  //     2. snapshotTotalSalonCount（Bcart raw カウント、代替表示）
+  //     3. salonIndex.size（orders ユニーク、最終フォールバック）
+  const allTimeSalonCount = (uniqueSalons?.length ?? null) ?? snapshotTotalSalonCount ?? salonIndex.size
   const dealerSalonsCount = managedKeys.size
   const currentActiveCount = useMemo(
     () => [...salonIndex.values()].filter((s) => s.currentSales > 0).length,
@@ -223,23 +298,23 @@ export default function DealerExecDashboard() {
       return '未発注'
     }
     if (selectedListKey === 'all') {
-      // Bcart records があれば 1 行 = 1 顧客で表示（重複名・空名・無効も保持）
-      if (Array.isArray(bcartRecords) && bcartRecords.length > 0) {
-        return bcartRecords.map((rec) => {
-          const rawName = rec.name || ''
-          const key = normalizeCompanyName(rawName)
-          const s = key ? salonIndex.get(key) : null
+      // uniqueSalons があれば 1 行 = 1 サロン で表示
+      if (Array.isArray(uniqueSalons) && uniqueSalons.length > 0) {
+        return uniqueSalons.map((u) => {
+          const rawName = u.name || ''
+          const s = u.key && !u.key.startsWith('anon:') ? salonIndex.get(u.key) : null
           const displayName = rawName || '名称未設定'
           const base = s
             ? toRow(s, { state: s.currentSales > 0 ? '稼働' : (s.cumulativeSales > 0 ? '休眠' : '未発注') })
-            : { key: rec.customerId || rawName, displayName, lastOrderDate: null, currentSales: 0, cumulativeSales: 0, orderCount: 0, state: '未発注' }
+            : { key: u.key, displayName, lastOrderDate: null, currentSales: 0, cumulativeSales: 0, orderCount: 0, state: '未発注' }
           return {
             ...base,
-            // 顧客ID で1行1顧客に（重複名も区別可能）
-            key: rec.customerId ? `cust:${rec.customerId}` : (base.key || displayName),
+            key: u.key,
             displayName,
-            customerId: rec.customerId || '',
-            bcartStatus: rec.status || '',
+            customerId: u.customerId || '',
+            bcartStatus: u.bcartStatus || '',
+            groupCount: u.groupCount,
+            hiddenIds: u.hiddenIds,
           }
         }).sort((a, b) => (b.lastOrderDate?.getTime() || 0) - (a.lastOrderDate?.getTime() || 0))
       }
@@ -278,36 +353,35 @@ export default function DealerExecDashboard() {
       })
     }
     if (selectedListKey === 'dormant') {
-      // Bcart records があれば「全顧客 − 今月稼働」を 1行=1顧客で表示
-      if (Array.isArray(bcartRecords) && bcartRecords.length > 0) {
+      // uniqueSalons ベースで「全サロン − 今月稼働」を 1行=1サロン
+      if (Array.isArray(uniqueSalons) && uniqueSalons.length > 0) {
         const rows = []
-        for (const rec of bcartRecords) {
-          const rawName = rec.name || ''
-          const key = normalizeCompanyName(rawName)
-          const s = key ? salonIndex.get(key) : null
-          if (s && s.currentSales > 0) continue // 今月稼働は除外
-          const displayName = rawName || '名称未設定'
+        for (const u of uniqueSalons) {
+          const s = u.key && !u.key.startsWith('anon:') ? salonIndex.get(u.key) : null
+          if (s && s.currentSales > 0) continue
+          const displayName = u.name || '名称未設定'
           const base = s
             ? toRow(s, { state: s.cumulativeSales > 0 ? '休眠' : '未発注' })
-            : { key: rec.customerId || rawName, displayName, lastOrderDate: null, currentSales: 0, cumulativeSales: 0, orderCount: 0, state: '未発注' }
+            : { key: u.key, displayName, lastOrderDate: null, currentSales: 0, cumulativeSales: 0, orderCount: 0, state: '未発注' }
           rows.push({
             ...base,
-            key: rec.customerId ? `cust:${rec.customerId}` : (base.key || displayName),
+            key: u.key,
             displayName,
-            customerId: rec.customerId || '',
-            bcartStatus: rec.status || '',
+            customerId: u.customerId || '',
+            bcartStatus: u.bcartStatus || '',
+            groupCount: u.groupCount,
+            hiddenIds: u.hiddenIds,
           })
         }
         return rows.sort((a, b) => (b.lastOrderDate?.getTime() || 0) - (a.lastOrderDate?.getTime() || 0))
       }
-      // フォールバック: orders 履歴のみから
       return [...salonIndex.values()]
         .filter((s) => s.cumulativeSales > 0 && s.currentSales === 0)
         .map((s) => toRow(s, { state: managedKeys.has(s.key) ? '休眠' : '管理対象外' }))
         .sort((a, b) => (b.lastOrderDate?.getTime() || 0) - (a.lastOrderDate?.getTime() || 0))
     }
     return []
-  }, [selectedListKey, salonIndex, managedKeys, bcartNames, bcartRecords])
+  }, [selectedListKey, salonIndex, managedKeys, bcartNames, bcartRecords, uniqueSalons])
 
   const listTitle = {
     all: 'これまでの取引サロン',
@@ -506,6 +580,14 @@ export default function DealerExecDashboard() {
                             {r.bcartStatus && r.bcartStatus !== '' && (
                               <span className="ml-2 rounded bg-red-50 px-1.5 py-0.5 text-[10px] text-red-700">
                                 {r.bcartStatus}
+                              </span>
+                            )}
+                            {r.groupCount > 1 && (
+                              <span
+                                className="ml-2 rounded bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-500"
+                                title={`同一サロン名の他 customerId: ${(r.hiddenIds || []).join(', ') || '—'}（古い customer_id 側は非表示）`}
+                              >
+                                同名{r.groupCount}件を統合
                               </span>
                             )}
                           </td>
