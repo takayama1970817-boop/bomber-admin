@@ -37,6 +37,7 @@ export default function DealerExecDashboard() {
   const {
     loading, error, kpis, salons,
     monthlyTrend, productsRanking, statusDistribution,
+    productCoverage,
   } = useDealerDashboard(profile)
 
   const [statusFilter, setStatusFilter] = useState('all')
@@ -147,8 +148,34 @@ export default function DealerExecDashboard() {
               <div className="mb-3 text-sm font-bold text-gray-900">
                 商品別売上 Top 10（{fmtMonth(kpis.curMonth)}）
               </div>
+              {/*
+                商品明細カバレッジ:
+                - 当月 N 件中、何件に items 配列が入っているかを表示
+                - 0/N or 全 doc の半分未満なら「商品明細未取得」と注釈
+                - bcart-sync の --skip-products や、外部経路書込みで items が
+                  欠落している doc が多い場合の判別用
+              */}
+              {productCoverage && productCoverage.total > 0 && (
+                <div className="-mt-2 mb-3 text-[11px] text-gray-500">
+                  {productCoverage.withItems === 0 ? (
+                    <span className="rounded bg-amber-50 px-2 py-0.5 text-amber-700">
+                      ⚠️ 商品明細未取得（0 / {productCoverage.total} 件）— bcart-sync で order_products 取得が必要
+                    </span>
+                  ) : productCoverage.withItems < productCoverage.total ? (
+                    <span className="rounded bg-amber-50 px-2 py-0.5 text-amber-700">
+                      ⚠️ 商品明細 {productCoverage.withItems} / {productCoverage.total} 件のみ取得済み（残りは未取得）
+                    </span>
+                  ) : (
+                    <span className="text-emerald-600">明細取得 {productCoverage.withItems} / {productCoverage.total} 件 ✓</span>
+                  )}
+                </div>
+              )}
               {productsRanking.length === 0 ? (
-                <div className="py-6 text-center text-xs text-gray-400">データなし</div>
+                <div className="py-6 text-center text-xs text-gray-400">
+                  {productCoverage && productCoverage.withItems === 0 && productCoverage.total > 0
+                    ? '商品明細未取得のため Top10 を表示できません'
+                    : 'データなし'}
+                </div>
               ) : (
                 <div className="space-y-1">
                   {productsRanking.map((p, i) => (
