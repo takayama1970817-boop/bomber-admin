@@ -3,6 +3,7 @@ import { collection, getDocs, orderBy, query, where, Timestamp } from 'firebase/
 import { db } from '../lib/firebase.js'
 import { filterValidOrders } from '../lib/ordersFilter.js'
 import { computeOrderStats } from '../lib/orderStats.js'
+import { normalizeCompanyName, pickDisplayName } from '../lib/nameNormalize.js'
 
 /**
  * 代理店ダッシュボード用メトリクス Hook（Phase 3-1 v2）
@@ -118,31 +119,40 @@ function computeMetrics(orders) {
   const curMonthStart = new Date(now.getFullYear(), now.getMonth(), 1)
 
   // サロン別 × 月別 集計
-  const salonMap = new Map()
+  // 表記揺れを吸収するため、グルーピングキーは normalizeCompanyName で正規化する。
+  // 表示名は同一キーに集まったバリアントのうち件数最大のものを採用（pickDisplayName）。
+  // 正規化が空文字（companyName 欠損）になる行は『（不明）』にまとめる。
+  const salonMap = new Map() // key: normalized
   const productMap = new Map() // 商品別
   const monthlyRevenue = new Map() // 月次推移
+  const UNKNOWN_KEY = '__unknown__'
 
   for (const o of orders) {
     const d = orderDateToDate(o.orderDate)
     if (!d) continue
     const m = monthKey(d)
     const total = Number(o.total) || 0
-    const name = o.companyName || '（不明）'
+    const rawName = o.companyName || ''
+    const normKey = normalizeCompanyName(rawName) || UNKNOWN_KEY
 
     // サロン
-    if (!salonMap.has(name)) {
-      salonMap.set(name, {
+    if (!salonMap.has(normKey)) {
+      salonMap.set(normKey, {
         byMonth: {},
         lastOrderDate: d,
         firstOrderDate: d,
         orderCount: 0,
+        // 表示名選定用に raw バリアント別件数を持つ
+        nameCounts: new Map(),
       })
     }
-    const s = salonMap.get(name)
+    const s = salonMap.get(normKey)
     s.byMonth[m] = (s.byMonth[m] || 0) + total
     s.orderCount += 1
     if (d > s.lastOrderDate) s.lastOrderDate = d
     if (d < s.firstOrderDate) s.firstOrderDate = d
+    const displayCandidate = rawName || '（不明）'
+    s.nameCounts.set(displayCandidate, (s.nameCounts.get(displayCandidate) || 0) + 1)
 
     // 月次推移（全サロン合算）
     monthlyRevenue.set(m, (monthlyRevenue.get(m) || 0) + total)
@@ -170,7 +180,7 @@ function computeMetrics(orders) {
   let activeCount = 0
   let newSalonCount = 0
 
-  for (const [name, s] of salonMap.entries()) {
+  for (const [, s] of salonMap.entries()) {
     const cur = s.byMonth[curMonth] || 0
     const prev = s.byMonth[prevMonth] || 0
     currentSales += cur
@@ -182,9 +192,10 @@ function computeMetrics(orders) {
     const diffRate = prev > 0 ? (cur - prev) / prev : (cur > 0 ? null : null)
     const daysSinceLast = daysSince(s.lastOrderDate, now)
     const status = judgeStatus(diffRate, daysSinceLast)
+    const displayName = pickDisplayName(s.nameCounts.entries())
 
     salons.push({
-      companyName: name,
+      companyName: displayName,
       currentSales: cur,
       prevSales: prev,
       diff: cur - prev,

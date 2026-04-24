@@ -22,6 +22,7 @@
  */
 import { filterValidOrders } from './ordersFilter.js'
 import { computeOrderStats } from './orderStats.js'
+import { normalizeCompanyName } from './nameNormalize.js'
 
 const UNASSIGNED = '（未割当）'
 
@@ -66,7 +67,12 @@ export function aggregateOrdersByDealer(rawOrders, opts = {}) {
     }
     groups.get(code).push(o)
     const m = meta.get(code)
-    if (o.companyName) m.salonNames.add(o.companyName)
+    // 配下サロン数は表記揺れを吸収して distinct 化する
+    // （"Salon'de  A" と "salon'de  A" を同一サロンとしてカウント）
+    if (o.companyName) {
+      const k = normalizeCompanyName(o.companyName)
+      if (k) m.salonNames.add(k)
+    }
     const d = toDate(o.orderDate)
     if (d && (!m.lastOrderDate || d > m.lastOrderDate)) m.lastOrderDate = d
   }
