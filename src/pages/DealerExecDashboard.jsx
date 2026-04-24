@@ -1,7 +1,10 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
+import { collection, getDocs, query, where } from 'firebase/firestore'
+import { db } from '../lib/firebase.js'
 import { useAuth } from '../contexts/AuthContext.jsx'
 import useDealerDashboard, { activeRateColor, STATUS_BADGE } from '../hooks/useDealerDashboard.js'
+import { normalizeCompanyName } from '../lib/nameNormalize.js'
 
 const fmtYen = (n) => `¥${Math.round(Number(n) || 0).toLocaleString()}`
 const fmtPct = (n) => (n == null ? '—' : `${(n * 100).toFixed(1)}%`)
@@ -41,6 +44,46 @@ export default function DealerExecDashboard() {
   } = useDealerDashboard(profile)
 
   const [statusFilter, setStatusFilter] = useState('all')
+
+  // サロン母集団 指標（対象サロン=dealerSalons、総サロン=全履歴ユニーク companyName）
+  const [dealerSalonsCount, setDealerSalonsCount] = useState(null)
+  const [allTimeSalonCount, setAllTimeSalonCount] = useState(null)
+
+  useEffect(() => {
+    const code = profile?.dealerCode
+    if (!code) {
+      setDealerSalonsCount(null)
+      setAllTimeSalonCount(null)
+      return
+    }
+    let cancelled = false
+    ;(async () => {
+      try {
+        // 対象サロン（dealerSalons 登録行の件数）
+        const dsSnap = await getDocs(
+          query(collection(db, 'dealerSalons'), where('dealerCode', '==', code)),
+        )
+        if (!cancelled) setDealerSalonsCount(dsSnap.size)
+      } catch (e) {
+        console.warn('[DealerExec] dealerSalons 取得失敗:', e.message)
+      }
+      try {
+        // 総サロン数（全履歴）: orders の companyName ユニーク数
+        const ordSnap = await getDocs(
+          query(collection(db, 'orders'), where('dealerCode', '==', code)),
+        )
+        const names = new Set()
+        ordSnap.docs.forEach((d) => {
+          const nm = normalizeCompanyName(d.data().companyName)
+          if (nm) names.add(nm)
+        })
+        if (!cancelled) setAllTimeSalonCount(names.size)
+      } catch (e) {
+        console.warn('[DealerExec] 全履歴サロン取得失敗:', e.message)
+      }
+    })()
+    return () => { cancelled = true }
+  }, [profile?.dealerCode])
 
   const filteredSalons = statusFilter === 'all'
     ? salons
@@ -103,17 +146,74 @@ export default function DealerExecDashboard() {
                     : 'text-gray-500'
               }
             />
-            <KpiCard
-              label="稼働率"
-              value={fmtPct(kpis.activeRate)}
-              sub={`${kpis.activeCount} / ${kpis.totalSalonCount} サロン`}
-              subColor={activeRateColor(kpis.activeRate)}
-            />
+            {/* 稼働率（対象=dealerSalons ベース。未取得時は発注実績ベース） */}
+            {(() => {
+              const denom = dealerSalonsCount ?? kpis.totalSalonCount
+              const rate = denom > 0 ? kpis.activeCount / denom : 0
+              return (
+                <KpiCard
+                  label="稼働率（対象ベース）"
+                  value={fmtPct(rate)}
+                  sub={`アクティブ ${kpis.activeCount} / 対象 ${denom} 店`}
+                  subColor={activeRateColor(rate)}
+                />
+              )
+            })()}
             <KpiCard
               label="アクティブサロン数"
               value={`${kpis.activeCount} 店`}
-              sub={`配下 ${kpis.totalSalonCount} 店中`}
+              sub={
+                allTimeSalonCount != null
+                  ? `対象 ${dealerSalonsCount ?? '—'} / 総 ${allTimeSalonCount} 店`
+                  : `配下 ${kpis.totalSalonCount} 店中`
+              }
             />
+          </div>
+
+          {/* サロン母集団 内訳（2026-04-24 追加） */}
+          <div className="rounded-2xl border border-gray-200 bg-white p-5">
+            <div className="mb-3 flex items-baseline justify-between">
+              <div className="text-sm font-bold text-gray-900">サロン構成</div>
+              <div className="text-[11px] text-gray-400">母集団を明示して稼働率の誤解を防ぐ指標</div>
+            </div>
+            <div className="grid grid-cols-2 gap-4 sm:grid-cols-5">
+              <div>
+                <div className="text-xs text-gray-500">総サロン数（全履歴）</div>
+                <div className="mt-1 text-lg font-bold text-gray-900">
+                  {allTimeSalonCount != null ? `${allTimeSalonCount} 店` : '—'}
+                </div>
+              </div>
+              <div>
+                <div className="text-xs text-gray-500">対象サロン（dealerSalons）</div>
+                <div className="mt-1 text-lg font-bold text-gray-900">
+                  {dealerSalonsCount != null ? `${dealerSalonsCount} 店` : '—'}
+                </div>
+              </div>
+              <div>
+                <div className="text-xs text-gray-500">アクティブ（当月）</div>
+                <div className="mt-1 text-lg font-bold text-indigo-900">
+                  {kpis.activeCount} 店
+                </div>
+              </div>
+              <div>
+                <div className="text-xs text-gray-500">稼働率（対象ベース）</div>
+                <div className="mt-1 text-lg font-bold text-gray-900">
+                  {(() => {
+                    const denom = dealerSalonsCount ?? kpis.totalSalonCount
+                    const rate = denom > 0 ? kpis.activeCount / denom : 0
+                    return fmtPct(rate)
+                  })()}
+                </div>
+              </div>
+              <div>
+                <div className="text-xs text-gray-500">全体稼働率（参考）</div>
+                <div className="mt-1 text-lg font-bold text-gray-500">
+                  {allTimeSalonCount && allTimeSalonCount > 0
+                    ? fmtPct(kpis.activeCount / allTimeSalonCount)
+                    : '—'}
+                </div>
+              </div>
+            </div>
           </div>
 
           {/* 月次売上推移 */}
