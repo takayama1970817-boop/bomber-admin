@@ -190,12 +190,18 @@ async function main() {
     console.log(`   直近${RECENT_DAYS}日モード cutoff (>=): ${cutoffStr}`)
     console.log(`   開始位置を二分探索中...`)
     const { startOffset: so, total: t } = await findStartOffsetByDate(cutoffStr)
-    startOffset = so
-    console.log(`   開始offset: ${startOffset} / 全${t}件`)
+    // 二分探索は「orders[0].ordered_at >= cutoffStr の最初のページ」を返すが、
+    // 1 ページ内に日付境界がまたがるケース（境界手前ページの後ろ半分が
+    // cutoffStr 以降）で取りこぼしが発生する。1 ページ手前から走査開始し、
+    // ループ内の inRange フィルタで境界手前 order を skip する。
+    startOffset = Math.max(0, so - PAGE_SIZE)
+    console.log(`   二分探索結果: ${so} → 1ページ戻して開始 offset: ${startOffset} / 全${t}件`)
   } else if (!syncAll) {
     console.log(`   ${TARGET_YEAR}年の開始位置を検索中...`)
-    startOffset = await findYearStartOffset(TARGET_YEAR)
-    console.log(`   開始offset: ${startOffset}`)
+    const so = await findYearStartOffset(TARGET_YEAR)
+    // 同様に 1 ページ戻す（境界手前ページの取りこぼし防止）
+    startOffset = Math.max(0, so - PAGE_SIZE)
+    console.log(`   二分探索結果: ${so} → 1ページ戻して開始 offset: ${startOffset}`)
   }
 
   const yearStart = `${TARGET_YEAR}-01-01`

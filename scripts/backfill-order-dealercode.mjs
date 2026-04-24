@@ -175,8 +175,12 @@ async function buildBcartParentIdMap() {
   if (fromStr) {
     console.log(`   開始位置を二分探索中 (>= ${fromStr})...`)
     const r = await findStartOffsetByDate(fromStr)
-    startOffset = r.startOffset
-    console.log(`   開始offset: ${startOffset} / 全${r.total}件`)
+    // 二分探索は「orders[0].ordered_at >= fromStr の最初のページ」を返すが、
+    // 1 ページ内に日付境界がまたがるケース（境界手前ページの後ろ半分が
+    // fromStr 以降）で取りこぼしが発生する。
+    // そのため 1 ページ手前から走査開始し、ループ内で fromStr フィルタを適用する。
+    startOffset = Math.max(0, r.startOffset - PAGE_SIZE)
+    console.log(`   二分探索結果 offset: ${r.startOffset} → 1ページ戻して開始 offset: ${startOffset} / 全${r.total}件`)
   }
 
   const map = new Map()
@@ -191,6 +195,8 @@ async function buildBcartParentIdMap() {
     const items = data.orders
     if (!items || items.length === 0) break
     for (const o of items) {
+      // 範囲外チェック（下限）: 境界手前ページに含まれる fromStr 以前の order は skip
+      if (fromStr && o.ordered_at < fromStr) continue
       // 範囲外チェック（上限）
       if (toStr && o.ordered_at >= toStr) {
         boundaryReached = true
