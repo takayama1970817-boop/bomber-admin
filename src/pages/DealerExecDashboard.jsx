@@ -320,7 +320,15 @@ export default function DealerExecDashboard() {
     () => [...salonIndex.values()].filter((s) => s.currentSales > 0).length,
     [salonIndex],
   )
-  const dormantCount = Math.max(0, allTimeSalonCount - currentActiveCount)
+  // 休眠候補 = 「状態 !== '稼働'」なサロン
+  //   稼働 = 当月発注あり（currentSales>0）または 最終注文から30日以内
+  //   → 休眠候補には緑バッジが混ざらない
+  const dormantCount = useMemo(() => {
+    if (Array.isArray(uniqueSalons) && uniqueSalons.length > 0) {
+      return uniqueSalons.filter((u) => statusFromDays(u.currentSales, u.lastOrderDate) !== '稼働').length
+    }
+    return Math.max(0, allTimeSalonCount - currentActiveCount)
+  }, [uniqueSalons, allTimeSalonCount, currentActiveCount])
   const showRate = dealerSalonsCount > 0
   const rate = showRate ? currentActiveCount / dealerSalonsCount : null
   const showManagedTile = dealerSalonsCount > 0 // 未設定時はタイル自体を非表示にする
@@ -390,20 +398,18 @@ export default function DealerExecDashboard() {
       })
     }
     if (selectedListKey === 'dormant') {
-      // uniqueSalons ベースで「全サロン − 今月稼働」を 1行=1サロン
-      // ソート: 最終注文が古い順（掘り起こしで優先度を見やすく）、履歴なしは最下位
-      const cmpDormant = (a, b) => {
-        const aDate = a.lastOrderDate?.getTime?.() || null
-        const bDate = b.lastOrderDate?.getTime?.() || null
-        if (aDate == null && bDate == null) return 0
-        if (aDate == null) return 1 // 履歴なしは下
-        if (bDate == null) return -1
-        return aDate - bDate // 古い順 (asc)
+      // 休眠・掘り起こし候補
+      //   除外: 当月発注あり / 最終注文から30日以内（= 状態 '稼働'）
+      //   ソート: 履歴なし・365日以上が先頭、その後は最終注文が古い順
+      const daysOrInf = (d) => {
+        if (!d) return Infinity
+        const n = daysSince(d)
+        return n == null ? Infinity : n
       }
+      const cmpDormant = (a, b) => daysOrInf(b.lastOrderDate) - daysOrInf(a.lastOrderDate)
+
       if (Array.isArray(uniqueSalons) && uniqueSalons.length > 0) {
-        // uniqueSalons は既に orders と merge 済み。currentSales>0（今月稼働）を除外。
         return uniqueSalons
-          .filter((u) => !(u.currentSales > 0))
           .map((u) => ({
             key: u.key,
             displayName: u.displayName,
@@ -417,11 +423,13 @@ export default function DealerExecDashboard() {
             hiddenIds: u.hiddenIds,
             state: statusFromDays(u.currentSales, u.lastOrderDate),
           }))
+          .filter((u) => u.state !== '稼働')
           .sort(cmpDormant)
       }
       return [...salonIndex.values()]
-        .filter((s) => s.cumulativeSales > 0 && s.currentSales === 0)
-        .map((s) => toRow(s, { state: managedKeys.has(s.key) ? stateOf(s) : '管理対象外' }))
+        .map((s) => ({ ...s, state: statusFromDays(s.currentSales, s.lastOrderDate) }))
+        .filter((s) => s.state !== '稼働')
+        .map((s) => toRow(s, { state: s.state }))
         .sort(cmpDormant)
     }
     return []
