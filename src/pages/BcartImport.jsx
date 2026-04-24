@@ -20,6 +20,7 @@ import ReceiptPrintable from '../components/ReceiptPrintable.jsx'
 import { generateReceiptPdf } from '../lib/generateReceiptPdf.js'
 import { fetchAllOrders, fetchAllOrderProducts, fetchOrdersSince } from '../lib/bcartApi.js'
 import { resolveDealerCodeFromBcartOrder } from '../lib/dealerCodeResolver.js'
+import { filterValidOrders, isValidOrder } from '../lib/ordersFilter.js'
 
 /**
  * Bカート受注から dealerCode を正規化して取り出す。
@@ -93,10 +94,12 @@ export default function BcartImport() {
 
       // 既存の注文 (bcartCode / bcartOrderNumber) をマップ化
       // 速報 (bcart-email) 行を昇格更新するため、id と source を保持する
+      // 旧データ (isDeprecated === true) は dedup 対象から除外する（新規取り込み・昇格を阻害しない）
       const existingSnap = await getDocs(collection(db, 'orders'))
       const existingByCode = new Map()
       existingSnap.docs.forEach((d) => {
         const data = d.data()
+        if (!isValidOrder(data)) return
         const entry = { id: d.id, source: data.source || '' }
         if (data.bcartOrderNumber) existingByCode.set(data.bcartOrderNumber, entry)
         if (data.bcartCode) existingByCode.set(data.bcartCode, entry)
@@ -277,10 +280,12 @@ export default function BcartImport() {
 
     try {
       // 既存の注文をマップ化（速報→正式 昇格対応のため id + source を保持）
+      // 旧データ (isDeprecated === true) は dedup 対象から除外する
       const existingSnap = await getDocs(collection(db, 'orders'))
       const existingByCode = new Map()
       existingSnap.docs.forEach((d) => {
         const data = d.data()
+        if (!isValidOrder(data)) return
         const entry = { id: d.id, source: data.source || '' }
         if (data.bcartOrderNumber) existingByCode.set(data.bcartOrderNumber, entry)
         if (data.bcartCode) existingByCode.set(data.bcartCode, entry)
@@ -469,14 +474,17 @@ export default function BcartImport() {
     setChecking(true)
     try {
       // 重複チェック (bcartOrderNumber)
+      // 旧データ (isDeprecated === true) は重複判定の対象外とする
       const dupQ = query(
         collection(db, 'orders'),
         where('bcartOrderNumber', '==', p.order.orderNumber),
       )
       const dupSnap = await getDocs(dupQ)
-      if (!dupSnap.empty) {
-        const d = dupSnap.docs[0]
-        setDuplicateOrder({ id: d.id, ...d.data() })
+      const validDup = dupSnap.docs
+        .map((d) => ({ id: d.id, ...d.data() }))
+        .find(isValidOrder)
+      if (validDup) {
+        setDuplicateOrder(validDup)
       }
 
       // サロン紐付け (会社名 完全一致)

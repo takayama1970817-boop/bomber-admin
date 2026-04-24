@@ -21,6 +21,7 @@ import { generateKickbackPdfBase64 } from '../lib/generateKickbackPdf.js'
 import { generateKickbackPdf } from '../lib/generateKickbackPdf.js'
 import { downloadEml } from '../lib/generateEml.js'
 import { fetchOrdersByMonth, fetchOrderProductsBatch } from '../lib/bcartApi.js'
+import { filterValidOrders } from '../lib/ordersFilter.js'
 
 function fmtYen(n) {
   if (n == null) return '—'
@@ -333,7 +334,9 @@ export default function KickbackManage() {
 
         setSalonLinks(linkSnap.docs.map((d) => ({ id: d.id, ...d.data() })))
 
-        const orders = orderSnap.docs.map((d) => ({ id: d.id, ...d.data() }))
+        // 旧データ (isDeprecated === true) はサロン一覧抽出から除外する。
+        // 売上集計は本画面では Bカート API 経路のため触らない（不変）。
+        const orders = filterValidOrders(orderSnap.docs.map((d) => ({ id: d.id, ...d.data() })))
         setAllOrders(orders)
 
         const names = [...new Set(orders.map((o) => o.companyName).filter(Boolean))]
