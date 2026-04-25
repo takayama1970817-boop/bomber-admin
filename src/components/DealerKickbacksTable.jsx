@@ -7,29 +7,20 @@ import {
   canDownloadKickbackPdf,
   openKickbackPdf,
 } from '../hooks/useDealerKickbacks.js'
-
-const fmtYen = (n) => `¥${Math.round(Number(n) || 0).toLocaleString()}`
+// 横展開 Phase 3（2026-04-25）: 表示フォーマッタ統一
+import { fmtYen, fmtDate } from '../lib/formatters.js'
 
 function fmtMonth(m) {
   if (!m) return '—'
   return String(m).replace('-', '/')
 }
 
-function fmtDate(ts) {
-  if (!ts) return '—'
-  const d = ts.toDate ? ts.toDate() : new Date(ts)
-  if (Number.isNaN(d.getTime())) return '—'
-  return `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')}`
-}
-
+/**
+ * 0 件時の表示は呼び出し元（DealerKickbacks.jsx）の EmptyStateCard に委譲。
+ * このコンポーネントは kickbacks が 1 件以上ある前提で描画する。
+ */
 export default function DealerKickbacksTable({ kickbacks, onSelect }) {
-  if (!kickbacks || kickbacks.length === 0) {
-    return (
-      <div className="rounded-xl border border-dashed border-gray-300 bg-white py-12 text-center text-sm text-gray-400">
-        キックバックデータがありません
-      </div>
-    )
-  }
+  if (!kickbacks || kickbacks.length === 0) return null
 
   return (
     <div className="overflow-hidden rounded-xl border border-gray-200 bg-white">
