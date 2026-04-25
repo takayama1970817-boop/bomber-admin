@@ -1,6 +1,13 @@
 // functions/sendInvoice.js
-// 請求書（グループC代理店向け invoices コレクション）を SendGrid 経由で
-// 送信し、invoiceEmailLogs に監査ログを残す Cloud Function。
+// 請求書（invoices コレクション・全代理店共通）を SendGrid 経由で送信し、
+// invoiceEmailLogs に監査ログを残す Cloud Function。
+//
+// 適用範囲:
+// - 全代理店（KBグループ A / B / C 不問）の請求書を送信できる汎用基盤。
+// - 初期利用対象はグループC（請求書発行・KBなし）だが、関数自体は
+//   invoiceId 単位で動作するため、どのグループの請求書でも送信可能。
+// - 将来的な一括送信は本関数を invoiceId 単位でループ呼び出しすれば実現可能
+//   （sendInvoiceBulk ラッパーを別関数として追加する想定）。
 //
 // 設計判断:
 // - SendGrid を採用（既存の SES フローとは別。inv@royaltrust.jp の認証済み

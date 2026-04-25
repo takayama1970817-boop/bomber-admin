@@ -419,8 +419,9 @@ service cloud.firestore {
     }
 
     // ========================================
-    // invoices コレクション（グループC代理店向け請求書）
-    // admin は全件読み書き。dealer は自社の請求書のみ読める
+    // invoices コレクション（全代理店共通の請求書）
+    // 初期利用対象はグループC（請求書発行・KBなし）だが、データモデル・rules は
+    // 全代理店共通として運用。admin は全件読み書き、dealer は自社のみ読める。
     // ========================================
     match /invoices/{docId} {
       allow read:  if isSignedIn()
