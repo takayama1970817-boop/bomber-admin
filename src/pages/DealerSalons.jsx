@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { collection, getDocs, query, where } from 'firebase/firestore'
-import { db } from '../lib/firebase.js'
+import { httpsCallable } from 'firebase/functions'
+import { db, functions } from '../lib/firebase.js'
 import { useAuth } from '../contexts/AuthContext.jsx'
 import { normalizeCompanyName } from '../lib/nameNormalize.js'
 
@@ -27,6 +28,10 @@ export default function DealerSalons() {
   const [cachedAt, setCachedAt] = useState(null)
   const [lastSyncedAt, setLastSyncedAt] = useState(null) // Bカート → Firestore 最終同期時刻
   const [progress, setProgress] = useState('')
+  // 「最新データ取得（Bカート同期）」用の状態
+  const [bcartSyncing, setBcartSyncing] = useState(false)
+  const [bcartSyncResult, setBcartSyncResult] = useState(null)
+  const [bcartSyncError, setBcartSyncError] = useState(null)
   const [searchParams] = useSearchParams()
   const [selected, setSelected] = useState(searchParams.get('salon'))
 
@@ -186,6 +191,28 @@ export default function DealerSalons() {
     return () => { aliveRef.current = false }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dealerCode])
+
+  // 「最新データ取得」: Cloud Function を叩いて直近 N 日の Bカート 注文を Firestore へ upsert、
+  // 完了後に Firestore 再取得して画面を更新。
+  const runBcartSync = async (days = 7) => {
+    if (!dealerCode || bcartSyncing) return
+    setBcartSyncing(true)
+    setBcartSyncError(null)
+    setBcartSyncResult(null)
+    try {
+      const fn = httpsCallable(functions, 'runIncrementalBcartSync')
+      const res = await fn({ days })
+      const r = res?.data || {}
+      setBcartSyncResult(r)
+      // Firestore を再取得してキャッシュを上書き
+      await loadData(true)
+    } catch (e) {
+      console.warn('runBcartSync error:', e)
+      setBcartSyncError(e?.message || '同期に失敗しました')
+    } finally {
+      setBcartSyncing(false)
+    }
+  }
 
   // サロンごとの集計（O(N+M) 化＋ useMemo で memoize）
   // 旧実装は salons.map 内で orders.filter を呼ぶ O(N×M) で、
@@ -422,15 +449,37 @@ export default function DealerSalons() {
     <div>
       <div className="mb-2 flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-2xl font-bold text-gray-900">所属サロン管理</h1>
-        <button
-          onClick={() => loadData(true)}
-          disabled={loading}
-          className="rounded-lg border border-emerald-300 bg-white px-3 py-1.5 text-xs font-medium text-emerald-700 hover:bg-emerald-50 disabled:opacity-50"
-          title="Firestore 同期済データを再読込（Bカートには問い合わせません）"
-        >
-          🔄 再読込
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => loadData(true)}
+            disabled={loading || bcartSyncing}
+            className="rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+            title="Firestore 同期済データを再読込（Bカートには問い合わせません）"
+          >
+            🔄 再読込
+          </button>
+          <button
+            onClick={() => runBcartSync(7)}
+            disabled={loading || bcartSyncing}
+            className="rounded-lg border border-indigo-500 bg-indigo-600 px-3 py-1.5 text-xs font-bold text-white hover:bg-indigo-700 disabled:opacity-50"
+            title="Bカートから直近7日分の最新注文を取り込み（数十秒かかる場合があります）"
+          >
+            {bcartSyncing ? '⏳ 同期中…' : '⤓ 最新データ取得'}
+          </button>
+        </div>
       </div>
+      {/* 同期結果 / エラー表示 */}
+      {bcartSyncResult && (
+        <div className="mb-3 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-800">
+          ✅ Bカート 同期完了：直近 {bcartSyncResult.sinceDays} 日 / 取得 {bcartSyncResult.bcartFetched} 件 / 自代理店 {bcartSyncResult.matched} 件 / 新規 {bcartSyncResult.created} ・更新 {bcartSyncResult.updated}
+          {bcartSyncResult.failed > 0 && ` / 失敗 ${bcartSyncResult.failed}`}
+        </div>
+      )}
+      {bcartSyncError && (
+        <div className="mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800">
+          ⚠ Bカート 同期に失敗しました: {bcartSyncError}
+        </div>
+      )}
       <p className="mb-1 text-sm text-gray-500">
         {(rawCount || salons.length).toLocaleString()} 社 ／ 累計注文 {totalOrders}件 ／ 累計売上 {fmtYen(totalSales)}
       </p>
