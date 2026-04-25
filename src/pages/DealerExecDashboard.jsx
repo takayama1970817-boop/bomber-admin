@@ -96,12 +96,12 @@ export default function DealerExecDashboard() {
     loading, error, kpis, salons,
     monthlyTrend, productsRanking, statusDistribution,
     productCoverage,
+    allOrders, // PR-A 統合: hook が全期間 orders を返すようになった
   } = useDealerDashboard(profile)
 
   const [statusFilter, setStatusFilter] = useState('all')
 
-  // サロン状況：全履歴 orders + dealerSalons + 月次snapshot を取得
-  const [allOrders, setAllOrders] = useState([])
+  // サロン状況：dealerSalons + 月次snapshot を取得（allOrders は hook から取得）
   const [managedSalons, setManagedSalons] = useState([])
   const [snapshotTotalSalonCount, setSnapshotTotalSalonCount] = useState(null)
   const [bcartNames, setBcartNames] = useState(null) // Set<string> | null（未取得）
@@ -114,22 +114,20 @@ export default function DealerExecDashboard() {
   useEffect(() => {
     const code = profile?.dealerCode
     if (!code) {
-      setAllOrders([]); setManagedSalons([]); setSnapshotTotalSalonCount(null)
+      setManagedSalons([]); setSnapshotTotalSalonCount(null)
       setBcartNames(null); setBcartRecords(null); setBcartError(null)
       return
     }
     let cancelled = false
     ;(async () => {
       try {
-        const [ordSnap, dsSnap] = await Promise.all([
-          getDocs(query(collection(db, 'orders'), where('dealerCode', '==', code))),
-          getDocs(query(collection(db, 'dealerSalons'), where('dealerCode', '==', code))),
-        ])
+        const dsSnap = await getDocs(
+          query(collection(db, 'dealerSalons'), where('dealerCode', '==', code)),
+        )
         if (cancelled) return
-        setAllOrders(ordSnap.docs.map((d) => ({ id: d.id, ...d.data() })))
         setManagedSalons(dsSnap.docs.map((d) => ({ id: d.id, ...d.data() })))
       } catch (e) {
-        console.warn('[DealerExec] orders/dealerSalons 取得失敗:', e.message)
+        console.warn('[DealerExec] dealerSalons 取得失敗:', e.message)
       }
 
       // dealerMonthlySnapshots/{code}_{YYYY-MM} を直接 docId で参照
