@@ -1,11 +1,12 @@
 import {
-  KICKBACK_STATUS_LABELS,
-  KICKBACK_STATUS_BADGE,
-  normalizeKickbackStatus,
   extractKickbackAmount,
   extractSalesAmount,
   canDownloadKickbackPdf,
+  canDownloadKickbackCsv,
   openKickbackPdf,
+  openKickbackCsv,
+  deriveDisplayLabel,
+  displayBadgeClass,
 } from '../hooks/useDealerKickbacks.js'
 // 横展開 Phase 3（2026-04-25）: 表示フォーマッタ統一
 import { fmtYen, fmtDate } from '../lib/formatters.js'
@@ -33,13 +34,12 @@ export default function DealerKickbacksTable({ kickbacks, onSelect }) {
             <th className="px-4 py-2 text-left">支払予定日</th>
             <th className="px-4 py-2 text-left">状態</th>
             <th className="px-4 py-2 text-center">PDF</th>
+            <th className="px-4 py-2 text-center">CSV</th>
             <th className="px-4 py-2 text-center">詳細</th>
           </tr>
         </thead>
         <tbody>
-          {kickbacks.map((kb) => {
-            const status = normalizeKickbackStatus(kb)
-            return (
+          {kickbacks.map((kb) => (
               <tr key={kb.id} className="border-t border-gray-100 hover:bg-gray-50">
                 <td className="px-4 py-2 whitespace-nowrap font-medium text-gray-900">
                   {fmtMonth(kb.month || kb.period)}
@@ -54,8 +54,9 @@ export default function DealerKickbacksTable({ kickbacks, onSelect }) {
                   {fmtDate(kb.scheduledAt) === '—' ? '—' : fmtDate(kb.scheduledAt)}
                 </td>
                 <td className="px-4 py-2">
-                  <span className={`rounded px-2 py-0.5 text-[11px] font-medium ${KICKBACK_STATUS_BADGE[status]}`}>
-                    {KICKBACK_STATUS_LABELS[status]}
+                  {/* PR-B: 5 値ラベル（phase + mailStatus） */}
+                  <span className={`rounded px-2 py-0.5 text-[11px] font-medium ${displayBadgeClass(kb)}`}>
+                    {deriveDisplayLabel(kb)}
                   </span>
                 </td>
                 <td className="px-4 py-2 text-center">
@@ -63,9 +64,22 @@ export default function DealerKickbacksTable({ kickbacks, onSelect }) {
                     <button
                       onClick={() => openKickbackPdf(kb.pdfUrl)}
                       className="rounded border border-gray-300 bg-white px-3 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50"
-                      title="清算書PDFを開く"
+                      title="清算書PDFを開く（メール送信有無に関わらず取得可）"
                     >
                       📄 PDF
+                    </button>
+                  ) : (
+                    <span className="text-xs text-gray-300">—</span>
+                  )}
+                </td>
+                <td className="px-4 py-2 text-center">
+                  {canDownloadKickbackCsv(kb) ? (
+                    <button
+                      onClick={() => openKickbackCsv(kb.csvUrl)}
+                      className="rounded border border-gray-300 bg-white px-3 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50"
+                      title="明細CSVをダウンロード（メール送信有無に関わらず取得可）"
+                    >
+                      📊 CSV
                     </button>
                   ) : (
                     <span className="text-xs text-gray-300">—</span>
@@ -80,8 +94,7 @@ export default function DealerKickbacksTable({ kickbacks, onSelect }) {
                   </button>
                 </td>
               </tr>
-            )
-          })}
+            ))}
         </tbody>
       </table>
     </div>

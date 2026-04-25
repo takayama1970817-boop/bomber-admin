@@ -1,12 +1,13 @@
 import {
-  KICKBACK_STATUS_LABELS,
-  KICKBACK_STATUS_BADGE,
-  normalizeKickbackStatus,
   extractKickbackAmount,
   extractSalesAmount,
   extractRate,
   canDownloadKickbackPdf,
+  canDownloadKickbackCsv,
   openKickbackPdf,
+  openKickbackCsv,
+  deriveDisplayLabel,
+  displayBadgeClass,
 } from '../hooks/useDealerKickbacks.js'
 
 const fmtYen = (n) => `¥${Math.round(Number(n) || 0).toLocaleString()}`
@@ -54,7 +55,6 @@ function extractBreakdown(kb) {
 export default function DealerKickbackDetailModal({ kickback, onClose }) {
   if (!kickback) return null
 
-  const status = normalizeKickbackStatus(kickback)
   const breakdown = extractBreakdown(kickback)
   const rate = extractRate(kickback)
   const salesAmount = extractSalesAmount(kickback)
@@ -75,10 +75,14 @@ export default function DealerKickbackDetailModal({ kickback, onClose }) {
             <div className="mt-0.5 text-lg font-bold text-gray-900">
               {fmtMonth(kickback.month || kickback.period)} 分
             </div>
-            <div className="mt-1 flex items-center gap-2 text-xs">
-              <span className={`rounded px-2 py-0.5 font-medium ${KICKBACK_STATUS_BADGE[status]}`}>
-                {KICKBACK_STATUS_LABELS[status]}
+            <div className="mt-1 flex flex-wrap items-center gap-2 text-xs">
+              {/* PR-B: 5 値ラベル（phase + mailStatus） */}
+              <span className={`rounded px-2 py-0.5 font-medium ${displayBadgeClass(kickback)}`}>
+                {deriveDisplayLabel(kickback)}
               </span>
+              {kickback.mailSentAt && (
+                <span className="text-gray-500">メール送信日: {fmtDate(kickback.mailSentAt)}</span>
+              )}
               {kickback.scheduledAt && (
                 <span className="text-gray-600">支払予定: {fmtDate(kickback.scheduledAt)}</span>
               )}
@@ -147,17 +151,33 @@ export default function DealerKickbackDetailModal({ kickback, onClose }) {
           </div>
         )}
 
-        <div className="mt-5 flex items-center justify-between gap-3">
-          {canDownloadKickbackPdf(kickback) ? (
-            <button
-              onClick={() => openKickbackPdf(kickback.pdfUrl)}
-              className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700"
-            >
-              📄 PDFダウンロード
-            </button>
-          ) : (
-            <span />
-          )}
+        <div className="mt-5 flex flex-wrap items-center justify-between gap-3">
+          {/* PR-B: PDF / CSV ダウンロード（メール送信有無に関わらず取得可） */}
+          <div className="flex flex-wrap items-center gap-2">
+            {canDownloadKickbackPdf(kickback) && (
+              <button
+                onClick={() => openKickbackPdf(kickback.pdfUrl)}
+                className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700"
+                title="清算書PDFを開く"
+              >
+                📄 PDFダウンロード
+              </button>
+            )}
+            {canDownloadKickbackCsv(kickback) && (
+              <button
+                onClick={() => openKickbackCsv(kickback.csvUrl)}
+                className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700"
+                title="明細CSVをダウンロード"
+              >
+                📊 CSVダウンロード
+              </button>
+            )}
+            {!canDownloadKickbackPdf(kickback) && !canDownloadKickbackCsv(kickback) && (
+              <span className="text-[11px] text-amber-700">
+                PDF / CSV はまだ作成されていません
+              </span>
+            )}
+          </div>
           <button
             onClick={onClose}
             className="rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
