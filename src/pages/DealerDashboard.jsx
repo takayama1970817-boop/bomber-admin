@@ -269,7 +269,7 @@ export default function DealerDashboard() {
                 {top10FollowNeeded.length > 5 && (
                   <div className="text-center">
                     <Link
-                      to="/dealer/dashboard-exec"
+                      to="/dealer/salons?filter=followNeeded"
                       className="inline-block rounded-lg border border-indigo-300 bg-white px-4 py-2 text-xs font-medium text-indigo-700"
                     >
                       他 {top10FollowNeeded.length - 5} 店も見る →
