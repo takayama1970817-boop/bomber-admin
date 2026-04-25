@@ -268,8 +268,10 @@ export default function DealerDashboard() {
                 ))}
                 {top10FollowNeeded.length > 5 && (
                   <div className="text-center">
+                    {/* hotfix: filter=followNeeded で表示崩れ報告のため、暫定でクエリ無しに戻す。
+                        フィルタ連携は原因切り分け後に別PRで再実装。 */}
                     <Link
-                      to="/dealer/salons?filter=followNeeded"
+                      to="/dealer/salons"
                       className="inline-block rounded-lg border border-indigo-300 bg-white px-4 py-2 text-xs font-medium text-indigo-700"
                     >
                       他 {top10FollowNeeded.length - 5} 店も見る →
