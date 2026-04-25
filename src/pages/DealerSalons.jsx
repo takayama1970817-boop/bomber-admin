@@ -3,7 +3,6 @@ import { useSearchParams } from 'react-router-dom'
 import { collection, getDocs, query, where } from 'firebase/firestore'
 import { db } from '../lib/firebase.js'
 import { useAuth } from '../contexts/AuthContext.jsx'
-import { fetchDealerSalonNamesFromBcart } from '../lib/dashboardAggregator.js'
 import { normalizeCompanyName } from '../lib/nameNormalize.js'
 
 function fmtDate(ts) {
@@ -26,6 +25,7 @@ export default function DealerSalons() {
   const [loading, setLoading] = useState(true)
   const [rawCount, setRawCount] = useState(0)
   const [cachedAt, setCachedAt] = useState(null)
+  const [lastSyncedAt, setLastSyncedAt] = useState(null) // Bカート → Firestore 最終同期時刻
   const [progress, setProgress] = useState('')
   const [searchParams] = useSearchParams()
   const [selected, setSelected] = useState(searchParams.get('salon'))
@@ -37,8 +37,8 @@ export default function DealerSalons() {
   const loadData = async (forceRefresh = false) => {
     if (!dealerCode) { setLoading(false); return }
 
-    // キャッシュキー v3: 3年間（36ヶ月）に拡張＋orderNumber フォールバック追加で旧 v2 を自動無効化
-    const cacheKey = `dealerSalonsPage:${dealerCode}:v3`
+    // キャッシュキー v4: Bカート画面取得を撤廃し Firestore のみで表示（軽量化）。旧 v3 を自動無効化
+    const cacheKey = `dealerSalonsPage:${dealerCode}:v4`
     const today = new Date().toISOString().slice(0, 10)
 
     // キャッシュ確認
@@ -61,6 +61,7 @@ export default function DealerSalons() {
               orderDate: o.orderDate ? new Date(o.orderDate) : null,
             })))
             setCachedAt(cached.fetchedAt || today)
+            if (cached.lastSyncedAt) setLastSyncedAt(new Date(cached.lastSyncedAt))
             setLoading(false)
             return
           }
@@ -75,24 +76,22 @@ export default function DealerSalons() {
     setLoading(true)
     setProgress('読み込み中...')
     try {
-      // 並列実行: Bカート所属サロン名 + Firestore dealerSalons + Firestore orders
-      // Firestore orders は dealerCode で絞った全期間を1リクエスト取得し、
-      // クライアント側で直近 36 ヶ月（3年）にフィルタ。
-      //   → コロナ前後・市場変化の比較ができるよう、12ヶ月から拡張。
-      setProgress('サロン名を取得しています...')
+      // 軽量化方針（2026-04-25）:
+      //   画面表示時に Bカート API は叩かない。Firestore を「表示用キャッシュ」として使う。
+      //   Bカート → Firestore の同期は別バッチ（bcart-sync 等）で行う。
+      //   ここでは:
+      //     - dealerSalons コレクション（type='own' 等のメタ）
+      //     - orders コレクション（dealerCode で絞った全期間）
+      //   から表示データを構築する。
       const cutoff = new Date()
       cutoff.setMonth(cutoff.getMonth() - 36)
       cutoff.setHours(0, 0, 0, 0)
 
-      const [bcartNames, salonSnap, ordersSnap] = await Promise.all([
-        fetchDealerSalonNamesFromBcart(dealerCode, { fallbackMonths: 6, forceRefresh }),
+      const [salonSnap, ordersSnap] = await Promise.all([
         getDocs(query(collection(db, 'dealerSalons'), where('dealerCode', '==', dealerCode))),
         getDocs(query(collection(db, 'orders'), where('dealerCode', '==', dealerCode))),
       ])
       if (!aliveRef.current) return
-
-      const computedRawCount = bcartNames.rawCount || bcartNames.size
-      setRawCount(computedRawCount)
 
       // dealerSalons メタ情報（type='own' 等）
       const metaByName = new Map()
@@ -101,14 +100,29 @@ export default function DealerSalons() {
         if (data.companyName) metaByName.set(data.companyName, { id: d.id, ...data })
       }
 
-      // サロンリスト（Bカート + dealerSalons の和集合）
-      const combinedNameSet = new Set([...bcartNames, ...metaByName.keys()])
+      // orders からも会社名を抽出（dealerSalons に未登録だが発注実績ありのサロンも拾う）
+      const orderCompanySet = new Set()
+      let computedLastSyncedAt = null
+      for (const d of ordersSnap.docs) {
+        const o = d.data()
+        if (o.companyName) orderCompanySet.add(o.companyName)
+        const ts = o.syncedAt?._seconds || o.syncedAt?.seconds || 0
+        if (ts > 0) {
+          const dt = new Date(ts * 1000)
+          if (!computedLastSyncedAt || dt > computedLastSyncedAt) computedLastSyncedAt = dt
+        }
+      }
+      if (computedLastSyncedAt) setLastSyncedAt(computedLastSyncedAt)
+
+      // サロンリスト（dealerSalons + orders の和集合）
+      const combinedNameSet = new Set([...metaByName.keys(), ...orderCompanySet])
       const combinedSalons = Array.from(combinedNameSet).map((name) => {
         const meta = metaByName.get(name)
         if (meta) return meta
         return { id: `auto-${name}`, companyName: name, type: 'sub', auto: true }
       })
       setSalons(combinedSalons)
+      setRawCount(combinedSalons.length)
 
       // Firestore orders を直近 36 ヶ月でフィルタしてマップ
       // orderNumber は複数キーをフォールバック（旧 fetch 経由 doc は bcartOrderNumber が
@@ -147,12 +161,13 @@ export default function DealerSalons() {
         localStorage.setItem(cacheKey, JSON.stringify({
           date: today,
           fetchedAt,
-          rawCount: computedRawCount,
+          rawCount: combinedSalons.length,
           salons: combinedSalons,
           orders: allOrders.map((o) => ({
             ...o,
             orderDate: o.orderDate ? o.orderDate.toISOString() : null,
           })),
+          lastSyncedAt: computedLastSyncedAt ? computedLastSyncedAt.toISOString() : null,
         }))
       } catch (e) { console.warn('cache write failed:', e) }
     } catch (e) {
@@ -289,7 +304,21 @@ export default function DealerSalons() {
 
         {/* 年別サマリ（直近3年）+ 前年比 */}
         <div className="mb-6">
-          <h2 className="mb-3 text-sm font-bold text-gray-700">年別売上（前年比）</h2>
+          <div className="mb-2 flex items-baseline justify-between">
+            <h2 className="text-sm font-bold text-gray-700">年別売上（前年比）</h2>
+            <div className="text-[11px] text-gray-400">同期済データ（Bカート → Firestore）</div>
+          </div>
+          {/* 最終同期時刻と注意文 */}
+          {lastSyncedAt && (() => {
+            const ageH = Math.floor((Date.now() - lastSyncedAt.getTime()) / 3600000)
+            const stale = ageH >= 24
+            return (
+              <div className={`mb-3 rounded-lg px-3 py-2 text-[11px] ${stale ? 'bg-amber-50 text-amber-800' : 'bg-gray-50 text-gray-500'}`}>
+                Bカート 最終同期: {lastSyncedAt.toLocaleString('ja-JP')}（{ageH} 時間前）
+                {stale && '。これ以降の注文は未反映の可能性があります。'}
+              </div>
+            )
+          })()}
           {yearKeysDesc.length === 0 ? (
             <span className="text-sm text-gray-400">データなし</span>
           ) : (
@@ -380,17 +409,30 @@ export default function DealerSalons() {
           onClick={() => loadData(true)}
           disabled={loading}
           className="rounded-lg border border-emerald-300 bg-white px-3 py-1.5 text-xs font-medium text-emerald-700 hover:bg-emerald-50 disabled:opacity-50"
-          title="Bカートから最新データを再取得"
+          title="Firestore 同期済データを再読込（Bカートには問い合わせません）"
         >
-          🔄 更新
+          🔄 再読込
         </button>
       </div>
       <p className="mb-1 text-sm text-gray-500">
         {(rawCount || salons.length).toLocaleString()} 社 ／ 累計注文 {totalOrders}件 ／ 累計売上 {fmtYen(totalSales)}
       </p>
+      <p className="mb-1 text-[11px] text-gray-400">
+        Firestore 同期済みデータで表示中（軽量化のため Bカート へは画面表示時に問い合わせません）
+      </p>
+      {lastSyncedAt && (() => {
+        const ageH = Math.floor((Date.now() - lastSyncedAt.getTime()) / 3600000)
+        const stale = ageH >= 24
+        return (
+          <p className={`mb-1 text-xs ${stale ? 'text-amber-700' : 'text-gray-400'}`}>
+            Bカート 最終同期: {lastSyncedAt.toLocaleString('ja-JP')}（{ageH} 時間前）
+            {stale && '。これ以降の注文は未反映の可能性があります。'}
+          </p>
+        )
+      })()}
       {cachedAt && !loading && (
         <p className="mb-6 text-xs text-gray-400">
-          データ取得日時: {cachedAt}（Bカートデータは1日1回取得。最新にするには「🔄 更新」）
+          画面キャッシュ更新: {cachedAt}（再読込は「🔄 更新」）
         </p>
       )}
       {loading && progress && (
