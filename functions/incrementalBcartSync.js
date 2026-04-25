@@ -22,10 +22,22 @@ const fetch = require('node-fetch')
 
 const BCART_API = 'https://api.bcart.jp/api/v1'
 const PAGE = 100
-const MAX_PAGES = 50 // 安全弁: 5000件まで
+// 軽量同期 (days=7) 用
+const MAX_PAGES_LIGHT = 50 // 5,000 件まで
+// 過去データ再取得 (fullSync) 用：1チャンクあたりの上限ページ
+const MAX_PAGES_CHUNK = 200 // 20,000 件/チャンクまで
+// fullSync の起点（DealerSalons の表示範囲 36ヶ月と整合）
+const FULL_SYNC_FROM = '2023-01-01 00:00:00'
+// 1 チャンクあたりの日数（タイムアウト回避のため小さめ）
+const CHUNK_DAYS = 30
+
+const pad2 = (n) => String(n).padStart(2, '0')
+const fmtStart = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} 00:00:00`
+const fmtEnd = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} 23:59:59`
+const parseStr = (s) => new Date(String(s).replace(' ', 'T'))
 
 exports.runIncrementalBcartSync = onCall(
-  { region: 'asia-northeast1', timeoutSeconds: 300, memory: '512MiB' },
+  { region: 'asia-northeast1', timeoutSeconds: 540, memory: '1GiB' },
   async (request) => {
     // 未捕捉例外を必ず HttpsError に包んで詳細メッセージをクライアントに返す。
     // 'internal' のまま渡すと UI で原因が分からない。
@@ -72,31 +84,88 @@ async function runSyncImpl(request) {
       }
     }
 
-    // 期間
-    const days = Math.max(1, Math.min(31, Number(request.data?.days) || 7))
-    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000)
-    const sinceStr =
-      `${since.getFullYear()}-${String(since.getMonth() + 1).padStart(2, '0')}-${String(since.getDate()).padStart(2, '0')} 00:00:00`
+    // 期間モード
+    //   通常: days=7 軽量同期（直近1週間）
+    //   fullSync=true: 2023-01-01 〜 現在を 30日チャンクに分割し、1リクエスト=1チャンク処理。
+    //     resume=true: 前回の続きから（Firestore: bcartSyncState/{dealerCode}）
+    //     resume=false / state無し / done済: 起点リセットして最初から
+    //   days=N: 任意指定（fullSync 優先）
+    const fullSync = request.data?.fullSync === true
+    const resume = request.data?.resume === true
+    const days = fullSync
+      ? null
+      : Math.max(1, Math.min(365, Number(request.data?.days) || 7))
+
+    // fullSync 進捗保存先
+    const stateRef = db.collection('bcartSyncState').doc(dealerCode)
+    let chunkState = null
+
+    let sinceStr
+    let nowStr
+    let maxPages
+    let targetEndStr // fullSync 時のゴール
+
+    if (fullSync) {
+      const snap = await stateRef.get()
+      const prev = snap.exists ? snap.data() : null
+      if (!resume || !prev || prev.done) {
+        // 新規開始
+        chunkState = {
+          mode: 'fullSync',
+          nextFromDate: FULL_SYNC_FROM,
+          targetEndDate: fmtEnd(new Date()),
+          totalFetched: 0,
+          totalMatched: 0,
+          totalCreated: 0,
+          totalUpdated: 0,
+          totalFailed: 0,
+          chunksProcessed: 0,
+          done: false,
+          startedAt: FieldValue.serverTimestamp(),
+          lastRunAt: null,
+        }
+      } else {
+        chunkState = { ...prev }
+      }
+      // チャンク窓 [nextFromDate, nextFromDate + CHUNK_DAYS]（targetEndDate でキャップ）
+      const fromD = parseStr(chunkState.nextFromDate)
+      const targetEndD = parseStr(chunkState.targetEndDate)
+      const chunkEndD = new Date(fromD.getTime() + CHUNK_DAYS * 24 * 60 * 60 * 1000 - 1000)
+      const actualEndD = chunkEndD > targetEndD ? targetEndD : chunkEndD
+      sinceStr = chunkState.nextFromDate
+      nowStr = fmtEnd(actualEndD)
+      targetEndStr = chunkState.targetEndDate
+      maxPages = MAX_PAGES_CHUNK
+    } else {
+      const d = new Date(Date.now() - days * 24 * 60 * 60 * 1000)
+      sinceStr = fmtStart(d)
+      nowStr = fmtEnd(new Date())
+      maxPages = MAX_PAGES_LIGHT
+    }
 
     const token = process.env.BCART_API_TOKEN
     if (!token) {
       throw new HttpsError('internal', 'Bカート APIトークンが未設定です')
     }
 
+    console.log('[runIncrementalBcartSync] sync params', { dealerCode, fullSync, resume, days, fromDate: sinceStr, toDate: nowStr, targetEndDate: targetEndStr, maxPages, parents: [...myParents] })
+
     // Bカート 受注 取得（ページング）
     const fetched = []
-    for (let i = 0; i < MAX_PAGES; i += 1) {
+    for (let i = 0; i < maxPages; i += 1) {
       const offset = i * PAGE
-      const url = `${BCART_API}/orders?limit=${PAGE}&offset=${offset}&ordered_at__gte=${encodeURIComponent(sinceStr)}`
+      const url = `${BCART_API}/orders?limit=${PAGE}&offset=${offset}&ordered_at__gte=${encodeURIComponent(sinceStr)}&ordered_at__lte=${encodeURIComponent(nowStr)}`
       const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } })
       if (!res.ok) {
-        throw new HttpsError('internal', `Bカート API エラー: ${res.status}`)
+        throw new HttpsError('internal', `Bカート API エラー: ${res.status} (page=${i + 1})`)
       }
       const data = await res.json()
       const items = data?.orders || []
       fetched.push(...items)
       const total = data?.meta?.total ?? fetched.length
       if (items.length === 0 || fetched.length >= total) break
+      // safety: 5 ページごとに進捗ログ
+      if ((i + 1) % 5 === 0) console.log(`[runIncrementalBcartSync] fetched ${fetched.length}/${total} pages=${i + 1}`)
     }
 
     // 自代理店（と紐付く bcartParentId）に該当する注文だけ
@@ -142,11 +211,65 @@ async function runSyncImpl(request) {
       }
     }
 
-    console.log('[runIncrementalBcartSync] done', { dealerCode, days, fetched: fetched.length, matched: mine.length, created, updated, failed })
+    console.log('[runIncrementalBcartSync] chunk done', { dealerCode, fullSync, fromDate: sinceStr, toDate: nowStr, fetched: fetched.length, matched: mine.length, created, updated, failed })
+
+    // fullSync の進捗を Firestore に保存して done 判定
+    if (fullSync && chunkState) {
+      const targetEndD = parseStr(chunkState.targetEndDate)
+      const chunkEndD = parseStr(nowStr)
+      const isDone = chunkEndD.getTime() >= targetEndD.getTime()
+      // 次回起点 = チャンク終端 +1 秒（直後の 00:00:00 にしたい場合は翌日 00:00 でも可）
+      const nextFromD = new Date(chunkEndD.getTime() + 1000)
+      const nextFromStr = isDone ? chunkState.nextFromDate : fmtStart(nextFromD)
+      const updatedState = {
+        mode: 'fullSync',
+        nextFromDate: nextFromStr,
+        targetEndDate: chunkState.targetEndDate,
+        totalFetched: (chunkState.totalFetched || 0) + fetched.length,
+        totalMatched: (chunkState.totalMatched || 0) + mine.length,
+        totalCreated: (chunkState.totalCreated || 0) + created,
+        totalUpdated: (chunkState.totalUpdated || 0) + updated,
+        totalFailed: (chunkState.totalFailed || 0) + failed,
+        chunksProcessed: (chunkState.chunksProcessed || 0) + 1,
+        done: isDone,
+        lastRunAt: FieldValue.serverTimestamp(),
+        startedAt: chunkState.startedAt || FieldValue.serverTimestamp(),
+        lastFromDate: sinceStr,
+        lastToDate: nowStr,
+      }
+      await stateRef.set(updatedState, { merge: true })
+      console.log('[runIncrementalBcartSync] fullSync state', { dealerCode, done: isDone, nextFromDate: isDone ? null : nextFromStr, totalFetched: updatedState.totalFetched })
+      return {
+        success: true,
+        dealerCode,
+        fullSync: true,
+        done: isDone,
+        fromDate: sinceStr,
+        toDate: nowStr,
+        nextFromDate: isDone ? null : nextFromStr,
+        targetEndDate: chunkState.targetEndDate,
+        bcartFetched: fetched.length,
+        matched: mine.length,
+        created,
+        updated,
+        failed,
+        totalFetched: updatedState.totalFetched,
+        totalMatched: updatedState.totalMatched,
+        totalCreated: updatedState.totalCreated,
+        totalUpdated: updatedState.totalUpdated,
+        totalFailed: updatedState.totalFailed,
+        chunksProcessed: updatedState.chunksProcessed,
+      }
+    }
+
     return {
       success: true,
       dealerCode,
       sinceDays: days,
+      fullSync: false,
+      done: true,
+      fromDate: sinceStr,
+      toDate: nowStr,
       bcartFetched: fetched.length,
       matched: mine.length,
       created,

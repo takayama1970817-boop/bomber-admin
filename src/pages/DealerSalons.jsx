@@ -219,6 +219,48 @@ export default function DealerSalons() {
     }
   }
 
+  // 「過去データ再取得」: fullSync を 30日チャンクに分割し、done=true になるまで繰り返し呼ぶ。
+  // 各リクエストはサーバー側で 30 日分のみ処理するためタイムアウトしない。
+  // 進捗は bcartSyncState/{dealerCode} に保存され、途中失敗しても resume=true で続きから。
+  const runBcartFullSync = async () => {
+    if (!dealerCode || bcartSyncing) return
+    const ok = window.confirm(
+      '【過去データ再取得】\n2023年1月以降のBカート注文を 30日ごとに分割して取り込みます。\n完了まで数分〜十数分（チャンク数 × 数十秒）かかります。\n実行してよろしいですか？',
+    )
+    if (!ok) return
+    setBcartSyncing(true)
+    setBcartSyncError(null)
+    setBcartSyncResult(null)
+    try {
+      const fn = httpsCallable(functions, 'runIncrementalBcartSync')
+      // 1 回目は resume=false で起点リセット → 2 回目以降は resume=true
+      let resume = false
+      let lastResult = null
+      const MAX_CHUNKS = 60 // 安全弁: 30日 × 60 = 約 5 年分
+      for (let i = 0; i < MAX_CHUNKS; i += 1) {
+        const res = await fn({ fullSync: true, resume })
+        const r = res?.data || {}
+        lastResult = r
+        setBcartSyncResult({ ...r, chunksProcessed: r.chunksProcessed ?? i + 1 })
+        if (r.done) break
+        resume = true
+      }
+      await loadData(true)
+      if (lastResult && !lastResult.done) {
+        setBcartSyncError(`チャンク上限に到達。続きは再度「📂 過去データ再取得」を押してください（次回起点: ${lastResult.nextFromDate}）`)
+      }
+    } catch (e) {
+      console.warn('runBcartFullSync error:', e?.code, e?.message, e?.details, e)
+      const parts = []
+      if (e?.code) parts.push(`[${e.code}]`)
+      if (e?.message) parts.push(e.message)
+      if (e?.details?.stack) parts.push(`stack: ${e.details.stack}`)
+      setBcartSyncError(parts.join(' ') || '同期に失敗しました（再度押下で続きから再開できます）')
+    } finally {
+      setBcartSyncing(false)
+    }
+  }
+
   // サロンごとの集計（O(N+M) 化＋ useMemo で memoize）
   // 旧実装は salons.map 内で orders.filter を呼ぶ O(N×M) で、
   // J0002 のような 200 サロン × 数千注文では数十万回の比較が走り重かった。
@@ -471,13 +513,44 @@ export default function DealerSalons() {
           >
             {bcartSyncing ? '⏳ 同期中…' : '⤓ 最新データ取得'}
           </button>
+          <button
+            onClick={runBcartFullSync}
+            disabled={loading || bcartSyncing}
+            className="rounded-lg border border-gray-400 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-100 disabled:opacity-50"
+            title="2023年1月以降の Bカート 注文を全件再取り込み（数分かかる場合があります）"
+          >
+            📂 過去データ再取得
+          </button>
         </div>
       </div>
       {/* 同期結果 / エラー表示 */}
       {bcartSyncResult && (
         <div className="mb-3 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-800">
-          ✅ Bカート 同期完了：直近 {bcartSyncResult.sinceDays} 日 / 取得 {bcartSyncResult.bcartFetched} 件 / 自代理店 {bcartSyncResult.matched} 件 / 新規 {bcartSyncResult.created} ・更新 {bcartSyncResult.updated}
-          {bcartSyncResult.failed > 0 && ` / 失敗 ${bcartSyncResult.failed}`}
+          {bcartSyncResult.fullSync ? (
+            <>
+              {bcartSyncResult.done ? '✅' : '⏳'} 過去データ再取得
+              {bcartSyncResult.done ? '完了' : '進行中'}：
+              直近チャンク {bcartSyncResult.fromDate || '?'} 〜 {bcartSyncResult.toDate || '?'}
+              {' / '}チャンク {bcartSyncResult.chunksProcessed ?? '?'} 回
+              {' / '}累計取得 {bcartSyncResult.totalFetched ?? bcartSyncResult.bcartFetched} 件
+              {' / '}自代理店 {bcartSyncResult.totalMatched ?? bcartSyncResult.matched} 件
+              {' / '}新規 {bcartSyncResult.totalCreated ?? bcartSyncResult.created}
+              ・更新 {bcartSyncResult.totalUpdated ?? bcartSyncResult.updated}
+              {(bcartSyncResult.totalFailed ?? bcartSyncResult.failed) > 0 &&
+                ` / 失敗 ${bcartSyncResult.totalFailed ?? bcartSyncResult.failed}`}
+              {!bcartSyncResult.done && bcartSyncResult.nextFromDate && (
+                <span className="ml-1 text-amber-700">（次回起点: {bcartSyncResult.nextFromDate}）</span>
+              )}
+            </>
+          ) : (
+            <>
+              ✅ Bカート 同期完了：直近 {bcartSyncResult.sinceDays} 日
+              （{bcartSyncResult.fromDate || '?'} 〜 {bcartSyncResult.toDate || '?'}）
+              {' / '}取得 {bcartSyncResult.bcartFetched} 件 / 自代理店 {bcartSyncResult.matched} 件
+              {' / '}新規 {bcartSyncResult.created} ・更新 {bcartSyncResult.updated}
+              {bcartSyncResult.failed > 0 && ` / 失敗 ${bcartSyncResult.failed}`}
+            </>
+          )}
         </div>
       )}
       {bcartSyncError && (
