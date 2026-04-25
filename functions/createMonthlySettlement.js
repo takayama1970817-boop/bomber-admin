@@ -253,6 +253,13 @@ async function createOneSettlementInTx(db, { type, dealerCode, dealerName, month
       // 状態（§1.3 状態遷移表）
       status: 'draft',
 
+      // PR-A（2026-04-25）: docs/KICKBACK_REQUIREMENTS.md の phase / mailStatus を初期化
+      // 骨組み作成直後は集計未完なので calculating。
+      // admin が KickbackManage で集計 + 保存すると calculated に進める。
+      // PDF/CSV 作成完了で pdf_ready に進める。
+      phase: 'calculating',
+      mailStatus: 'unsent',
+
       // 明細（段階1 では空、段階2 で自動集計を実装）
       items: [],
       grandTotal: 0,

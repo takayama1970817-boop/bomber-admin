@@ -22,6 +22,12 @@ import { generateKickbackPdf } from '../lib/generateKickbackPdf.js'
 import { downloadEml } from '../lib/generateEml.js'
 import { fetchOrdersByMonth, fetchOrderProductsBatch } from '../lib/bcartApi.js'
 import { filterValidOrders } from '../lib/ordersFilter.js'
+// PR-A（2026-04-25）: 清算書 phase / mailStatus 分離 + dealer 配布 CSV
+import { PHASE, MAIL_STATUS } from '../lib/kickbackStatus.js'
+import {
+  generateDealerKickbackCsv,
+  buildDealerCsvFileName,
+} from '../lib/generateDealerKickbackCsv.js'
 
 function fmtYen(n) {
   if (n == null) return '—'
@@ -740,11 +746,22 @@ export default function KickbackManage() {
   // 保存ペイロードを組み立て（下書き・送信で共通）
   const buildKickbackPayload = (status) => {
     const code = selectedCode || ''
+    // PR-A: status（旧フィールド）に加えて phase / mailStatus を併記
+    //   - 'draft' → phase='calculated' （明細あり = 計算完了）
+    //   - 'sent'  → phase='pdf_ready' / mailStatus='sent'（既存の一括送信フロー互換）
+    //   新フロー（PDF/CSV作成 / メール送信を独立操作）では handleCreatePdfCsv /
+    //   handleSendMailOnly が個別に上書きする。
+    const isSent = status === 'sent'
+    const phase = isSent ? PHASE.PDF_READY : PHASE.CALCULATED
     return {
       dealerCode: code,
       dealerName: selectedDealer?.companyName || code,
       month,
-      status, // 'draft' | 'sent'
+      status, // 'draft' | 'sent'  ※後方互換のため維持
+      phase,
+      // mailStatus は handleSaveAndSend での書き戻しで上書きされる
+      // （成功時 'sent' / 失敗時 'failed'）。下書き保存時は 'unsent' を初期化
+      ...(isSent ? {} : { mailStatus: MAIL_STATUS.UNSENT }),
       entries: calcResult.entries,
       totalKickback: calcResult.totalKickback,
       totalSales: calcResult.totalSales,
@@ -795,6 +812,227 @@ export default function KickbackManage() {
     setStatements(docs)
   }
 
+  // PR-A: base64 PDF を Cloud Storage 用 Blob に変換
+  const base64ToPdfBlob = (b64) => {
+    const binary = atob(b64)
+    const bytes = new Uint8Array(binary.length)
+    for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i)
+    return new Blob([bytes], { type: 'application/pdf' })
+  }
+
+  // PR-A: kickback doc を「集計済み（calculated）」で upsert し、ID を返す
+  //   - 既存の draft / pdf_ready レコードがあれば再利用（phase は calculated 以上に保つ）
+  //   - 新規ならば addDoc で発番
+  const upsertCalculatedKickback = async () => {
+    const code = selectedCode || ''
+    if (!code) throw new Error('代理店コードを選択してください')
+    if (!calcResult || calcResult.entries.length === 0) {
+      throw new Error('集計結果がありません')
+    }
+    const existing = await findExistingKickback(code, month)
+    const target = existing.find((e) => e.status === 'draft') || existing[0]
+    const payload = buildKickbackPayload(target?.status === 'sent' ? 'sent' : 'draft')
+    if (target) {
+      // 既存の phase を calculated より下げない
+      const merged = { ...payload, updatedAt: serverTimestamp(), calculatedAt: serverTimestamp() }
+      // 既に pdf_ready の場合は phase を calculated に戻さない
+      if (target.phase === PHASE.PDF_READY || target.pdfUrl) merged.phase = PHASE.PDF_READY
+      await updateDoc(doc(db, 'kickbacks', target.id), merged)
+      return { id: target.id, prev: target }
+    }
+    const ref = await addDoc(collection(db, 'kickbacks'), {
+      ...payload,
+      createdAt: serverTimestamp(),
+      calculatedAt: serverTimestamp(),
+    })
+    return { id: ref.id, prev: null }
+  }
+
+  // 【PDF/CSV作成】メール送信せずに PDF + dealer CSV を Cloud Storage へ永続化
+  // → docs/KICKBACK_REQUIREMENTS.md の核心要件「ポータルでの取得」を満たす
+  const handleCreatePdfCsv = async () => {
+    if (!calcResult || calcResult.entries.length === 0) return
+    const code = selectedCode || ''
+    if (!code) { alert('代理店コードを選択してください'); return }
+    if (!confirm(
+      `${month} の PDF / CSV を作成して Cloud Storage に保存しますか？\n` +
+      '（メールは送信されません。代理店ポータルからダウンロード可能になります）'
+    )) return
+
+    try {
+      // 1) kickback ドキュメントを upsert（phase=calculated）
+      const { id: kickbackId } = await upsertCalculatedKickback()
+
+      // 2) PDF 生成 → Storage アップロード
+      const stmtForPdf = {
+        ...calcResult,
+        dealerCode: code,
+        dealerName: selectedDealer?.companyName || code,
+        month,
+        companyInfo: companyInfo || null,
+        stampDataUrl: stampDataUrl || null,
+        bankInfo: selectedDealer?.bankInfo || null,
+        adjustments: adjustments.filter((a) => a.label && a.amount !== 0),
+        adjustmentTotal: adjustments.reduce((s, a) => s + (a.amount || 0), 0),
+        finalSettlement: (calcResult.dealerOrderTotal > 0 ? calcResult.netSettlement : calcResult.grandTotal) + adjustments.reduce((s, a) => s + (a.amount || 0), 0),
+      }
+      const { base64, fileName: pdfFileName } = await generateKickbackPdfBase64(stmtForPdf)
+      const pdfPath = `kickbacks/${code}/${month}/${kickbackId}.pdf`
+      const pdfRef = storageRef(storage, pdfPath)
+      await uploadBytes(pdfRef, base64ToPdfBlob(base64), { contentType: 'application/pdf' })
+      const pdfUrl = await getDownloadURL(pdfRef)
+
+      // 3) 代理店配布専用 CSV を生成 → Storage アップロード
+      const kbForCsv = {
+        dealerCode: code,
+        month,
+        entries: calcResult.entries,
+        totalKickback: calcResult.totalKickback,
+        grandTotal: calcResult.grandTotal,
+      }
+      const csvText = generateDealerKickbackCsv(kbForCsv)
+      const csvFileName = buildDealerCsvFileName(kbForCsv)
+      const csvPath = `kickbacks/${code}/${month}/${kickbackId}.csv`
+      const csvRef = storageRef(storage, csvPath)
+      await uploadBytes(csvRef, new Blob([csvText], { type: 'text/csv;charset=utf-8' }), {
+        contentType: 'text/csv; charset=utf-8',
+      })
+      const csvUrl = await getDownloadURL(csvRef)
+
+      // 4) Firestore に URL / phase を永続化
+      await updateDoc(doc(db, 'kickbacks', kickbackId), {
+        phase: PHASE.PDF_READY,
+        pdfUrl,
+        pdfFileName,
+        pdfStoragePath: pdfPath,
+        pdfGeneratedAt: serverTimestamp(),
+        csvUrl,
+        csvFileName,
+        csvStoragePath: csvPath,
+        csvGeneratedAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      })
+
+      await refreshStatements(code)
+      alert(
+        `PDF / CSV を作成しました（メール未送信）\n` +
+        `代理店ポータルからダウンロード可能です。\n\n` +
+        `PDF: ${pdfFileName}\nCSV: ${csvFileName}`
+      )
+    } catch (e) {
+      console.error('PDF/CSV作成エラー:', e)
+      alert('PDF/CSV 作成に失敗しました: ' + (e.message || e))
+    }
+  }
+
+  // 【メール送信のみ】既存の calcResult / 設定で PDF を再生成し、notifyKickback で送信
+  // PDF/CSV は事前に handleCreatePdfCsv で作成しておくのが理想（pdfUrl が永続化される）
+  // この関数はメール通知のみを担当し、Storage の PDF は変更しない
+  const handleSendMailOnly = async () => {
+    if (!calcResult || calcResult.entries.length === 0) return
+    const code = selectedCode || ''
+    if (!code) { alert('代理店コードを選択してください'); return }
+    if (!confirm(`${month} の清算書通知メールを送信しますか？`)) return
+
+    try {
+      // kickbackId を確定（無ければ upsert して calculated 以上にする）
+      const existing = await findExistingKickback(code, month)
+      let kickbackId = existing.find((e) => e.phase === PHASE.PDF_READY || e.pdfUrl)?.id
+        || existing[0]?.id
+      if (!kickbackId) {
+        const r = await upsertCalculatedKickback()
+        kickbackId = r.id
+      }
+
+      // PDF を再生成（添付用 base64）
+      const stmtForPdf = {
+        ...calcResult,
+        dealerCode: code,
+        dealerName: selectedDealer?.companyName || code,
+        month,
+        companyInfo: companyInfo || null,
+        stampDataUrl: stampDataUrl || null,
+        bankInfo: selectedDealer?.bankInfo || null,
+        adjustments: adjustments.filter((a) => a.label && a.amount !== 0),
+        adjustmentTotal: adjustments.reduce((s, a) => s + (a.amount || 0), 0),
+        finalSettlement: (calcResult.dealerOrderTotal > 0 ? calcResult.netSettlement : calcResult.grandTotal) + adjustments.reduce((s, a) => s + (a.amount || 0), 0),
+      }
+      const { base64, fileName, password } = await generateKickbackPdfBase64(stmtForPdf)
+
+      const ccAddr = prompt('CC（自分で確認用、空欄可）:', '')
+      const notifyFn = httpsCallable(functions, 'notifyKickback')
+      const payloadFn = {
+        kickbackId,
+        dealerCode: code,
+        dealerName: selectedDealer?.companyName || code,
+        month,
+        grandTotal: calcResult.grandTotal || calcResult.totalKickback,
+        pdfBase64: base64,
+        pdfFileName: fileName,
+      }
+      if (ccAddr) payloadFn.ccEmail = ccAddr
+      const result = await notifyFn(payloadFn)
+      // Cloud Function 側で mailStatus / mailSentAt / mailRecipients を Firestore に書き戻し済み
+      await refreshStatements(code)
+      alert(
+        `送信完了（${result.data.email}${ccAddr ? ` / CC: ${ccAddr}` : ''}）\n` +
+        `PDFパスワード: ${password}`
+      )
+    } catch (e) {
+      console.error('メール送信エラー:', e)
+      // notifyKickback 側で mailStatus='failed' を書き戻している
+      await refreshStatements(code)
+      alert('メール送信に失敗しました: ' + (e.message || e))
+    }
+  }
+
+  // 【保存済み清算書の PDF/CSV 再生成】既存 stmt から PDF と dealer CSV を再生成して
+  // Cloud Storage に上書き、Firestore に URL を永続化する。
+  // pdfUrl が無い既存データへのリカバリ導線を兼ねる。
+  const handleRegeneratePdfCsv = async (stmt) => {
+    if (!stmt?.id) return
+    if (!confirm(
+      `${stmt.month} の PDF / CSV を再生成しますか？\n` +
+      '（既存の Storage ファイルを上書き、メールは送信しません）'
+    )) return
+    try {
+      const stmtForPdf = {
+        ...stmt,
+        stampDataUrl: stmt.stampDataUrl || stampDataUrl || null,
+        companyInfo: stmt.companyInfo || companyInfo || null,
+      }
+      const { base64, fileName } = await generateKickbackPdfBase64(stmtForPdf)
+      const code = stmt.dealerCode || ''
+      const pdfPath = `kickbacks/${code}/${stmt.month}/${stmt.id}.pdf`
+      const pdfRef = storageRef(storage, pdfPath)
+      await uploadBytes(pdfRef, base64ToPdfBlob(base64), { contentType: 'application/pdf' })
+      const pdfUrl = await getDownloadURL(pdfRef)
+
+      const csvText = generateDealerKickbackCsv(stmt)
+      const csvFileName = buildDealerCsvFileName(stmt)
+      const csvPath = `kickbacks/${code}/${stmt.month}/${stmt.id}.csv`
+      const csvRef = storageRef(storage, csvPath)
+      await uploadBytes(csvRef, new Blob([csvText], { type: 'text/csv;charset=utf-8' }), {
+        contentType: 'text/csv; charset=utf-8',
+      })
+      const csvUrl = await getDownloadURL(csvRef)
+
+      await updateDoc(doc(db, 'kickbacks', stmt.id), {
+        phase: PHASE.PDF_READY,
+        pdfUrl, pdfFileName: fileName, pdfStoragePath: pdfPath,
+        pdfGeneratedAt: serverTimestamp(),
+        csvUrl, csvFileName, csvStoragePath: csvPath,
+        csvGeneratedAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      })
+      await refreshStatements(code)
+      alert(`PDF / CSV を再生成しました\nPDF: ${fileName}\nCSV: ${csvFileName}`)
+    } catch (e) {
+      console.error('再生成エラー:', e)
+      alert('再生成に失敗しました: ' + (e.message || e))
+    }
+  }
+
   // 【下書き保存】Firestore への保存のみ。メール送信・PDF生成は行わない
   const handleSaveDraft = async () => {
     if (!calcResult || calcResult.entries.length === 0) return
@@ -816,10 +1054,19 @@ export default function KickbackManage() {
 
       const draftDoc = existing.find((e) => e.status === 'draft')
       const payload = buildKickbackPayload('draft')
+      // PR-A: 集計済みなので calculatedAt を打刻
       if (draftDoc) {
-        await updateDoc(doc(db, 'kickbacks', draftDoc.id), { ...payload, updatedAt: serverTimestamp() })
+        await updateDoc(doc(db, 'kickbacks', draftDoc.id), {
+          ...payload,
+          updatedAt: serverTimestamp(),
+          calculatedAt: serverTimestamp(),
+        })
       } else {
-        await addDoc(collection(db, 'kickbacks'), { ...payload, createdAt: serverTimestamp() })
+        await addDoc(collection(db, 'kickbacks'), {
+          ...payload,
+          createdAt: serverTimestamp(),
+          calculatedAt: serverTimestamp(),
+        })
       }
 
       await refreshStatements(code)
@@ -850,10 +1097,22 @@ export default function KickbackManage() {
 
       const draftDoc = existing.find((e) => e.status === 'draft')
       const payload = buildKickbackPayload('sent')
+      // PR-A: 一括送信フローでも calculatedAt を打刻（後段で pdf_ready / mailStatus が更新される）
+      let kickbackId
       if (draftDoc) {
-        await updateDoc(doc(db, 'kickbacks', draftDoc.id), { ...payload, updatedAt: serverTimestamp() })
+        await updateDoc(doc(db, 'kickbacks', draftDoc.id), {
+          ...payload,
+          updatedAt: serverTimestamp(),
+          calculatedAt: serverTimestamp(),
+        })
+        kickbackId = draftDoc.id
       } else {
-        await addDoc(collection(db, 'kickbacks'), { ...payload, createdAt: serverTimestamp() })
+        const ref = await addDoc(collection(db, 'kickbacks'), {
+          ...payload,
+          createdAt: serverTimestamp(),
+          calculatedAt: serverTimestamp(),
+        })
+        kickbackId = ref.id
       }
 
       await refreshStatements(code)
@@ -876,9 +1135,42 @@ export default function KickbackManage() {
         }
         const { base64, fileName, password } = await generateKickbackPdfBase64(stmtForPdf)
 
+        // PR-A: 一括送信フローでも PDF / dealer-CSV を Cloud Storage に永続化
+        try {
+          const pdfPath = `kickbacks/${code}/${month}/${kickbackId}.pdf`
+          const pdfRef = storageRef(storage, pdfPath)
+          await uploadBytes(pdfRef, base64ToPdfBlob(base64), { contentType: 'application/pdf' })
+          const pdfUrl = await getDownloadURL(pdfRef)
+
+          const csvText = generateDealerKickbackCsv({
+            dealerCode: code, month,
+            entries: calcResult.entries,
+            totalKickback: calcResult.totalKickback,
+            grandTotal: calcResult.grandTotal,
+          })
+          const csvFileName = buildDealerCsvFileName({ dealerCode: code, month })
+          const csvPath = `kickbacks/${code}/${month}/${kickbackId}.csv`
+          const csvRef = storageRef(storage, csvPath)
+          await uploadBytes(csvRef, new Blob([csvText], { type: 'text/csv;charset=utf-8' }), {
+            contentType: 'text/csv; charset=utf-8',
+          })
+          const csvUrl = await getDownloadURL(csvRef)
+
+          await updateDoc(doc(db, 'kickbacks', kickbackId), {
+            phase: PHASE.PDF_READY,
+            pdfUrl, pdfFileName: fileName, pdfStoragePath: pdfPath,
+            pdfGeneratedAt: serverTimestamp(),
+            csvUrl, csvFileName, csvStoragePath: csvPath,
+            csvGeneratedAt: serverTimestamp(),
+          })
+        } catch (storageErr) {
+          console.warn('Storage 永続化に失敗（メール送信は継続）:', storageErr)
+        }
+
         const ccAddr = prompt('CC（自分で確認用、空欄可）:', '')
         const notifyFn = httpsCallable(functions, 'notifyKickback')
         const payloadFn = {
+          kickbackId, // PR-A: Cloud Function 側で mailStatus 書き戻しに利用
           dealerCode: code,
           dealerName: selectedDealer?.companyName || code,
           month,
@@ -888,6 +1180,7 @@ export default function KickbackManage() {
         }
         if (ccAddr) payloadFn.ccEmail = ccAddr
         const result = await notifyFn(payloadFn)
+        await refreshStatements(code)
         alert(`送信完了（${result.data.email}${ccAddr ? ` / CC: ${ccAddr}` : ''}）\nPDFパスワード: ${password}`)
       } catch (emailErr) {
         console.error('通知メール送信エラー:', emailErr)
@@ -1217,16 +1510,32 @@ export default function KickbackManage() {
               <button
                 onClick={handleSaveDraft}
                 className="rounded-lg border border-gray-400 bg-white px-4 py-2 text-sm font-bold text-gray-700 hover:bg-gray-50"
-                title="Firestoreに下書き保存のみ（メール送信なし）"
+                title="Firestoreに下書き保存のみ（PDF/CSV作成・メール送信なし）"
               >
                 下書き保存
               </button>
+              {/* PR-A 新フロー: PDF/CSV 作成 と メール送信 を独立操作に分離。
+                  メール未送信でも代理店ポータルから PDF/CSV ダウンロード可能。 */}
+              <button
+                onClick={handleCreatePdfCsv}
+                className="rounded-lg bg-emerald-600 px-5 py-2 text-sm font-bold text-white hover:bg-emerald-700"
+                title="PDF と 代理店配布CSV を Cloud Storage に保存（メールは送信しない）"
+              >
+                📄 PDF/CSV作成
+              </button>
+              <button
+                onClick={handleSendMailOnly}
+                className="rounded-lg bg-blue-600 px-5 py-2 text-sm font-bold text-white hover:bg-blue-700"
+                title="代理店へ通知メールを送信（PDF/CSV は事前に作成しておくのが理想）"
+              >
+                ✉ メール送信
+              </button>
               <button
                 onClick={handleSaveAndSend}
-                className="rounded-lg bg-indigo-600 px-5 py-2 text-sm font-bold text-white hover:bg-indigo-700"
-                title="保存＋PDF生成＋代理店へメール送信"
+                className="rounded-lg border border-indigo-300 bg-white px-4 py-2 text-xs font-bold text-indigo-700 hover:bg-indigo-50"
+                title="従来動作: 保存＋PDF/CSV作成＋メール送信を一括実行"
               >
-                送信（PDF＋メール）
+                ⚡ 一括送信（互換）
               </button>
               <button
                 onClick={() => { setCalcResult(null); setCalcSource(null) }}
@@ -1499,16 +1808,35 @@ export default function KickbackManage() {
                             {stmt.source === 'bcart-api' ? 'API' : 'CSV'}
                           </span>
                         )}
-                        {/* status バッジ（未設定は後方互換で「送信済」扱い） */}
-                        <span className={`ml-2 rounded px-1.5 py-0.5 text-[10px] ${
-                          stmt.status === 'draft'
-                            ? 'bg-amber-100 text-amber-700'
-                            : 'bg-gray-100 text-gray-700'
-                        }`}>
-                          {stmt.status === 'draft' ? '下書き' : '送信済'}
-                        </span>
+                        {/* PR-A: phase + mailStatus を反映した 5 値表示バッジ */}
+                        {(() => {
+                          // インポート済み helper を使うため、関数内で require せずにそのまま参照
+                          // （ファイル先頭で import { PHASE, MAIL_STATUS } 済み）
+                          const phase = stmt.phase || (stmt.pdfUrl ? PHASE.PDF_READY
+                            : (Number(stmt.totalKickback ?? stmt.grandTotal ?? 0) > 0 || (Array.isArray(stmt.entries) && stmt.entries.length > 0))
+                              ? PHASE.CALCULATED : PHASE.CALCULATING)
+                          const mail = stmt.mailStatus || (stmt.mailSentAt || stmt.status === 'sent' ? MAIL_STATUS.SENT : MAIL_STATUS.UNSENT)
+                          let label, cls
+                          if (phase === PHASE.CALCULATING) { label = '計算中'; cls = 'bg-gray-100 text-gray-700' }
+                          else if (phase === PHASE.CALCULATED) { label = '計算済み'; cls = 'bg-blue-100 text-blue-700' }
+                          else if (mail === MAIL_STATUS.SENT) { label = 'メール送信済'; cls = 'bg-emerald-100 text-emerald-800' }
+                          else if (mail === MAIL_STATUS.FAILED) { label = 'メール送信失敗'; cls = 'bg-red-100 text-red-700' }
+                          else { label = 'PDF作成済（メール未送信）'; cls = 'bg-amber-100 text-amber-800' }
+                          return (
+                            <span className={`ml-2 rounded px-1.5 py-0.5 text-[10px] ${cls}`}>
+                              {label}
+                            </span>
+                          )
+                        })()}
                       </div>
                       <div className="flex items-center gap-3">
+                        <button
+                          onClick={() => handleRegeneratePdfCsv(stmt)}
+                          className="rounded border border-emerald-300 bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-700 hover:bg-emerald-100"
+                          title="PDF と 代理店配布CSV を再生成して Cloud Storage に上書き（メールは送信しない）"
+                        >
+                          🔄 再生成
+                        </button>
                         <button
                           onClick={async () => {
                             try {
