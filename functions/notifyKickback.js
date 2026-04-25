@@ -2,8 +2,24 @@
 // キックバック清算書の通知メール送信
 
 const { onCall, HttpsError } = require('firebase-functions/v2/https')
-const { getFirestore } = require('firebase-admin/firestore')
+const { getFirestore, FieldValue } = require('firebase-admin/firestore')
 const { SESClient, SendRawEmailCommand } = require('@aws-sdk/client-ses')
+
+/**
+ * kickbackId を kickbacks コレクションで自動探索（dealerCode + month 一致）
+ * 旧クライアントが kickbackId を渡さない場合のフォールバック
+ */
+async function findKickbackId(db, dealerCode, month) {
+  const snap = await db.collection('kickbacks')
+    .where('dealerCode', '==', dealerCode)
+    .where('month', '==', month)
+    .get()
+  if (snap.empty) return null
+  // pdf_ready 優先 → なければ最新
+  const docs = snap.docs.map((d) => ({ id: d.id, data: d.data() }))
+  const pdfReady = docs.find((d) => d.data.phase === 'pdf_ready' || d.data.pdfUrl)
+  return (pdfReady || docs[0]).id
+}
 
 /**
  * 清算書の通知メールを代理店に送信（PDF添付対応）
@@ -26,8 +42,16 @@ const notifyKickback = onCall(
     }
 
     const { dealerCode, dealerName, month, grandTotal, pdfBase64, pdfFileName, testEmail, ccEmail } = request.data
+    let { kickbackId } = request.data
     if (!dealerCode || !month) {
       throw new HttpsError('invalid-argument', 'dealerCode と month は必須です')
+    }
+
+    // PR-A: kickbackId が無ければ自動探索（旧クライアント互換）
+    // testEmail 指定（テスト送信）のときは kickbacks への書き戻しを行わない
+    const isTestSend = !!testEmail
+    if (!isTestSend && !kickbackId) {
+      kickbackId = await findKickbackId(db, dealerCode, month)
     }
 
     // テスト送信先が指定されていればそちらを使用、なければ代理店のメールを取得
@@ -213,9 +237,9 @@ const notifyKickback = onCall(
       rawMessage = [headers, '', textPart, '', htmlPart, '', `--${boundary}--`].join('\r\n')
     }
 
+    const destinations = [dealerEmail]
+    if (ccEmail) destinations.push(ccEmail)
     try {
-      const destinations = [dealerEmail]
-      if (ccEmail) destinations.push(ccEmail)
       await sesClient.send(new SendRawEmailCommand({
         Source: `${senderName} <${senderEmail}>`,
         Destinations: destinations,
@@ -223,10 +247,37 @@ const notifyKickback = onCall(
       }))
     } catch (err) {
       console.error('SES送信エラー:', err)
+      // PR-A: 失敗時も Firestore に状態を残す（kickbackId が確定している場合のみ）
+      if (kickbackId && !isTestSend) {
+        try {
+          await db.collection('kickbacks').doc(kickbackId).set({
+            mailStatus: 'failed',
+            mailError: String(err?.message || err).slice(0, 500),
+            mailLastAttemptAt: FieldValue.serverTimestamp(),
+          }, { merge: true })
+        } catch (writeErr) {
+          console.error('mailStatus 書き戻し失敗:', writeErr)
+        }
+      }
       throw new HttpsError('internal', 'メール送信に失敗しました: ' + err.message)
     }
 
-    return { success: true, email: dealerEmail }
+    // PR-A: 成功時は mailStatus / mailSentAt / mailRecipients を Firestore に永続化
+    // テスト送信（testEmail 指定）は本番状態を汚さないため書き込まない
+    if (kickbackId && !isTestSend) {
+      try {
+        await db.collection('kickbacks').doc(kickbackId).set({
+          mailStatus: 'sent',
+          mailSentAt: FieldValue.serverTimestamp(),
+          mailRecipients: destinations,
+          mailError: null,
+        }, { merge: true })
+      } catch (writeErr) {
+        console.error('mailStatus 書き戻し失敗:', writeErr)
+      }
+    }
+
+    return { success: true, email: dealerEmail, kickbackId: kickbackId || null }
   }
 )
 
