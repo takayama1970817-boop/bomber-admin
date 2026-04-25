@@ -25,6 +25,10 @@ exports.nlTrack = nlTrack
 const { notifyKickback } = require('./notifyKickback')
 exports.notifyKickback = notifyKickback
 
+// 請求書メール送信（SendGrid + PDF添付）
+const { sendInvoice } = require('./sendInvoice')
+exports.sendInvoice = sendInvoice
+
 // Telnyx FAX送信
 const { sendFax, telnyxWebhook } = require('./sendFax')
 exports.sendFax = sendFax

@@ -16,6 +16,7 @@ import {
 import { db } from '../lib/firebase.js'
 import { generateInvoicePdf } from '../lib/generateInvoicePdf.js'
 import { fetchOrdersByMonth, fetchOrderProductsBatch, fetchLogisticsByIds } from '../lib/bcartApi.js'
+import InvoiceSendModal from '../components/InvoiceSendModal.jsx'
 
 function fmtYen(n) {
   if (n == null) return '—'
@@ -78,6 +79,7 @@ export default function InvoiceManage() {
   const [companyInfo, setCompanyInfo] = useState(null)
 
   const [confirmAction, setConfirmAction] = useState(null)
+  const [sendModalInvoice, setSendModalInvoice] = useState(null)
 
   // 初期データ取得
   useEffect(() => {
@@ -547,6 +549,20 @@ export default function InvoiceManage() {
                   </button>
                 )}
                 <button
+                  onClick={async () => {
+                    // 番号未採番なら、メール送信前に採番（PDF/メールで番号を一致させる）
+                    let target = inv
+                    if (!inv.invoiceNo) {
+                      const newNo = await assignInvoiceNo(inv)
+                      target = { ...inv, invoiceNo: newNo }
+                    }
+                    setSendModalInvoice(target)
+                  }}
+                  className="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-700"
+                >
+                  メール送信
+                </button>
+                <button
                   onClick={() => handleDownloadPdf(inv)}
                   className="rounded-lg border border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
                 >
@@ -566,10 +582,42 @@ export default function InvoiceManage() {
                     削除
                   </button>
                 )}
+                {inv.lastEmailedAt && (
+                  <span className="ml-auto text-xs text-gray-400">
+                    最終送信: {fmtDate(inv.lastEmailedAt)}
+                  </span>
+                )}
               </div>
             </div>
           ))}
         </div>
+      )}
+
+      {/* メール送信モーダル */}
+      {sendModalInvoice && (
+        <InvoiceSendModal
+          invoice={sendModalInvoice}
+          companyInfoFallback={companyInfo}
+          stampDataUrlFallback={stampDataUrl}
+          onClose={() => setSendModalInvoice(null)}
+          onSent={() => {
+            setSendModalInvoice(null)
+            // 送信成功後、Cloud Function 側で lastEmailedAt 更新と
+            // draft→sent 自動昇格をしているので、ローカル状態も追従。
+            setInvoices((prev) =>
+              prev.map((i) =>
+                i.id === sendModalInvoice.id
+                  ? {
+                      ...i,
+                      status: i.status === 'draft' ? 'sent' : i.status,
+                      lastEmailedAt: new Date(),
+                    }
+                  : i
+              )
+            )
+            alert(`${sendModalInvoice.dealerName || sendModalInvoice.dealerCode} に請求書メールを送信しました`)
+          }}
+        />
       )}
 
       {/* 確認モーダル */}

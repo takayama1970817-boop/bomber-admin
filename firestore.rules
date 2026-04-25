@@ -430,6 +430,19 @@ service cloud.firestore {
     }
 
     // ========================================
+    // invoiceEmailLogs コレクション（請求書メール送信履歴・追記型）
+    // sendInvoice Cloud Function（Admin SDK）からのみ書き込み。
+    // クライアント側 SDK は read のみ可能。再送は履歴ドキュメント自体を
+    // 書き換えるのではなく、新しい invoiceEmailLogs を append する設計。
+    // - read   : admin のみ
+    // - write  : 全面禁止（クライアント側）
+    // ========================================
+    match /invoiceEmailLogs/{logId} {
+      allow read:  if isAdmin();
+      allow create, update, delete: if false;
+    }
+
+    // ========================================
     // dealerDocuments コレクション（代理店・サロン向け資料）
     // visibility ベースのアクセス制御:
     //   - all      : 全ログインユーザー

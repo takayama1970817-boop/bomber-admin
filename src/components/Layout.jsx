@@ -127,7 +127,12 @@ export default function Layout() {
       {hasAccess('warehouse') && <Item to="/admin/warehouse" label="倉庫管理" onClick={closeMenu} />}
       {(isAdmin || profile?.role === 'staff') && <Item to="/settlements" label="取引精算" onClick={closeMenu} />}
       {hasAccess('kickback') && <Item to="/admin/kickback" label="KB清算" onClick={closeMenu} />}
-      {isAdmin && <Item to="/admin/invoices" label="請求書管理" onClick={closeMenu} />}
+      {isAdmin && (
+        <MenuGroup label="請求書">
+          <SubItem to="/admin/invoices" label="請求書管理" onClick={closeMenu} />
+          <SubItem to="/admin/invoice-email-history" label="メール送信履歴" onClick={closeMenu} />
+        </MenuGroup>
+      )}
       {hasAccess('users') && <Item to="/admin/users" label="スタッフ管理" onClick={closeMenu} />}
       {/* Bカート取り込みは不要（販売はBカートで直接処理） */}
       {hasAccess('receiptPreview') && <Item to="/admin/receipt-preview" label="領収書プレビュー" onClick={closeMenu} />}
