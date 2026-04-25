@@ -266,17 +266,11 @@ export default function DealerDashboard() {
                 {top10FollowNeeded.slice(0, 5).map((s) => (
                   <MobileFollowCard key={s.companyName} salon={s} />
                 ))}
+                {/* Top5 の続き導線は不具合再発のため一旦撤去（hotfix）。
+                    再設計後に別 PR で復活させる。 */}
                 {top10FollowNeeded.length > 5 && (
-                  <div className="text-center">
-                    {/* Top5 の続き（6位以降）が見える状態で /dealer/salons へ遷移。
-                        DealerSalons 側で view=priority を見て優先順ソートする
-                        （filter ではなく sort で実装。空リスト等の不具合を回避）。 */}
-                    <Link
-                      to="/dealer/salons?view=priority"
-                      className="inline-block rounded-lg border border-indigo-300 bg-white px-4 py-2 text-xs font-medium text-indigo-700"
-                    >
-                      優先フォロー一覧へ →
-                    </Link>
+                  <div className="text-center text-[11px] text-gray-400">
+                    （他 {top10FollowNeeded.length - 5} 店の優先フォロー一覧は再設計中）
                   </div>
                 )}
               </>

@@ -306,37 +306,11 @@ export default function DealerSalons() {
     )
   }
 
-  // クエリ ?view=priority のとき、優先フォロー順に並べ替えて表示する。
-  // 「sort（並べ替え）」だけで「filter（絞り込み）」しないため、件数 0 件等の
-  // edge case を発生させない安全実装。
-  // 優先度スコア:
-  //   履歴なし                : 1000（最優先・新規未発注）
-  //   90日以上未発注          : +200
-  //   30〜89日未発注          : +100
-  //   7〜29日未発注           : +30
-  //   今月発注なし（履歴あり）: +20
-  //   タイブレーク             : 経過日数（大きいほど上）
-  const viewMode = searchParams.get('view')
-  const showPriority = viewMode === 'priority'
-
-  const displayStats = useMemo(() => {
-    if (!showPriority) return sortedStats
-    const now = Date.now()
-    const score = (s) => {
-      if (!s.lastOrderDate) return 1000
-      const days = Math.floor((now - s.lastOrderDate.getTime()) / 86400000)
-      let p = 0
-      if (s.thisMonthOrders === 0) p += 20
-      if (days >= 90) p += 200
-      else if (days >= 30) p += 100
-      else if (days >= 7) p += 30
-      return p + days
-    }
-    return [...sortedStats].sort((a, b) => score(b) - score(a))
-  }, [sortedStats, showPriority])
-
-  const totalSales = displayStats.reduce((s, salon) => s + salon.totalSales, 0)
-  const totalOrders = displayStats.reduce((s, salon) => s + salon.totalOrders, 0)
+  // hotfix（PR #101 撤去）: view=priority による優先順ソートで真っ白画面の
+  // 報告があったため、PR #99 時点（売上順 sortedStats）に再度戻す。
+  // 原因が特定できるまで Top5 続き導線も非表示。
+  const totalSales = sortedStats.reduce((s, salon) => s + salon.totalSales, 0)
+  const totalOrders = sortedStats.reduce((s, salon) => s + salon.totalOrders, 0)
 
   return (
     <div>
@@ -365,34 +339,13 @@ export default function DealerSalons() {
         </div>
       )}
 
-      {/* 優先フォロー表示モードのバナー（インライン style 併用で FOUC 耐性も） */}
-      {showPriority && (
-        <div
-          className="mb-4 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs"
-          style={{
-            background: '#eef2ff',
-            border: '1px solid #c7d2fe',
-            borderRadius: 8,
-            padding: '8px 12px',
-            marginBottom: 16,
-          }}
-        >
-          <div className="font-bold text-indigo-700" style={{ color: '#4338ca', fontWeight: 700 }}>
-            フォロー優先サロン一覧（ダッシュボードの続き）
-          </div>
-          <div className="mt-1 text-indigo-500" style={{ color: '#6366f1', marginTop: 2 }}>
-            未発注期間が長いサロン順に並んでいます（並べ替えのみ。全 {displayStats.length} 件を表示）
-          </div>
-        </div>
-      )}
-
       {salons.length === 0 ? (
         <div className="rounded-xl border border-dashed border-gray-300 bg-white py-12 text-center text-sm text-gray-400">
           所属サロンがまだ登録されていません
         </div>
       ) : (
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-          {displayStats.map((salon) => (
+          {sortedStats.map((salon) => (
             <div
               key={salon.id}
               onClick={() => setSelected(salon.companyName)}
