@@ -22,10 +22,15 @@ const fetch = require('node-fetch')
 
 const BCART_API = 'https://api.bcart.jp/api/v1'
 const PAGE = 100
-const MAX_PAGES = 50 // 安全弁: 5000件まで
+// 軽量同期 (days=7) 用
+const MAX_PAGES_LIGHT = 50 // 5,000 件まで
+// 過去データ再取得 (fullSync) 用
+const MAX_PAGES_FULL = 1000 // 100,000 件まで（3 年分の全代理店 Bカート 注文を想定）
+// fullSync の起点（DealerSalons の表示範囲 36ヶ月と整合）
+const FULL_SYNC_FROM = '2023-01-01 00:00:00'
 
 exports.runIncrementalBcartSync = onCall(
-  { region: 'asia-northeast1', timeoutSeconds: 300, memory: '512MiB' },
+  { region: 'asia-northeast1', timeoutSeconds: 540, memory: '1GiB' },
   async (request) => {
     // 未捕捉例外を必ず HttpsError に包んで詳細メッセージをクライアントに返す。
     // 'internal' のまま渡すと UI で原因が分からない。
@@ -72,31 +77,49 @@ async function runSyncImpl(request) {
       }
     }
 
-    // 期間
-    const days = Math.max(1, Math.min(31, Number(request.data?.days) || 7))
-    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000)
-    const sinceStr =
-      `${since.getFullYear()}-${String(since.getMonth() + 1).padStart(2, '0')}-${String(since.getDate()).padStart(2, '0')} 00:00:00`
+    // 期間モード
+    //   通常: days=7 軽量同期（直近1週間）
+    //   fullSync=true: 2023-01-01 〜 現在の全期間（過去データ再取得）
+    //   days=N: 任意指定（fullSync 優先）
+    const fullSync = request.data?.fullSync === true
+    const days = fullSync
+      ? null
+      : Math.max(1, Math.min(365, Number(request.data?.days) || 7))
+    const sinceStr = fullSync
+      ? FULL_SYNC_FROM
+      : (() => {
+          const d = new Date(Date.now() - days * 24 * 60 * 60 * 1000)
+          return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} 00:00:00`
+        })()
+    const nowStr = (() => {
+      const d = new Date()
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} 23:59:59`
+    })()
+    const maxPages = fullSync ? MAX_PAGES_FULL : MAX_PAGES_LIGHT
 
     const token = process.env.BCART_API_TOKEN
     if (!token) {
       throw new HttpsError('internal', 'Bカート APIトークンが未設定です')
     }
 
+    console.log('[runIncrementalBcartSync] sync params', { dealerCode, fullSync, days, sinceStr, nowStr, maxPages, parents: [...myParents] })
+
     // Bカート 受注 取得（ページング）
     const fetched = []
-    for (let i = 0; i < MAX_PAGES; i += 1) {
+    for (let i = 0; i < maxPages; i += 1) {
       const offset = i * PAGE
-      const url = `${BCART_API}/orders?limit=${PAGE}&offset=${offset}&ordered_at__gte=${encodeURIComponent(sinceStr)}`
+      const url = `${BCART_API}/orders?limit=${PAGE}&offset=${offset}&ordered_at__gte=${encodeURIComponent(sinceStr)}&ordered_at__lte=${encodeURIComponent(nowStr)}`
       const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } })
       if (!res.ok) {
-        throw new HttpsError('internal', `Bカート API エラー: ${res.status}`)
+        throw new HttpsError('internal', `Bカート API エラー: ${res.status} (page=${i + 1})`)
       }
       const data = await res.json()
       const items = data?.orders || []
       fetched.push(...items)
       const total = data?.meta?.total ?? fetched.length
       if (items.length === 0 || fetched.length >= total) break
+      // safety: 5 ページごとに進捗ログ
+      if ((i + 1) % 5 === 0) console.log(`[runIncrementalBcartSync] fetched ${fetched.length}/${total} pages=${i + 1}`)
     }
 
     // 自代理店（と紐付く bcartParentId）に該当する注文だけ
@@ -147,6 +170,9 @@ async function runSyncImpl(request) {
       success: true,
       dealerCode,
       sinceDays: days,
+      fullSync,
+      fromDate: sinceStr,
+      toDate: nowStr,
       bcartFetched: fetched.length,
       matched: mine.length,
       created,

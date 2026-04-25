@@ -219,6 +219,35 @@ export default function DealerSalons() {
     }
   }
 
+  // 「過去データ再取得」: fullSync=true で 2023-01-01 〜 現在の Bカート 受注を全件 upsert。
+  // 通常の最新データ取得（直近7日）と異なり数分かかる可能性があるため確認ダイアログを挟む。
+  const runBcartFullSync = async () => {
+    if (!dealerCode || bcartSyncing) return
+    const ok = window.confirm(
+      '【過去データ再取得】\n2023年1月以降のBカート注文をすべて再取り込みします。\n数分〜十数分かかる可能性があります。実行してよろしいですか？',
+    )
+    if (!ok) return
+    setBcartSyncing(true)
+    setBcartSyncError(null)
+    setBcartSyncResult(null)
+    try {
+      const fn = httpsCallable(functions, 'runIncrementalBcartSync')
+      const res = await fn({ fullSync: true })
+      const r = res?.data || {}
+      setBcartSyncResult(r)
+      await loadData(true)
+    } catch (e) {
+      console.warn('runBcartFullSync error:', e?.code, e?.message, e?.details, e)
+      const parts = []
+      if (e?.code) parts.push(`[${e.code}]`)
+      if (e?.message) parts.push(e.message)
+      if (e?.details?.stack) parts.push(`stack: ${e.details.stack}`)
+      setBcartSyncError(parts.join(' ') || '同期に失敗しました')
+    } finally {
+      setBcartSyncing(false)
+    }
+  }
+
   // サロンごとの集計（O(N+M) 化＋ useMemo で memoize）
   // 旧実装は salons.map 内で orders.filter を呼ぶ O(N×M) で、
   // J0002 のような 200 サロン × 数千注文では数十万回の比較が走り重かった。
@@ -471,12 +500,24 @@ export default function DealerSalons() {
           >
             {bcartSyncing ? '⏳ 同期中…' : '⤓ 最新データ取得'}
           </button>
+          <button
+            onClick={runBcartFullSync}
+            disabled={loading || bcartSyncing}
+            className="rounded-lg border border-gray-400 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-100 disabled:opacity-50"
+            title="2023年1月以降の Bカート 注文を全件再取り込み（数分かかる場合があります）"
+          >
+            📂 過去データ再取得
+          </button>
         </div>
       </div>
       {/* 同期結果 / エラー表示 */}
       {bcartSyncResult && (
         <div className="mb-3 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-800">
-          ✅ Bカート 同期完了：直近 {bcartSyncResult.sinceDays} 日 / 取得 {bcartSyncResult.bcartFetched} 件 / 自代理店 {bcartSyncResult.matched} 件 / 新規 {bcartSyncResult.created} ・更新 {bcartSyncResult.updated}
+          ✅ Bカート 同期完了：
+          {bcartSyncResult.fullSync
+            ? `全期間（${bcartSyncResult.fromDate || '?'} 〜 ${bcartSyncResult.toDate || '?'}）`
+            : `直近 ${bcartSyncResult.sinceDays} 日（${bcartSyncResult.fromDate || '?'} 〜 ${bcartSyncResult.toDate || '?'}）`}
+          {' / '}取得 {bcartSyncResult.bcartFetched} 件 / 自代理店 {bcartSyncResult.matched} 件 / 新規 {bcartSyncResult.created} ・更新 {bcartSyncResult.updated}
           {bcartSyncResult.failed > 0 && ` / 失敗 ${bcartSyncResult.failed}`}
         </div>
       )}
