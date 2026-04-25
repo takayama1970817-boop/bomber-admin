@@ -35,12 +35,7 @@ export default function DealerSalons() {
   useEffect(() => () => { aliveRef.current = false }, [])
 
   const loadData = async (forceRefresh = false) => {
-    // 診断ログ（PR-B 後 0社/0円 報告対応・原因切り分け用）
-    console.log('[DealerSalons] loadData start', { dealerCode, forceRefresh, profile })
-    if (!dealerCode) {
-      console.warn('[DealerSalons] dealerCode 未取得のためスキップ')
-      setLoading(false); return
-    }
+    if (!dealerCode) { setLoading(false); return }
 
     // キャッシュキーを v2 に上げて、旧 v1（12ヶ月 Bカート 受注を保持）を自動無効化
     const cacheKey = `dealerSalonsPage:${dealerCode}:v2`
@@ -59,7 +54,6 @@ export default function DealerSalons() {
           const isEmpty = salonsLen === 0 && ordersLen === 0
           if (cached.date === today && cached.salons && cached.orders && !isEmpty) {
             if (!aliveRef.current) return
-            console.log('[DealerSalons] cache hit', { dealerCode, salonsLen, ordersLen, fetchedAt: cached.fetchedAt })
             setRawCount(cached.rawCount || cached.salons.length)
             setSalons(cached.salons)
             setOrders(cached.orders.map((o) => ({
@@ -71,7 +65,7 @@ export default function DealerSalons() {
             return
           }
           if (isEmpty) {
-            console.warn('[DealerSalons] 空キャッシュを破棄して再取得', { dealerCode, cacheDate: cached.date })
+            // 0件キャッシュは過去の取得失敗の可能性が高いため破棄
             try { localStorage.removeItem(cacheKey) } catch {}
           }
         }
@@ -96,14 +90,6 @@ export default function DealerSalons() {
         getDocs(query(collection(db, 'dealerSalons'), where('dealerCode', '==', dealerCode))),
         getDocs(query(collection(db, 'orders'), where('dealerCode', '==', dealerCode))),
       ])
-      console.log('[DealerSalons] fetched', {
-        dealerCode,
-        bcartNamesSize: bcartNames?.size,
-        bcartRawCount: bcartNames?.rawCount,
-        bcartRecords: Array.isArray(bcartNames?.records) ? bcartNames.records.length : null,
-        dealerSalonsCount: salonSnap.size,
-        ordersCount: ordersSnap.size,
-      })
       if (!aliveRef.current) return
 
       const computedRawCount = bcartNames.rawCount || bcartNames.size
@@ -143,13 +129,6 @@ export default function DealerSalons() {
         })
       }
       setOrders(allOrders)
-      console.log('[DealerSalons] processed', {
-        salonsCount: combinedSalons.length,
-        ordersCount: allOrders.length,
-        cutoffDate: cutoff.toISOString(),
-        firstFiveSalons: combinedSalons.slice(0, 5).map((s) => s.companyName),
-        firstFiveOrders: allOrders.slice(0, 5).map((o) => ({ companyName: o.companyName, date: o.orderDate?.toISOString?.(), total: o.total })),
-      })
 
       // キャッシュ保存（Date は ISO 文字列に）
       const fetchedAt = new Date().toLocaleString('ja-JP')
