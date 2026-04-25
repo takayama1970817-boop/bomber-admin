@@ -46,6 +46,120 @@ export function extractCityish(address) {
   return pref?.[1] || null
 }
 
+// 主要地のフォールバック座標（geocoding が失敗した時の保険）
+//   日本語の「愛知県名古屋市」のような形式は Open-Meteo geocoding で
+//   ヒットしないケースがあるため、よく出る都道府県・主要都市は座標を持っておく。
+//   表示名は呼び出し側の placeLabel をそのまま使う（このマップの name はデバッグ用）。
+const FALLBACK_COORDS = {
+  // 都道府県（県庁所在地座標）
+  '北海道': { lat: 43.0642, lon: 141.3469 },
+  '青森県': { lat: 40.8244, lon: 140.7400 },
+  '岩手県': { lat: 39.7036, lon: 141.1527 },
+  '宮城県': { lat: 38.2682, lon: 140.8694 },
+  '秋田県': { lat: 39.7186, lon: 140.1024 },
+  '山形県': { lat: 38.2404, lon: 140.3636 },
+  '福島県': { lat: 37.7503, lon: 140.4677 },
+  '茨城県': { lat: 36.3418, lon: 140.4468 },
+  '栃木県': { lat: 36.5658, lon: 139.8836 },
+  '群馬県': { lat: 36.3911, lon: 139.0608 },
+  '埼玉県': { lat: 35.8569, lon: 139.6489 },
+  '千葉県': { lat: 35.6051, lon: 140.1233 },
+  '東京都': { lat: 35.6762, lon: 139.6503 },
+  '神奈川県': { lat: 35.4478, lon: 139.6425 },
+  '新潟県': { lat: 37.9023, lon: 139.0237 },
+  '富山県': { lat: 36.6953, lon: 137.2113 },
+  '石川県': { lat: 36.5947, lon: 136.6256 },
+  '福井県': { lat: 36.0652, lon: 136.2216 },
+  '山梨県': { lat: 35.6642, lon: 138.5683 },
+  '長野県': { lat: 36.6513, lon: 138.1810 },
+  '岐阜県': { lat: 35.3912, lon: 136.7223 },
+  '静岡県': { lat: 34.9769, lon: 138.3831 },
+  '愛知県': { lat: 35.1815, lon: 136.9066 },
+  '三重県': { lat: 34.7303, lon: 136.5086 },
+  '滋賀県': { lat: 35.0045, lon: 135.8686 },
+  '京都府': { lat: 35.0116, lon: 135.7681 },
+  '大阪府': { lat: 34.6937, lon: 135.5023 },
+  '兵庫県': { lat: 34.6913, lon: 135.1830 },
+  '奈良県': { lat: 34.6851, lon: 135.8048 },
+  '和歌山県': { lat: 34.2261, lon: 135.1675 },
+  '鳥取県': { lat: 35.5039, lon: 134.2381 },
+  '島根県': { lat: 35.4723, lon: 133.0505 },
+  '岡山県': { lat: 34.6618, lon: 133.9344 },
+  '広島県': { lat: 34.3853, lon: 132.4553 },
+  '山口県': { lat: 34.1859, lon: 131.4706 },
+  '徳島県': { lat: 34.0658, lon: 134.5593 },
+  '香川県': { lat: 34.3401, lon: 134.0434 },
+  '愛媛県': { lat: 33.8416, lon: 132.7657 },
+  '高知県': { lat: 33.5597, lon: 133.5311 },
+  '福岡県': { lat: 33.5904, lon: 130.4017 },
+  '佐賀県': { lat: 33.2494, lon: 130.2989 },
+  '長崎県': { lat: 32.7503, lon: 129.8779 },
+  '熊本県': { lat: 32.7898, lon: 130.7417 },
+  '大分県': { lat: 33.2382, lon: 131.6126 },
+  '宮崎県': { lat: 31.9111, lon: 131.4239 },
+  '鹿児島県': { lat: 31.5602, lon: 130.5581 },
+  '沖縄県': { lat: 26.2125, lon: 127.6809 },
+  // 主要市区町村（よく当たるもの）
+  '愛知県名古屋市': { lat: 35.1815, lon: 136.9066 },
+  '大阪府大阪市': { lat: 34.6937, lon: 135.5023 },
+  '東京都新宿区': { lat: 35.6938, lon: 139.7036 },
+  '東京都渋谷区': { lat: 35.6580, lon: 139.7016 },
+  '東京都世田谷区': { lat: 35.6464, lon: 139.6533 },
+  '神奈川県横浜市': { lat: 35.4478, lon: 139.6425 },
+  '京都府京都市': { lat: 35.0116, lon: 135.7681 },
+  '兵庫県神戸市': { lat: 34.6913, lon: 135.1830 },
+  '福岡県福岡市': { lat: 33.5904, lon: 130.4017 },
+  '宮城県仙台市': { lat: 38.2682, lon: 140.8694 },
+  '広島県広島市': { lat: 34.3853, lon: 132.4553 },
+  '埼玉県さいたま市': { lat: 35.8617, lon: 139.6455 },
+  '千葉県千葉市': { lat: 35.6051, lon: 140.1233 },
+  '栃木県宇都宮市': { lat: 36.5551, lon: 139.8826 },
+}
+
+// 場所名からフォールバック座標を引く
+function lookupFallbackCoords(place) {
+  if (!place) return null
+  const s = String(place).normalize('NFKC').replace(/\s+/g, '')
+  if (FALLBACK_COORDS[s]) return FALLBACK_COORDS[s]
+  // 都道府県＋市町村パターンで都道府県のみで再検索
+  const m = s.match(/^([^0-9]{2,4}[都道府県])/)
+  if (m && FALLBACK_COORDS[m[1]]) return FALLBACK_COORDS[m[1]]
+  return null
+}
+
+// 段階的に geocoding を試行、失敗したらフォールバック座標、それも無ければ東京都
+async function resolveCoords(placeQuery) {
+  if (!placeQuery) return { lat: 35.6762, lon: 139.6503, source: 'default' }
+  // 試行する name 候補
+  const tries = [placeQuery]
+  // 「愛知県名古屋市」→「愛知県 名古屋市」「名古屋市」「愛知県」を追加
+  const m = String(placeQuery).normalize('NFKC').match(/^([^0-9\s]{2,4}[都道府県])\s*(.+)/)
+  if (m) {
+    tries.push(`${m[1]} ${m[2]}`)
+    tries.push(m[2])
+    tries.push(m[1])
+  }
+  for (const q of tries) {
+    try {
+      const url = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(q)}&count=1&language=ja&country=JP`
+      const res = await fetch(url)
+      if (!res.ok) continue
+      const data = await res.json()
+      const r = data.results?.[0]
+      if (r && Number.isFinite(r.latitude) && Number.isFinite(r.longitude)) {
+        return { lat: r.latitude, lon: r.longitude, source: 'geocoding' }
+      }
+    } catch {
+      // 続行
+    }
+  }
+  // フォールバック座標
+  const fb = lookupFallbackCoords(placeQuery)
+  if (fb) return { lat: fb.lat, lon: fb.lon, source: 'fallback' }
+  // 最終フォールバック: 東京都
+  return { lat: 35.6762, lon: 139.6503, source: 'default-tokyo' }
+}
+
 // WMO 天気コード → アイコン+名称
 const WMO = {
   0: { icon: '☀️', name: '晴れ' },
@@ -115,24 +229,26 @@ export default function DealerWeatherCard({ dealerCode }) {
   }, [dealerCode])
 
   // 天気取得（所在地変更時のみ）
+  // 1. resolveCoords: geocoding（複数パターン）→ フォールバック座標 → 東京都の順
+  // 2. forecast: lat/lon で 2日分（weather_code / temp max/min / precip prob max）
+  // 3. 表示地名は placeQuery を維持（geocoding 結果ではなく、Firestore の値）
+  // 4. エラー時も place 表示は維持し、天気だけエラー表示
   useEffect(() => {
     let cancelled = false
     setError(null)
     ;(async () => {
       try {
-        const geoUrl = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(placeQuery)}&count=1&language=ja&country=JP`
-        const geoRes = await fetch(geoUrl)
-        if (!geoRes.ok) throw new Error('geocoding HTTP ' + geoRes.status)
-        const geoData = await geoRes.json()
-        const r = geoData.results?.[0]
-        if (!r) throw new Error('地名解決に失敗')
-        const fcUrl = `https://api.open-meteo.com/v1/forecast?latitude=${r.latitude}&longitude=${r.longitude}&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max&timezone=Asia/Tokyo&forecast_days=2`
+        const coords = await resolveCoords(placeQuery)
+        const fcUrl = `https://api.open-meteo.com/v1/forecast?latitude=${coords.lat}&longitude=${coords.lon}&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max&timezone=Asia/Tokyo&forecast_days=2`
         const fcRes = await fetch(fcUrl)
         if (!fcRes.ok) throw new Error('forecast HTTP ' + fcRes.status)
         const fc = await fcRes.json()
         if (cancelled) return
+        if (!fc?.daily?.weather_code) throw new Error('forecast データ形式異常')
         setWeather({
-          place: r.admin1 ? `${r.admin1}${r.name === r.admin1 ? '' : ' ' + r.name}` : r.name,
+          // 表示地名は placeQuery（Firestore の weatherLocation / address 由来）をそのまま
+          place: placeQuery,
+          source: coords.source,
           today: {
             code: fc.daily.weather_code[0],
             max: fc.daily.temperature_2m_max[0],
@@ -147,6 +263,7 @@ export default function DealerWeatherCard({ dealerCode }) {
           },
         })
       } catch (e) {
+        console.warn('[DealerWeatherCard] 天気取得失敗:', e?.message, 'place=', placeQuery)
         if (!cancelled) setError(e?.message || '天気取得失敗')
       }
     })()
@@ -173,7 +290,7 @@ export default function DealerWeatherCard({ dealerCode }) {
           )}
           {error && (
             <div className="mt-3 rounded-lg bg-amber-50 px-2.5 py-1.5 text-[11px] text-amber-700">
-              天気情報を取得できませんでした
+              {placeLabel} の天気情報を取得できませんでした
             </div>
           )}
 
@@ -240,7 +357,7 @@ export default function DealerWeatherCard({ dealerCode }) {
             )}
             {error && (
               <div className="rounded bg-amber-50 px-2 py-0.5 text-[11px] text-amber-700">
-                天気を取得できませんでした
+                {placeLabel} の天気を取得できませんでした
               </div>
             )}
 
