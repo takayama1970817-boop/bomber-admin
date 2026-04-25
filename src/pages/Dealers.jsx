@@ -350,6 +350,7 @@ export default function Dealers() {
       email: d.email || '',
       invoiceEmail: d.invoiceEmail || '',
       address: d.address || '',
+      weatherLocation: d.weatherLocation || '',
       phone: d.phone || '',
       representative: d.representative || '',
       paymentMethod: d.paymentMethod || '',
@@ -895,6 +896,21 @@ export default function Dealers() {
                     className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none"
                     placeholder="464-0035 愛知県名古屋市千種区..."
                   />
+                </div>
+                <div className="col-span-2">
+                  <label className="mb-1 block text-xs text-gray-500">
+                    天気カード表示地（任意）
+                  </label>
+                  <input
+                    type="text"
+                    value={editingDealer.weatherLocation}
+                    onChange={(e) => setEditingDealer({ ...editingDealer, weatherLocation: e.target.value })}
+                    className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none"
+                    placeholder="大阪府大阪市 / 東京都渋谷区 など"
+                  />
+                  <p className="mt-1 text-[11px] text-gray-400">
+                    代理店ダッシュボードの天気カード用。未入力なら住所から推定、それも失敗時は「東京都」になります。
+                  </p>
                 </div>
                 <div>
                   <label className="mb-1 block text-xs text-gray-500">電話番号</label>
