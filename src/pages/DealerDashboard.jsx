@@ -70,13 +70,15 @@ function AlertSection({ title, emoji, accent, items, renderRight }) {
 
 export default function DealerDashboard() {
   const { profile } = useAuth()
+  // PR-C: トップ画面では商品ランキング / 月次推移を使わないので
+  //        useDealerDashboard 内の重い計算（特に items 走査）をスキップ。
   const {
     loading, error, kpis,
     top10FollowNeeded,
     sharpDeclines,
     inactiveSalons,
     firstOrderStopped,
-  } = useDealerDashboard(profile)
+  } = useDealerDashboard(profile, { skipProducts: true, skipMonthlyTrend: true })
 
   return (
     <div className="mx-auto max-w-7xl space-y-5">
