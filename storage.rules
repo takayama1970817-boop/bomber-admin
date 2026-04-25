@@ -9,16 +9,53 @@ service firebase.storage {
                    && request.resource.contentType.matches('image/.*|application/pdf|application/msword|application/vnd.openxmlformats-officedocument.*|text/.*|application/zip|application/x-zip-compressed|text/csv');
     }
 
-    // キックバック清算書 PDF
-    // - 認証済みユーザーは全員 read 可（Firestore rules 側で kickbacks.dealerCode 一致 read のため実質スコープ閉じる）
-    // - write は admin/master のみ（Firestore の users ドキュメントを参照）
+    // ========================================
+    // キックバック清算書（旧パス: kickback-pdfs/）
+    // - 認証済みユーザーは全員 read 可（既存挙動維持）
+    // - write は admin/master のみ
     // - 20MB 以下 / PDF のみ
+    // 新規アップロードは下記 kickbacks/{dealerCode}/{month}/ パスを使う想定。
+    // 既存ファイルへの後方互換のためこの match は残す。
+    // ========================================
     match /kickback-pdfs/{dealerCode}/{fileName} {
       allow read: if request.auth != null;
       allow write: if request.auth != null
                    && firestore.get(/databases/(default)/documents/users/$(request.auth.uid)).data.role in ['admin', 'master']
                    && request.resource.size < 20 * 1024 * 1024
                    && request.resource.contentType == 'application/pdf';
+    }
+
+    // ========================================
+    // キックバック清算書 新パス（PR-A 以降）
+    //   path: kickbacks/{dealerCode}/{month}/{fileName}
+    //   PDF / CSV を統一配置。dealerCode スコープで dealer の read を制限。
+    //
+    // PR-C（2026-04-25）: docs/KICKBACK_REQUIREMENTS.md §7-8 に準拠
+    //   - admin / master: 全パス read/write 可
+    //   - 該当 dealerCode の dealer のみ read 可（他代理店からは read 不可）
+    //   - dealer / salon / staff の write は不可
+    //   - PDF (20MB 以下) / CSV (5MB 以下)
+    //
+    // mailStatus は読み取り判定に一切影響させない（要件: メール送信と分離）。
+    // ========================================
+    match /kickbacks/{dealerCode}/{month}/{fileName} {
+      function callerRole() {
+        return firestore.get(/databases/(default)/documents/users/$(request.auth.uid)).data.role;
+      }
+      function callerDealerCode() {
+        return firestore.get(/databases/(default)/documents/users/$(request.auth.uid)).data.dealerCode;
+      }
+      allow read: if request.auth != null && (
+        callerRole() in ['admin', 'master']
+        || (callerRole() == 'dealer' && callerDealerCode() == dealerCode)
+      );
+      allow write: if request.auth != null
+                   && callerRole() in ['admin', 'master']
+                   && request.resource.size < 20 * 1024 * 1024
+                   && (
+                     request.resource.contentType.matches('application/pdf.*')
+                     || request.resource.contentType.matches('text/csv.*')
+                   );
     }
 
     // 研修発行物 PDF（ディプロマ / 認定サロン賞）PR-3 導入 / 2026-04-22 修正

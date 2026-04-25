@@ -270,12 +270,24 @@ service cloud.firestore {
 
     // ========================================
     // kickbacks コレクション（キックバック清算書）
-    // admin は全件読み書き。dealer は自社の清算書のみ読める
+    //
+    // PR-C（2026-04-25）: docs/KICKBACK_REQUIREMENTS.md §8 に準拠
+    //   - admin / master: 全件 read/write
+    //   - dealer: 自社 dealerCode 一致 かつ phase != 'calculating' のみ read
+    //   - mailStatus は read 可否に影響させない（要件: メール送信と分離）
+    //
+    // 後方互換: phase フィールドが未設定の既存ドキュメント（バックフィル前）も
+    //   dealer から read 可能とする。バックフィル後は phase が必ず入っているため
+    //   このフォールバックは段階的に外せる。
     // ========================================
     match /kickbacks/{docId} {
-      allow read:  if isSignedIn()
-                    && (isAdmin()
-                        || resource.data.dealerCode == userDoc().dealerCode);
+      allow read: if isSignedIn() && (
+        isAdmin()
+        || (
+          resource.data.dealerCode == userDoc().dealerCode
+          && (!('phase' in resource.data) || resource.data.phase != 'calculating')
+        )
+      );
       allow write: if isAdmin();
     }
 
