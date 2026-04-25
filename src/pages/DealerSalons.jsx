@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { useSearchParams, Link } from 'react-router-dom'
 import { collection, getDocs, query, where } from 'firebase/firestore'
 import { db } from '../lib/firebase.js'
 import { useAuth } from '../contexts/AuthContext.jsx'
@@ -306,9 +306,24 @@ export default function DealerSalons() {
     )
   }
 
-  // サロン一覧
-  const totalSales = sortedStats.reduce((s, salon) => s + salon.totalSales, 0)
-  const totalOrders = sortedStats.reduce((s, salon) => s + salon.totalOrders, 0)
+  // クエリパラメータでのフィルタ対応（PR-1 後続: トップから「フォロー優先のみ」遷移用）
+  //   ?filter=followNeeded → 当月発注なし or 30日以上未発注のサロンのみ
+  const filterMode = searchParams.get('filter')
+  const isFollowNeeded = (salon) => {
+    if (!salon) return false
+    if (salon.thisMonthOrders === 0) return true
+    if (!salon.lastOrderDate) return true
+    const days = Math.floor((Date.now() - salon.lastOrderDate.getTime()) / 86400000)
+    return days >= 30
+  }
+  const filteredStats = useMemo(() => {
+    if (filterMode !== 'followNeeded') return sortedStats
+    return sortedStats.filter(isFollowNeeded)
+  }, [sortedStats, filterMode])
+
+  // 表示用の合計（フィルタ反映）
+  const totalSales = filteredStats.reduce((s, salon) => s + salon.totalSales, 0)
+  const totalOrders = filteredStats.reduce((s, salon) => s + salon.totalOrders, 0)
 
   return (
     <div>
@@ -337,13 +352,28 @@ export default function DealerSalons() {
         </div>
       )}
 
+      {/* フィルタ表示中バナー */}
+      {filterMode === 'followNeeded' && (
+        <div className="mb-4 flex flex-wrap items-center gap-2 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs">
+          <span className="font-bold text-indigo-700">フォロー優先のサロンのみ表示中</span>
+          <span className="text-indigo-500">{filteredStats.length} 件</span>
+          <Link to="/dealer/salons" className="ml-auto text-indigo-700 underline">
+            フィルタを解除して全件表示
+          </Link>
+        </div>
+      )}
+
       {salons.length === 0 ? (
         <div className="rounded-xl border border-dashed border-gray-300 bg-white py-12 text-center text-sm text-gray-400">
           所属サロンがまだ登録されていません
         </div>
+      ) : filteredStats.length === 0 ? (
+        <div className="rounded-xl border border-dashed border-gray-300 bg-white py-12 text-center text-sm text-gray-400">
+          フォロー優先サロンはありません 👍
+        </div>
       ) : (
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-          {sortedStats.map((salon) => (
+          {filteredStats.map((salon) => (
             <div
               key={salon.id}
               onClick={() => setSelected(salon.companyName)}
