@@ -9,6 +9,9 @@ initializeApp()
 const { syncBcartInventory } = require('./bcartSync')
 exports.syncBcartInventory = syncBcartInventory
 
+const { runIncrementalBcartSync } = require('./incrementalBcartSync')
+exports.runIncrementalBcartSync = runIncrementalBcartSync
+
 // 帳票メール送信
 const { sendProjectDoc } = require('./sendProjectDoc')
 exports.sendProjectDoc = sendProjectDoc
