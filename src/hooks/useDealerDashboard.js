@@ -27,9 +27,15 @@ export default function useDealerDashboard(user, options = {}) {
   //   トップ画面のような不要計算をスキップして初期表示を高速化できる。
   const skipProducts = options?.skipProducts === true
   const skipMonthlyTrend = options?.skipMonthlyTrend === true
+  // 横展開 Phase 1（2026-04-25）: 当日 localStorage キャッシュ機能（opt-in）
+  //   cacheKey 指定時のみキャッシュ読み書き。指定なしは従来動作（毎回 fetch）。
+  const cacheKey = options?.cacheKey || null
   const [allOrders, setAllOrders] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
+  const [reloadCounter, setReloadCounter] = useState(0)
+  // 明示的な再読込（force=true でキャッシュも無視）
+  const reload = () => setReloadCounter((c) => c + 1)
 
   useEffect(() => {
     if (!user?.dealerCode) {
@@ -39,6 +45,29 @@ export default function useDealerDashboard(user, options = {}) {
     }
 
     let cancelled = false
+
+    // キャッシュ読み込み（reloadCounter==0 のときだけ。再読込時はバイパス）
+    const today = new Date().toISOString().slice(0, 10)
+    if (cacheKey && reloadCounter === 0) {
+      try {
+        const raw = localStorage.getItem(cacheKey)
+        if (raw) {
+          const cached = JSON.parse(raw)
+          if (cached.date === today && Array.isArray(cached.orders) && cached.orders.length > 0) {
+            // syncedAt は ISO 文字列で保存されているため Date 化
+            const restored = cached.orders.map((o) => ({
+              ...o,
+              syncedAt: o.syncedAt ? new Date(o.syncedAt) : null,
+            }))
+            setAllOrders(restored)
+            setLoading(false)
+            setError(null)
+            return () => { cancelled = true }
+          }
+        }
+      } catch (e) { console.warn('useDealerDashboard cache read failed:', e) }
+    }
+
     setLoading(true)
     setError(null)
 
@@ -51,7 +80,26 @@ export default function useDealerDashboard(user, options = {}) {
     getDocs(q)
       .then((snap) => {
         if (cancelled) return
-        setAllOrders(filterValidOrders(snap.docs.map((d) => ({ id: d.id, ...d.data() }))))
+        const filtered = filterValidOrders(snap.docs.map((d) => ({ id: d.id, ...d.data() })))
+        // 0件取得で既存データを上書きしない（fullSync 横展開要件）
+        if (filtered.length === 0 && allOrders.length > 0) {
+          console.warn('[useDealerDashboard] 0 件取得のため既存 orders を保持')
+          return
+        }
+        setAllOrders(filtered)
+        // キャッシュ保存（syncedAt は ISO 化）
+        if (cacheKey) {
+          try {
+            const serialised = filtered.map((o) => {
+              const sec = o.syncedAt?._seconds ?? o.syncedAt?.seconds
+              const syncedISO = sec ? new Date(sec * 1000).toISOString()
+                : o.syncedAt instanceof Date ? o.syncedAt.toISOString()
+                : null
+              return { ...o, syncedAt: syncedISO }
+            })
+            localStorage.setItem(cacheKey, JSON.stringify({ date: today, orders: serialised }))
+          } catch (e) { console.warn('useDealerDashboard cache write failed:', e) }
+        }
       })
       .catch((e) => {
         console.error('useDealerDashboard fetch error:', e)
@@ -62,7 +110,8 @@ export default function useDealerDashboard(user, options = {}) {
       })
 
     return () => { cancelled = true }
-  }, [user?.dealerCode])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.dealerCode, reloadCounter])
 
   // 6ヶ月窓に絞った orders 配列（従来の hook 入力と同じ意味）
   const sixMoOrders = useMemo(() => {
@@ -91,6 +140,7 @@ export default function useDealerDashboard(user, options = {}) {
     ordersCount: sixMoOrders.length,
     summary,
     allOrders, // 全期間 orders（DealerExecDashboard のサロン構成計算用）
+    reload,    // 横展開 Phase 1: 明示的な再読込（キャッシュバイパス）
   }
 }
 

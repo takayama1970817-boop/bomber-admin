@@ -6,9 +6,14 @@ import { useAuth } from '../contexts/AuthContext.jsx'
 import useDealerDashboard, { activeRateColor, STATUS_BADGE } from '../hooks/useDealerDashboard.js'
 import { normalizeCompanyName } from '../lib/nameNormalize.js'
 import { fetchDealerSalonNamesFromBcart } from '../lib/dashboardAggregator.js'
-
-const fmtYen = (n) => `¥${Math.round(Number(n) || 0).toLocaleString()}`
-const fmtPct = (n) => (n == null ? '—' : `${(n * 100).toFixed(1)}%`)
+// 横展開 Phase 1（2026-04-25）: 表示フォーマッタ / 共通 UI を統一
+import { fmtYen, fmtPct, fmtPctSigned } from '../lib/formatters.js'
+import {
+  LoadingSkeleton,
+  ErrorBanner,
+  RefreshButton,
+  LastSyncedBadge,
+} from '../components/common/index.js'
 
 function fmtMonth(m) {
   if (!m) return ''
@@ -98,12 +103,31 @@ function daysSince(lastOrderDate, now = new Date()) {
 
 export default function DealerExecDashboard() {
   const { profile } = useAuth()
+  // 横展開 Phase 1: 当日 localStorage キャッシュ + 明示的 reload
+  // cacheKey は dealerCode 単位（他代理店データ混入防止）
+  const cacheKey = profile?.dealerCode
+    ? `dealerExecDashboard:${profile.dealerCode}:v1`
+    : null
   const {
     loading, error, kpis, salons,
     monthlyTrend, productsRanking, statusDistribution,
     productCoverage,
     allOrders, // PR-A 統合: hook が全期間 orders を返すようになった
-  } = useDealerDashboard(profile)
+    reload,    // 横展開 Phase 1: 明示的な再読込（キャッシュバイパス）
+  } = useDealerDashboard(profile, { cacheKey })
+
+  // orders の最大 syncedAt から最終同期時刻を導出（LastSyncedBadge 用）
+  const lastSyncedAt = useMemo(() => {
+    let latest = null
+    for (const o of allOrders) {
+      const sec = o.syncedAt?._seconds ?? o.syncedAt?.seconds
+      const d = sec ? new Date(sec * 1000)
+        : o.syncedAt instanceof Date ? o.syncedAt
+        : null
+      if (d && (!latest || d > latest)) latest = d
+    }
+    return latest
+  }, [allOrders])
 
   const [statusFilter, setStatusFilter] = useState('all')
 
@@ -476,23 +500,28 @@ export default function DealerExecDashboard() {
             自社配下サロンの売上・状態を Firestore から集計（直近6ヶ月）
           </p>
         </div>
-        <Link
-          to="/dealer"
-          className="rounded-lg border border-indigo-300 bg-white px-3 py-1.5 text-xs font-medium text-indigo-700 hover:bg-indigo-50"
-        >
-          ← アクションセンター
-        </Link>
+        <div className="flex items-center gap-2">
+          <RefreshButton
+            onClick={reload}
+            loading={loading}
+            label="再読込"
+            title="Firestore から最新の orders を再取得（当日キャッシュをバイパス）"
+          />
+          <Link
+            to="/dealer"
+            className="rounded-lg border border-indigo-300 bg-white px-3 py-1.5 text-xs font-medium text-indigo-700 hover:bg-indigo-50"
+          >
+            ← アクションセンター
+          </Link>
+        </div>
       </div>
 
-      {error && (
-        <div className="rounded-xl border border-red-300 bg-red-50 p-4 text-sm text-red-800">{error}</div>
-      )}
+      {/* データ鮮度バッジ（Bカート → Firestore 同期時刻） */}
+      <LastSyncedBadge syncedAt={lastSyncedAt} />
 
-      {loading && !error && (
-        <div className="rounded-xl border border-gray-200 bg-white p-10 text-center text-sm text-gray-500">
-          読み込み中...
-        </div>
-      )}
+      <ErrorBanner message={error} onRetry={reload} />
+
+      {loading && !error && <LoadingSkeleton variant="card" lines={4} />}
 
       {!loading && !error && kpis && (
         <>
@@ -510,7 +539,7 @@ export default function DealerExecDashboard() {
             />
             <KpiCard
               label="前月比"
-              value={fmtPct(kpis.diffRate)}
+              value={fmtPctSigned(kpis.diffRate)}
               sub={`前月 ${fmtYen(kpis.prevSales)}`}
               subColor={
                 (kpis.diffRate ?? 0) > 0
@@ -875,7 +904,7 @@ export default function DealerExecDashboard() {
                                   ? 'text-red-600'
                                   : 'text-gray-500'
                           }`}>
-                            {s.diffRate == null ? '—' : fmtPct(s.diffRate)}
+                            {s.diffRate == null ? '—' : fmtPctSigned(s.diffRate)}
                           </td>
                           <td className="px-4 py-2 text-xs text-gray-600">
                             {fmtDate(s.lastOrderDate)}
