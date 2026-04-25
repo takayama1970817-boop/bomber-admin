@@ -229,13 +229,39 @@ export default function DealerWeatherCard({ dealerCode }) {
   }, [dealerCode])
 
   // 天気取得（所在地変更時のみ）
+  // キャッシュ戦略（PR 2026-04-25）:
+  //   - localStorage: weatherCard:{dealerCode}:{placeQuery}:v1
+  //   - 当日キャッシュがあれば fetch せず即時表示
+  //   - 翌日になったら再取得
+  //   - fetch 失敗時は古いキャッシュがあればそれを表示（停電耐性）
   // 1. resolveCoords: geocoding（複数パターン）→ フォールバック座標 → 東京都の順
   // 2. forecast: lat/lon で 2日分（weather_code / temp max/min / precip prob max）
-  // 3. 表示地名は placeQuery を維持（geocoding 結果ではなく、Firestore の値）
-  // 4. エラー時も place 表示は維持し、天気だけエラー表示
+  // 3. 表示地名は placeQuery を維持
+  // 4. エラー時も place 表示は維持
   useEffect(() => {
+    if (!placeQuery) return
     let cancelled = false
     setError(null)
+    const cacheKey = `weatherCard:${dealerCode || 'anon'}:${placeQuery}:v1`
+    const today = new Date().toISOString().slice(0, 10)
+
+    // 同日キャッシュがあれば即時表示して fetch スキップ
+    let staleCache = null
+    try {
+      const raw = localStorage.getItem(cacheKey)
+      if (raw) {
+        const cached = JSON.parse(raw)
+        if (cached?.weather) {
+          if (cached.date === today) {
+            setWeather(cached.weather)
+            return // ← 当日 → fetch しない
+          }
+          // 当日でなくても、fetch 失敗時のフォールバックとして保持
+          staleCache = cached.weather
+        }
+      }
+    } catch (e) { /* ignore */ }
+
     ;(async () => {
       try {
         const coords = await resolveCoords(placeQuery)
@@ -245,8 +271,7 @@ export default function DealerWeatherCard({ dealerCode }) {
         const fc = await fcRes.json()
         if (cancelled) return
         if (!fc?.daily?.weather_code) throw new Error('forecast データ形式異常')
-        setWeather({
-          // 表示地名は placeQuery（Firestore の weatherLocation / address 由来）をそのまま
+        const next = {
           place: placeQuery,
           source: coords.source,
           today: {
@@ -261,14 +286,29 @@ export default function DealerWeatherCard({ dealerCode }) {
             min: fc.daily.temperature_2m_min[1],
             precip: fc.daily.precipitation_probability_max?.[1] ?? null,
           },
-        })
+        }
+        setWeather(next)
+        // 取得成功 → キャッシュ保存
+        try {
+          localStorage.setItem(cacheKey, JSON.stringify({
+            date: today,
+            fetchedAt: Date.now(),
+            weather: next,
+          }))
+        } catch (e) { /* ignore */ }
       } catch (e) {
         console.warn('[DealerWeatherCard] 天気取得失敗:', e?.message, 'place=', placeQuery)
-        if (!cancelled) setError(e?.message || '天気取得失敗')
+        if (!cancelled) {
+          if (staleCache) {
+            setWeather(staleCache) // 取得失敗でも前回成功データを表示継続
+          } else {
+            setError(e?.message || '天気取得失敗')
+          }
+        }
       }
     })()
     return () => { cancelled = true }
-  }, [placeQuery])
+  }, [placeQuery, dealerCode])
 
   const today = useMemo(() => weather?.today, [weather])
   const tomorrow = useMemo(() => weather?.tomorrow, [weather])

@@ -24,31 +24,37 @@ function fmtDate(d) {
 function KpiCard({ label, value, sub, subColor, accent }) {
   const border = accent === 'primary' ? 'border-indigo-200 bg-indigo-50' : 'border-gray-200 bg-white'
   return (
-    <div className={`rounded-2xl border ${border} p-5`}>
+    <div className={`min-w-0 rounded-2xl border ${border} p-4 md:p-5`}>
       <div className="text-xs text-gray-500">{label}</div>
-      <div className="mt-2 text-2xl font-bold text-gray-900">{value}</div>
-      {sub && <div className={`mt-1 text-xs ${subColor || 'text-gray-500'}`}>{sub}</div>}
+      <div className="mt-2 text-xl font-bold leading-tight text-gray-900 break-words md:text-2xl">{value}</div>
+      {sub && <div className={`mt-1 text-[11px] leading-snug md:text-xs ${subColor || 'text-gray-500'}`}>{sub}</div>}
     </div>
   )
 }
 
 // サロン状況パネル内のクリック可能タイル
 function StatTile({ label, value, accent, active, onClick, disabled }) {
-  const base = 'rounded-xl border p-3 text-left transition-colors'
+  const base = 'min-w-0 rounded-xl border p-3 text-left transition-colors'
   const valueClass = accent === 'primary' ? 'text-indigo-900' : 'text-gray-900'
+  // 長いラベルもスマホ幅で 2 行折り返し可能に
+  const labelEl = <div className="text-[11px] leading-tight text-gray-500 break-words">{label}</div>
+  // 値は数字なので nowrap、サイズだけスマホで控えめに
+  const valueEl = (cls) => (
+    <div className={`mt-1 text-base font-bold leading-tight md:text-lg ${cls}`}>{value}</div>
+  )
   if (disabled) {
     return (
       <div className={`${base} border-dashed border-gray-200 bg-gray-50`}>
-        <div className="text-xs text-gray-500">{label}</div>
-        <div className="mt-1 text-lg font-bold text-gray-400">{value}</div>
+        {labelEl}
+        {valueEl('text-gray-400')}
       </div>
     )
   }
   const ring = active ? 'border-indigo-500 bg-indigo-50 ring-2 ring-indigo-200' : 'border-gray-200 bg-white hover:border-indigo-300 hover:bg-indigo-50/40'
   return (
-    <button type="button" onClick={onClick} className={`${base} ${ring}`}>
-      <div className="text-xs text-gray-500">{label}</div>
-      <div className={`mt-1 text-lg font-bold ${valueClass}`}>{value}</div>
+    <button type="button" onClick={onClick} className={`${base} w-full ${ring}`}>
+      {labelEl}
+      {valueEl(valueClass)}
     </button>
   )
 }
@@ -459,7 +465,7 @@ export default function DealerExecDashboard() {
     : 0
 
   return (
-    <div className="mx-auto max-w-7xl space-y-5">
+    <div className="mx-auto max-w-7xl space-y-5 overflow-x-hidden">
       {/* ヘッダー */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
@@ -611,8 +617,8 @@ export default function DealerExecDashboard() {
                     Bカート 顧客一覧の取得に失敗しました（{bcartError}）。注文履歴ベースで暫定表示します。
                   </div>
                 )}
-                <div className="overflow-hidden rounded-xl border border-gray-200">
-                  <table className="min-w-full text-sm">
+                <div className="overflow-x-auto rounded-xl border border-gray-200">
+                  <table className="w-full min-w-[680px] text-sm">
                     <thead className="bg-gray-50 text-xs text-gray-600">
                       <tr>
                         <th className="px-3 py-2 text-left">サロン名</th>
@@ -688,15 +694,15 @@ export default function DealerExecDashboard() {
           </div>
 
           {/* 月次売上推移 */}
-          <div className="rounded-2xl border border-gray-200 bg-white p-5">
+          <div className="rounded-2xl border border-gray-200 bg-white p-4 md:p-5">
             <div className="mb-3 text-sm font-bold text-gray-900">直近 6ヶ月 売上推移（税込）</div>
-            <div className="flex h-44 items-end justify-between gap-3">
+            <div className="flex h-44 items-end justify-between gap-1 md:gap-3">
               {monthlyTrend.map((t) => {
                 const h = (t.revenue / maxTrend) * 100
                 const isCurrent = t.month === kpis.curMonth
                 return (
-                  <div key={t.month} className="flex flex-1 flex-col items-center gap-1.5">
-                    <div className="text-[10px] font-medium text-gray-500">
+                  <div key={t.month} className="flex min-w-0 flex-1 flex-col items-center gap-1.5">
+                    <div className="w-full text-center text-[8px] font-medium leading-tight text-gray-500 break-all md:text-[10px]">
                       {fmtYen(t.revenue)}
                     </div>
                     <div className="flex h-32 w-full items-end">
@@ -750,10 +756,11 @@ export default function DealerExecDashboard() {
               ) : (
                 <div className="space-y-1">
                   {productsRanking.map((p, i) => (
-                    <div key={p.name} className="flex items-center gap-3 py-1">
-                      <div className="w-5 text-center text-xs font-bold text-gray-400">{i + 1}</div>
-                      <div className="flex-1 truncate text-xs text-gray-800" title={p.name}>{p.name}</div>
-                      <div className="w-20">
+                    <div key={p.name} className="flex items-center gap-2 py-1 md:gap-3">
+                      <div className="w-5 shrink-0 text-center text-xs font-bold text-gray-400">{i + 1}</div>
+                      <div className="min-w-0 flex-1 truncate text-xs text-gray-800" title={p.name}>{p.name}</div>
+                      {/* バーはスマホでは省略してスペース確保 */}
+                      <div className="hidden w-20 md:block">
                         <div className="h-4 overflow-hidden rounded bg-gray-100">
                           <div
                             className="h-full bg-indigo-500"
@@ -761,8 +768,8 @@ export default function DealerExecDashboard() {
                           />
                         </div>
                       </div>
-                      <div className="w-10 text-right text-[11px] text-gray-500">{p.count}点</div>
-                      <div className="w-24 text-right text-xs font-medium text-gray-900">
+                      <div className="w-10 shrink-0 text-right text-[11px] text-gray-500">{p.count}点</div>
+                      <div className="w-20 shrink-0 text-right text-xs font-medium text-gray-900 md:w-24">
                         {fmtYen(p.amount)}
                       </div>
                     </div>
@@ -839,7 +846,7 @@ export default function DealerExecDashboard() {
               </div>
             ) : (
               <div className="overflow-x-auto">
-                <table className="min-w-full text-sm">
+                <table className="w-full min-w-[720px] text-sm">
                   <thead className="bg-gray-50 text-xs text-gray-600">
                     <tr>
                       <th className="px-4 py-2 text-left">サロン名</th>
