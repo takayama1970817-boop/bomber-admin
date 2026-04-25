@@ -383,7 +383,20 @@ export default function DealerDashboard() {
           {/* クイック導線 */}
           <div>
             <div className="mb-2 text-sm font-bold text-gray-900">クイック導線</div>
-            <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+            {/* スマホ: 3 リンク（営業行動に集中、請求書はノイズなので非表示） */}
+            <div className="grid grid-cols-3 gap-3 md:hidden">
+              <Link to="/dealer/salons" className="rounded-xl border border-gray-200 bg-white p-4 text-center text-sm font-medium text-gray-700 hover:bg-gray-50">
+                👥 サロン管理
+              </Link>
+              <Link to="/dealer/orders" className="rounded-xl border border-gray-200 bg-white p-4 text-center text-sm font-medium text-gray-700 hover:bg-gray-50">
+                📦 注文一覧
+              </Link>
+              <Link to="/dealer/chat" className="rounded-xl border border-gray-200 bg-white p-4 text-center text-sm font-medium text-gray-700 hover:bg-gray-50">
+                💬 チャット
+              </Link>
+            </div>
+            {/* PC: 従来通り 4 リンク */}
+            <div className="hidden grid-cols-2 gap-3 md:grid lg:grid-cols-4">
               <Link to="/dealer/salons" className="rounded-xl border border-gray-200 bg-white p-4 text-center text-sm font-medium text-gray-700 hover:bg-gray-50">
                 👥 サロン管理
               </Link>
