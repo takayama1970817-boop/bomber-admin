@@ -20,9 +20,13 @@ import { normalizeCompanyName, pickDisplayName } from '../lib/nameNormalize.js'
  *   kpis, salons, top10FollowNeeded, alerts (sharpDeclines/inactive/firstOrderStopped),
  *   newStartups, monthlyTrend, productsRanking, statusDistribution
  */
-export default function useDealerDashboard(user) {
+export default function useDealerDashboard(user, options = {}) {
   // PR-A 統合（2026-04-25）: dealerCode 絞り込みのみで全期間 orders を 1 回取得し、
   // 6ヶ月窓は内部派生する。DealerExecDashboard の独自全期間 fetch を解消。
+  // PR-C（2026-04-25）: options { skipProducts, skipMonthlyTrend } で
+  //   トップ画面のような不要計算をスキップして初期表示を高速化できる。
+  const skipProducts = options?.skipProducts === true
+  const skipMonthlyTrend = options?.skipMonthlyTrend === true
   const [allOrders, setAllOrders] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
@@ -72,7 +76,10 @@ export default function useDealerDashboard(user) {
     })
   }, [allOrders])
 
-  const metrics = useMemo(() => computeMetrics(sixMoOrders), [sixMoOrders])
+  const metrics = useMemo(
+    () => computeMetrics(sixMoOrders, { skipProducts, skipMonthlyTrend }),
+    [sixMoOrders, skipProducts, skipMonthlyTrend],
+  )
   // 共通 stats（売上・最低/最高/平均・返品など）。最終的な KPI は metrics.kpis を使うが、
   // 集計の正本は orderStats に寄せて、両者がズレないようにする。
   const summary = useMemo(() => computeOrderStats(sixMoOrders), [sixMoOrders])
@@ -125,7 +132,13 @@ function judgeStatus(diffRate, daysSinceLast) {
 // Aggregation
 // =====================================================
 
-function computeMetrics(orders) {
+// PR-C 拡張: options で重い計算をスキップできるようにする
+//   skipProducts: true   → productMap 構築 / productsRanking / productCoverage を省略
+//   skipMonthlyTrend: true → monthlyRevenue 蓄積 / monthlyTrend を省略
+// トップ画面のように使わない指標がある場合に O(N×items) 等の計算を避けて初期表示を高速化する。
+function computeMetrics(orders, options = {}) {
+  const skipProducts = options.skipProducts === true
+  const skipMonthlyTrend = options.skipMonthlyTrend === true
   const now = new Date()
   const curMonth = monthKey(now)
   const prevDate = new Date(now.getFullYear(), now.getMonth() - 1, 1)
@@ -174,10 +187,12 @@ function computeMetrics(orders) {
     s.nameCounts.set(displayCandidate, (s.nameCounts.get(displayCandidate) || 0) + 1)
 
     // 月次推移（全サロン合算）
-    monthlyRevenue.set(m, (monthlyRevenue.get(m) || 0) + total)
+    if (!skipMonthlyTrend) {
+      monthlyRevenue.set(m, (monthlyRevenue.get(m) || 0) + total)
+    }
 
     // 商品別（当月のみ）+ 当月の items カバレッジ計測
-    if (m === curMonth) {
+    if (!skipProducts && m === curMonth) {
       productCoverageTotal += 1
       if (Array.isArray(o.items) && o.items.length > 0) {
         productCoverageWithItems += 1
@@ -271,24 +286,31 @@ function computeMetrics(orders) {
   // ============================================
   // 月次推移（過去6ヶ月分）
   // ============================================
-  const monthlyTrend = []
-  for (let i = 5; i >= 0; i -= 1) {
-    const d = new Date(now.getFullYear(), now.getMonth() - i, 1)
-    const m = monthKey(d)
-    monthlyTrend.push({
-      month: m,
-      label: `${d.getMonth() + 1}月`,
-      revenue: monthlyRevenue.get(m) || 0,
-    })
-  }
+  const monthlyTrend = skipMonthlyTrend
+    ? []
+    : (() => {
+        const arr = []
+        for (let i = 5; i >= 0; i -= 1) {
+          const d = new Date(now.getFullYear(), now.getMonth() - i, 1)
+          const m = monthKey(d)
+          arr.push({
+            month: m,
+            label: `${d.getMonth() + 1}月`,
+            revenue: monthlyRevenue.get(m) || 0,
+          })
+        }
+        return arr
+      })()
 
   // ============================================
   // 商品別ランキング Top 10
   // ============================================
-  const productsRanking = Array.from(productMap.entries())
-    .map(([name, v]) => ({ name, amount: v.amount, count: v.count }))
-    .sort((a, b) => b.amount - a.amount)
-    .slice(0, 10)
+  const productsRanking = skipProducts
+    ? []
+    : Array.from(productMap.entries())
+        .map(([name, v]) => ({ name, amount: v.amount, count: v.count }))
+        .sort((a, b) => b.amount - a.amount)
+        .slice(0, 10)
 
   // ============================================
   // 状態分布
