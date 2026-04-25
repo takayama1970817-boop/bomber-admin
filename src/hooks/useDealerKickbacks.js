@@ -11,12 +11,21 @@ import { db } from '../lib/firebase.js'
  *   - 直近 12ヶ月分取得。pagination なし
  *   - フィルタや集計はクライアント側で
  *
+ * 横展開 Phase 3（2026-04-25）追加:
+ *   - options.cacheKey 指定時、当日 localStorage キャッシュを読み書き
+ *   - reload 関数を返却（キャッシュバイパスで再 fetch）
+ *   - 0 件取得時は既存データを保持
+ *
  * @param {Object} user - profile（dealerCode を含む）
+ * @param {Object} options - { cacheKey?: string }
  */
-export default function useDealerKickbacks(user) {
+export default function useDealerKickbacks(user, options = {}) {
+  const cacheKey = options?.cacheKey || null
   const [kickbacks, setKickbacks] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
+  const [reloadCounter, setReloadCounter] = useState(0)
+  const reload = () => setReloadCounter((c) => c + 1)
 
   useEffect(() => {
     if (!user?.dealerCode) {
@@ -26,6 +35,32 @@ export default function useDealerKickbacks(user) {
     }
 
     let cancelled = false
+
+    // キャッシュ読み込み（reloadCounter==0 のみ）
+    const today = new Date().toISOString().slice(0, 10)
+    if (cacheKey && reloadCounter === 0) {
+      try {
+        const raw = localStorage.getItem(cacheKey)
+        if (raw) {
+          const cached = JSON.parse(raw)
+          if (cached.date === today && Array.isArray(cached.kickbacks) && cached.kickbacks.length > 0) {
+            // タイムスタンプは ISO 文字列で保存されているため Date 化
+            const restored = cached.kickbacks.map((kb) => ({
+              ...kb,
+              paidAt: kb.paidAt ? new Date(kb.paidAt) : null,
+              scheduledAt: kb.scheduledAt ? new Date(kb.scheduledAt) : null,
+              updatedAt: kb.updatedAt ? new Date(kb.updatedAt) : null,
+              calculatedAt: kb.calculatedAt ? new Date(kb.calculatedAt) : null,
+            }))
+            setKickbacks(restored)
+            setLoading(false)
+            setError(null)
+            return () => { cancelled = true }
+          }
+        }
+      } catch (e) { console.warn('useDealerKickbacks cache read failed:', e) }
+    }
+
     setLoading(true)
     setError(null)
 
@@ -39,7 +74,35 @@ export default function useDealerKickbacks(user) {
     getDocs(q)
       .then((snap) => {
         if (cancelled) return
-        setKickbacks(snap.docs.map((d) => ({ id: d.id, ...d.data() })))
+        const list = snap.docs.map((d) => ({ id: d.id, ...d.data() }))
+        // 0件取得で既存データを上書きしない（fullSync 横展開要件）
+        if (list.length === 0 && kickbacks.length > 0) {
+          console.warn('[useDealerKickbacks] 0 件取得のため既存データを保持')
+          return
+        }
+        setKickbacks(list)
+        // キャッシュ保存（タイムスタンプは ISO 化）
+        if (cacheKey) {
+          try {
+            const tsToISO = (ts) => {
+              if (!ts) return null
+              const sec = ts._seconds ?? ts.seconds
+              if (sec) return new Date(sec * 1000).toISOString()
+              if (typeof ts.toDate === 'function') return ts.toDate().toISOString()
+              if (ts instanceof Date) return ts.toISOString()
+              const d = new Date(ts)
+              return isNaN(d.getTime()) ? null : d.toISOString()
+            }
+            const serialised = list.map((kb) => ({
+              ...kb,
+              paidAt: tsToISO(kb.paidAt),
+              scheduledAt: tsToISO(kb.scheduledAt),
+              updatedAt: tsToISO(kb.updatedAt),
+              calculatedAt: tsToISO(kb.calculatedAt),
+            }))
+            localStorage.setItem(cacheKey, JSON.stringify({ date: today, kickbacks: serialised }))
+          } catch (e) { console.warn('useDealerKickbacks cache write failed:', e) }
+        }
       })
       .catch((e) => {
         console.error('useDealerKickbacks fetch error:', e)
@@ -52,9 +115,10 @@ export default function useDealerKickbacks(user) {
     return () => {
       cancelled = true
     }
-  }, [user?.dealerCode])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.dealerCode, reloadCounter])
 
-  return { kickbacks, loading, error }
+  return { kickbacks, loading, error, reload }
 }
 
 // ステータス正規化。kickbacks ドキュメントには status フィールドが無い可能性があるため、

@@ -9,19 +9,19 @@ import useDealerKickbacks, {
 } from '../hooks/useDealerKickbacks.js'
 import DealerKickbacksTable from '../components/DealerKickbacksTable.jsx'
 import DealerKickbackDetailModal from '../components/DealerKickbackDetailModal.jsx'
-
-const fmtYen = (n) => `¥${Math.round(Number(n) || 0).toLocaleString()}`
+// 横展開 Phase 3（2026-04-25）: 表示フォーマッタ / 共通 UI 統一
+import { fmtYen, fmtDate } from '../lib/formatters.js'
+import {
+  LoadingSkeleton,
+  ErrorBanner,
+  RefreshButton,
+  LastSyncedBadge,
+  EmptyStateCard,
+} from '../components/common/index.js'
 
 function fmtMonth(m) {
   if (!m) return '—'
   return String(m).replace('-', '/')
-}
-
-function fmtDate(ts) {
-  if (!ts) return '—'
-  const d = ts.toDate ? ts.toDate() : new Date(ts)
-  if (Number.isNaN(d.getTime())) return '—'
-  return `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')}`
 }
 
 // 今月のキー（YYYY-MM）
@@ -85,10 +85,35 @@ function KpiCard({ label, value, sub, accent }) {
  */
 export default function DealerKickbacks() {
   const { profile } = useAuth()
-  const { kickbacks, loading, error } = useDealerKickbacks(profile)
+  // dealerCode 単位 cacheKey（他代理店データ混入防止）
+  const cacheKey = profile?.dealerCode
+    ? `dealerKickbacks:${profile.dealerCode}:v1`
+    : null
+  const { kickbacks, loading, error, reload } = useDealerKickbacks(profile, { cacheKey })
 
   const [selectedMonth, setSelectedMonth] = useState(currentMonthKey())
   const [selectedKickback, setSelectedKickback] = useState(null)
+
+  // kickbacks の updatedAt / calculatedAt / paidAt の最大値を最終更新時刻として表示
+  const lastSyncedAt = useMemo(() => {
+    let latest = null
+    const pickDate = (ts) => {
+      if (!ts) return null
+      if (ts instanceof Date) return ts
+      const sec = ts._seconds ?? ts.seconds
+      if (sec) return new Date(sec * 1000)
+      if (typeof ts.toDate === 'function') return ts.toDate()
+      const d = new Date(ts)
+      return isNaN(d.getTime()) ? null : d
+    }
+    for (const kb of kickbacks) {
+      for (const cand of [kb.updatedAt, kb.calculatedAt, kb.paidAt]) {
+        const d = pickDate(cand)
+        if (d && (!latest || d > latest)) latest = d
+      }
+    }
+    return latest
+  }, [kickbacks])
 
   // 選択月・前月の kickback レコードを探索
   const currentKb = useMemo(
@@ -133,22 +158,26 @@ export default function DealerKickbacks() {
           <button onClick={goThisMonth} className="rounded-lg border border-indigo-300 bg-white px-3 py-1.5 text-xs font-medium text-indigo-700 hover:bg-indigo-50">
             今月
           </button>
+          <RefreshButton
+            onClick={reload}
+            loading={loading}
+            label="再読込"
+            title="Firestore から最新の清算書を再取得（当日キャッシュをバイパス）"
+          />
         </div>
       </div>
 
+      {/* データ鮮度バッジ */}
+      <LastSyncedBadge syncedAt={lastSyncedAt} label="清算書 最終更新" />
+
       {/* エラー */}
-      {error && (
-        <div className="rounded-xl border border-red-300 bg-red-50 p-4 text-sm text-red-800">
-          キックバックデータの取得に失敗しました: {error}
-        </div>
-      )}
+      <ErrorBanner
+        message={error ? `キックバックデータの取得に失敗しました: ${error}` : null}
+        onRetry={reload}
+      />
 
       {/* ローディング */}
-      {loading && !error && (
-        <div className="rounded-xl border border-gray-200 bg-white p-10 text-center text-sm text-gray-500">
-          読み込み中...
-        </div>
-      )}
+      {loading && !error && <LoadingSkeleton variant="card" lines={3} />}
 
       {!loading && !error && (
         <>
@@ -227,9 +256,11 @@ export default function DealerKickbacks() {
           )}
 
           {!currentKb && (
-            <div className="rounded-2xl border border-dashed border-gray-300 bg-white p-8 text-center text-sm text-gray-500">
-              {fmtMonth(selectedMonth)} のキックバックはまだ集計されていません
-            </div>
+            <EmptyStateCard
+              icon="🧾"
+              title={`${fmtMonth(selectedMonth)} のキックバックはまだ集計されていません`}
+              description="月次バッチで集計された後に表示されます。前月以前のデータは下の「月別一覧」で確認できます。"
+            />
           )}
 
           {/* 最近の清算履歴 */}
@@ -260,7 +291,15 @@ export default function DealerKickbacks() {
           {/* 月別一覧 */}
           <div>
             <div className="mb-2 text-sm font-bold text-gray-900">月別一覧（直近12ヶ月）</div>
-            <DealerKickbacksTable kickbacks={kickbacks} onSelect={setSelectedKickback} />
+            {kickbacks.length === 0 ? (
+              <EmptyStateCard
+                icon="📋"
+                title="清算書データがまだありません"
+                description="月次バッチで集計された後に表示されます。"
+              />
+            ) : (
+              <DealerKickbacksTable kickbacks={kickbacks} onSelect={setSelectedKickback} />
+            )}
           </div>
         </>
       )}
