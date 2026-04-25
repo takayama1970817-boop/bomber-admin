@@ -503,8 +503,9 @@ export default function DealerExecDashboard() {
           {/* KPI 4 枚 */}
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
             <KpiCard
-              label={`${fmtMonth(kpis.curMonth)}の売上（税込）`}
+              label={`${fmtMonth(kpis.curMonth)}の受注総額（税込・送料込）`}
               value={fmtYen(kpis.currentSales)}
+              sub="Bカート final_price 合計（税・送料・代引・ポイント引後）"
               accent="primary"
             />
             <KpiCard
@@ -850,8 +851,8 @@ export default function DealerExecDashboard() {
                   <thead className="bg-gray-50 text-xs text-gray-600">
                     <tr>
                       <th className="px-4 py-2 text-left">サロン名</th>
-                      <th className="px-4 py-2 text-right">{fmtMonth(kpis.curMonth)}売上（税込）</th>
-                      <th className="px-4 py-2 text-right">{fmtMonth(kpis.prevMonth)}売上（税込）</th>
+                      <th className="px-4 py-2 text-right">{fmtMonth(kpis.curMonth)}受注総額（税込・送料込）</th>
+                      <th className="px-4 py-2 text-right">{fmtMonth(kpis.prevMonth)}受注総額（税込・送料込）</th>
                       <th className="px-4 py-2 text-right">前月比</th>
                       <th className="px-4 py-2 text-left">最終発注</th>
                       <th className="px-4 py-2 text-left">状態</th>
