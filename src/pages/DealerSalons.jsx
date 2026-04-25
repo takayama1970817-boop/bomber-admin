@@ -325,9 +325,10 @@ export default function DealerSalons() {
     const now = new Date()
     const currentYear = now.getFullYear()
 
-    // 年別: 直近3年を必ず空枠で用意
+    // 年別: 直近4年を必ず空枠で用意（2023年=表示範囲下限まで含める）
+    // 2023 は前年データが無いため yoy=null（UI で「—」表示）
     const yearly = {}
-    const yearKeysDesc = [currentYear, currentYear - 1, currentYear - 2].map(String)
+    const yearKeysDesc = [currentYear, currentYear - 1, currentYear - 2, currentYear - 3].map(String)
     for (const y of yearKeysDesc) yearly[y] = { count: 0, total: 0, yoyRate: null }
 
     // 月別: 直近36ヶ月を必ず空枠で用意（新しい順）
