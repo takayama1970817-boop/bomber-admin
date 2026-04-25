@@ -29,10 +29,11 @@ exports.notifyKickback = notifyKickback
 const { sendInvoice } = require('./sendInvoice')
 exports.sendInvoice = sendInvoice
 
-// Telnyx FAX送信
-const { sendFax, telnyxWebhook } = require('./sendFax')
+// InterFAX FAX送信
+const { sendFax, resendFax, checkFaxStatus } = require('./sendFax')
 exports.sendFax = sendFax
-exports.telnyxWebhook = telnyxWebhook
+exports.resendFax = resendFax
+exports.checkFaxStatus = checkFaxStatus
 
 // Firestore 日次バックアップ
 const { scheduledFirestoreBackup, cleanupOldBackups } = require('./firestoreBackup')

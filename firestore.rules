@@ -1001,6 +1001,28 @@ service cloud.firestore {
     }
 
     // ========================================
+    // faxJobs コレクション（FAX送信ジョブ・社内ポータル限定）
+    // - read: admin/staff のみ（dealer / salon は不可視）
+    // - create / update / delete: クライアント不可
+    //   実体は Cloud Functions（sendFax / resendFax / checkFaxStatus）が
+    //   Admin SDK 経由で書き込む。クライアントからは read のみ。
+    // ========================================
+    match /faxJobs/{jobId} {
+      allow read:  if isAdmin() || isStaff();
+      allow create, update, delete: if false;
+    }
+
+    // ========================================
+    // faxLogs コレクション（FAX送信試行ログ・追記型）
+    // - read: admin/staff のみ
+    // - create / update / delete: クライアント不可
+    // ========================================
+    match /faxLogs/{logId} {
+      allow read:  if isAdmin() || isStaff();
+      allow create, update, delete: if false;
+    }
+
+    // ========================================
     // それ以外は全拒否（保険）
     // ========================================
     match /{document=**} {

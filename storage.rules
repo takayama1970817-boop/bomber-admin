@@ -76,5 +76,17 @@ service firebase.storage {
                    && request.resource.size < 20 * 1024 * 1024
                    && request.resource.contentType.matches('application/pdf.*');
     }
+
+    // ========================================
+    // FAX送信PDF（再送用に保存・社内ポータル限定）
+    //   path: fax-files/{jobId}.pdf
+    //   - read:  admin/master/staff のみ（dealer/salon/warehouse は不可）
+    //   - write: クライアント不可（Cloud Functions Admin SDK 経由でのみ書き込む）
+    // ========================================
+    match /fax-files/{fileName} {
+      allow read:  if request.auth != null
+                    && firestore.get(/databases/(default)/documents/users/$(request.auth.uid)).data.role in ['admin', 'master', 'staff'];
+      allow write: if false;
+    }
   }
 }

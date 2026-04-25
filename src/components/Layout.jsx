@@ -133,6 +133,12 @@ export default function Layout() {
           <SubItem to="/admin/invoice-email-history" label="メール送信履歴" onClick={closeMenu} />
         </MenuGroup>
       )}
+      {(isAdmin || profile?.role === 'staff') && (
+        <MenuGroup label="FAX送信">
+          <SubItem to="/admin/fax/send" label="新規送信" onClick={closeMenu} />
+          <SubItem to="/admin/fax/history" label="送信履歴" onClick={closeMenu} />
+        </MenuGroup>
+      )}
       {hasAccess('users') && <Item to="/admin/users" label="スタッフ管理" onClick={closeMenu} />}
       {/* Bカート取り込みは不要（販売はBカートで直接処理） */}
       {hasAccess('receiptPreview') && <Item to="/admin/receipt-preview" label="領収書プレビュー" onClick={closeMenu} />}

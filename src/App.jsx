@@ -65,6 +65,8 @@ import TrainingTypesAdmin from './pages/TrainingTypesAdmin.jsx'
 import TrainingApplications from './pages/TrainingApplications.jsx'
 import TrainingApplicationDetail from './pages/TrainingApplicationDetail.jsx'
 import CertifiedInstructorsAdmin from './pages/CertifiedInstructorsAdmin.jsx'
+import FaxSend from './pages/FaxSend.jsx'
+import FaxHistory from './pages/FaxHistory.jsx'
 import ProtectedRoute from './components/ProtectedRoute.jsx'
 import Layout from './components/Layout.jsx'
 import { CompanyProvider } from './contexts/CompanyContext.jsx'
@@ -207,6 +209,8 @@ export default function App() {
         <Route path="/admin/training-applications" element={<ProtectedRoute requireRole="admin"><TrainingApplications /></ProtectedRoute>} />
         <Route path="/admin/training-applications/:id" element={<ProtectedRoute requireRole="admin"><TrainingApplicationDetail /></ProtectedRoute>} />
         <Route path="/admin/certified-instructors" element={<ProtectedRoute requireRole="admin"><CertifiedInstructorsAdmin /></ProtectedRoute>} />
+        <Route path="/admin/fax/send" element={<ProtectedRoute requireRole={['admin', 'staff']}><FaxSend /></ProtectedRoute>} />
+        <Route path="/admin/fax/history" element={<ProtectedRoute requireRole={['admin', 'staff']}><FaxHistory /></ProtectedRoute>} />
       </Route>
 
       <Route path="*" element={<Navigate to="/" replace />} />
