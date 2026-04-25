@@ -130,22 +130,29 @@ export default function DealerExecDashboard() {
         console.warn('[DealerExec] dealerSalons 取得失敗:', e.message)
       }
 
-      // dealerMonthlySnapshots/{code}_{YYYY-MM} を直接 docId で参照
-      // （where + orderBy だと Firestore 複合 index が必要になるため avoid）
+      // dealerMonthlySnapshots/{code}_{YYYY-MM} を 当月→前月 と最大6ヶ月遡って取得。
+      // 旧実装は直列ループで最悪 6 RTT 待ちだった。
+      // PR-B（2026-04-25）: Promise.allSettled で並列化。完了時間は最大 1 RTT。
+      // 新しい月から順に「存在 & totalSalonCount > 0」のものを採用。
       try {
         const now = new Date()
-        let cnt = null
-        for (let i = 0; i < 6 && cnt == null; i += 1) {
+        const refs = []
+        for (let i = 0; i < 6; i += 1) {
           const d = new Date(now.getFullYear(), now.getMonth() - i, 1)
           const ym = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
-          const ref = doc(db, 'dealerMonthlySnapshots', `${code}_${ym}`)
-          const snap = await getDoc(ref)
-          if (snap.exists()) {
-            const v = Number(snap.data().totalSalonCount)
-            if (Number.isFinite(v) && v > 0) cnt = v
+          refs.push(doc(db, 'dealerMonthlySnapshots', `${code}_${ym}`))
+        }
+        const results = await Promise.allSettled(refs.map((r) => getDoc(r)))
+        if (cancelled) return
+        for (const r of results) {
+          if (r.status === 'fulfilled' && r.value.exists()) {
+            const v = Number(r.value.data().totalSalonCount)
+            if (Number.isFinite(v) && v > 0) {
+              setSnapshotTotalSalonCount(v)
+              break
+            }
           }
         }
-        if (!cancelled && cnt != null) setSnapshotTotalSalonCount(cnt)
       } catch (e) {
         console.warn('[DealerExec] dealerMonthlySnapshots 取得失敗:', e.message)
       }
