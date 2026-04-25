@@ -20,6 +20,8 @@ import {
   canManageChatRoom,
   assertCan,
 } from '../lib/permissions.js'
+// 横展開 Phase 4（2026-04-25）: 共通 UI 部品
+import { LoadingSkeleton, ErrorBanner, EmptyStateCard } from '../components/common/index.js'
 
 function fmtTime(ts) {
   if (!ts) return ''
@@ -53,6 +55,11 @@ export default function DealerChat() {
   const [attachFile, setAttachFile] = useState(null)
   const [attachPreview, setAttachPreview] = useState(null)
   const [uploading, setUploading] = useState(false)
+  // 横展開 Phase 4: 初回ロード判定 + alert 置換用エラー
+  const [initialLoading, setInitialLoading] = useState(true)
+  const [chatError, setChatError] = useState(null)
+  // モバイル: 左ペイン（ルーム一覧）の表示制御
+  const [sidebarOpenMobile, setSidebarOpenMobile] = useState(false)
   const bottomRef = useRef(null)
   const inputRef = useRef(null)
   const fileInputRef = useRef(null)
@@ -65,6 +72,8 @@ export default function DealerChat() {
   // メッセージのリアルタイム監視
   useEffect(() => {
     if (!activeRoom) return
+    setInitialLoading(true)
+    setChatError(null)
 
     const q = query(
       collection(db, 'chatRooms', activeRoom, 'messages'),
@@ -72,12 +81,22 @@ export default function DealerChat() {
       limit(200),
     )
 
-    const unsub = onSnapshot(q, (snap) => {
-      setMessages(snap.docs.map((d) => ({ id: d.id, ...d.data() })))
-      setTimeout(() => {
-        bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-      }, 100)
-    })
+    const unsub = onSnapshot(
+      q,
+      (snap) => {
+        setMessages(snap.docs.map((d) => ({ id: d.id, ...d.data() })))
+        setInitialLoading(false)
+        setChatError(null)
+        setTimeout(() => {
+          bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+        }, 100)
+      },
+      (err) => {
+        console.error('chat onSnapshot error:', err)
+        setInitialLoading(false)
+        setChatError(err?.message || 'メッセージの取得に失敗しました')
+      },
+    )
 
     // 既読更新
     if (user?.uid) updateLastRead(activeRoom, user.uid)
@@ -120,7 +139,7 @@ export default function DealerChat() {
     const file = e.target.files?.[0]
     if (!file) return
     if (file.size > 10 * 1024 * 1024) {
-      alert('ファイルサイズは10MB以下にしてください')
+      setChatError('ファイルサイズは10MB以下にしてください')
       e.target.value = ''
       return
     }
@@ -145,9 +164,10 @@ export default function DealerChat() {
     if (!msg && !attachFile) return
     if (sending) return
     // 二重防御：送信はログイン済みなら誰でも可
-    try { assertCan(canSendMessage, profile) } catch (e) { alert(e.message); return }
+    try { assertCan(canSendMessage, profile) } catch (e) { setChatError(e.message); return }
     setSending(true)
     setUploading(!!attachFile)
+    setChatError(null)
     try {
       let fileData = null
       if (attachFile) {
@@ -184,7 +204,7 @@ export default function DealerChat() {
       inputRef.current?.focus()
     } catch (e) {
       console.error(e)
-      alert('送信に失敗しました')
+      setChatError(`送信に失敗しました: ${e?.message || e}`)
     } finally {
       setSending(false)
       setUploading(false)
@@ -203,13 +223,14 @@ export default function DealerChat() {
         })
       }
     } catch (e) {
-      alert(e.message); return
+      setChatError(e.message); return
     }
     if (!window.confirm('このメッセージを取り消しますか？')) return
     try {
       await deleteDoc(doc(db, 'chatRooms', activeRoom, 'messages', msg.id))
     } catch (e) {
       console.error('メッセージ削除失敗:', e)
+      setChatError(`削除に失敗しました: ${e?.message || e}`)
     }
   }
 
@@ -260,50 +281,59 @@ export default function DealerChat() {
   )
 
   return (
-    <div style={{ display: 'flex', height: 'calc(100vh - 130px)', gap: 0 }}>
-      {/* 左: ルーム一覧 */}
-      <div style={{
-        width: '220px', borderRight: '1px solid #e5e7eb', backgroundColor: '#fff',
-        display: 'flex', flexDirection: 'column', flexShrink: 0,
-      }}>
-        <div style={{ padding: '16px', borderBottom: '1px solid #e5e7eb', fontSize: '14px', fontWeight: 'bold', color: '#111' }}>
+    // 横展開 Phase 4: モバイル対応のため 100dvh ベース + flex-col(モバイル) / flex-row(PC)
+    // 100dvh は iOS Safari の動的ビューポート対応（旧 100vh はアドレスバー分が崩れる）
+    <div className="flex h-[calc(100dvh-130px)] flex-col md:flex-row md:gap-0">
+      {/* モバイル用ヘッダー（≤ md）: ルーム名 + サイドバー切替 */}
+      <div className="flex items-center justify-between border-b border-gray-200 bg-white px-4 py-2 md:hidden">
+        <button
+          onClick={() => setSidebarOpenMobile((v) => !v)}
+          className="rounded border border-gray-300 px-2 py-1 text-xs text-gray-700"
+        >
+          ☰ ルーム
+        </button>
+        <div className="text-sm font-bold text-gray-900">{activeRoomName}</div>
+        <div className="w-12" />
+      </div>
+
+      {/* 左: ルーム一覧（PC は常時表示、モバイルは sidebarOpenMobile=true のときだけ） */}
+      <div
+        className={`${sidebarOpenMobile ? 'flex' : 'hidden'} md:flex w-full md:w-[220px] flex-shrink-0 flex-col border-b border-gray-200 bg-white md:border-b-0 md:border-r`}
+      >
+        <div className="hidden border-b border-gray-200 px-4 py-4 text-sm font-bold text-gray-900 md:block">
           チャット
         </div>
-        <div style={{ flex: 1, overflow: 'auto' }}>
+        <div className="flex-1 overflow-auto">
           {/* 個別チャット */}
           <div
-            onClick={() => switchRoom(`dealer_${dealerCode}`, 'ロイヤルトラスト')}
-            style={{
-              padding: '12px 16px', cursor: 'pointer',
-              backgroundColor: activeRoom === `dealer_${dealerCode}` ? '#eef2ff' : 'transparent',
-              borderBottom: '1px solid #f3f4f6',
+            onClick={() => {
+              switchRoom(`dealer_${dealerCode}`, 'ロイヤルトラスト')
+              setSidebarOpenMobile(false)
             }}
+            className={`cursor-pointer border-b border-gray-100 px-4 py-3 ${activeRoom === `dealer_${dealerCode}` ? 'bg-indigo-50' : ''}`}
           >
-            <div style={{ fontSize: '13px', fontWeight: '600', color: '#111' }}>
-              ロイヤルトラスト
-            </div>
-            <div style={{ fontSize: '11px', color: '#888', marginTop: '2px' }}>
-              個別チャット
-            </div>
+            <div className="text-sm font-semibold text-gray-900">ロイヤルトラスト</div>
+            <div className="mt-0.5 text-[11px] text-gray-500">個別チャット</div>
           </div>
-
         </div>
       </div>
 
       {/* 右: メッセージエリア */}
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', backgroundColor: '#f9fafb' }}>
-        <div style={{
-          padding: '14px 20px', borderBottom: '1px solid #e5e7eb', backgroundColor: '#fff',
-          fontSize: '15px', fontWeight: 'bold', color: '#111',
-        }}>
+      <div className="flex flex-1 flex-col bg-gray-50">
+        {/* PC のみルーム名ヘッダ。モバイルは上の切替バーが代替 */}
+        <div className="hidden border-b border-gray-200 bg-white px-5 py-3 text-base font-bold text-gray-900 md:block">
           {activeRoomName}
         </div>
 
         <div style={{ flex: 1, overflow: 'auto', padding: '16px 20px' }}>
-          {messages.length === 0 ? (
-            <div style={{ textAlign: 'center', color: '#aaa', marginTop: '80px', fontSize: '13px' }}>
-              まだメッセージがありません
-            </div>
+          {initialLoading ? (
+            <LoadingSkeleton variant="card" lines={3} label="メッセージを読み込み中…" />
+          ) : messages.length === 0 ? (
+            <EmptyStateCard
+              icon="💬"
+              title="まだメッセージがありません"
+              description="下の入力欄からメッセージを送信してください。"
+            />
           ) : (
             messages.map((msg) => {
               const mine = isMyMessage(msg)
@@ -376,6 +406,13 @@ export default function DealerChat() {
           )}
           <div ref={bottomRef} />
         </div>
+
+        {/* エラーバナー（送信失敗 / アップロード超過 / Realtime 失敗） */}
+        {chatError && (
+          <div className="px-3 pt-2">
+            <ErrorBanner message={chatError} onRetry={() => setChatError(null)} retryLabel="閉じる" />
+          </div>
+        )}
 
         {/* 添付プレビュー */}
         {attachFile && (
