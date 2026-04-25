@@ -102,7 +102,7 @@ export default function DealerWeatherCard({ dealerCode }) {
         const geoData = await geoRes.json()
         const r = geoData.results?.[0]
         if (!r) throw new Error('地名解決に失敗')
-        const fcUrl = `https://api.open-meteo.com/v1/forecast?latitude=${r.latitude}&longitude=${r.longitude}&daily=weather_code,temperature_2m_max,temperature_2m_min&timezone=Asia/Tokyo&forecast_days=2`
+        const fcUrl = `https://api.open-meteo.com/v1/forecast?latitude=${r.latitude}&longitude=${r.longitude}&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max&timezone=Asia/Tokyo&forecast_days=2`
         const fcRes = await fetch(fcUrl)
         if (!fcRes.ok) throw new Error('forecast HTTP ' + fcRes.status)
         const fc = await fcRes.json()
@@ -113,11 +113,13 @@ export default function DealerWeatherCard({ dealerCode }) {
             code: fc.daily.weather_code[0],
             max: fc.daily.temperature_2m_max[0],
             min: fc.daily.temperature_2m_min[0],
+            precip: fc.daily.precipitation_probability_max?.[0] ?? null,
           },
           tomorrow: {
             code: fc.daily.weather_code[1],
             max: fc.daily.temperature_2m_max[1],
             min: fc.daily.temperature_2m_min[1],
+            precip: fc.daily.precipitation_probability_max?.[1] ?? null,
           },
         })
       } catch (e) {
@@ -129,51 +131,141 @@ export default function DealerWeatherCard({ dealerCode }) {
 
   const today = useMemo(() => weather?.today, [weather])
   const tomorrow = useMemo(() => weather?.tomorrow, [weather])
+  const tomorrowPrecip = tomorrow?.precip
+  const rainAlert = typeof tomorrowPrecip === 'number' && tomorrowPrecip >= 80
+  const placeLabel = weather?.place || placeQuery
 
   return (
-    // スマホ専用（md+ では非表示）
-    <div className="md:hidden">
-      <div className="rounded-2xl border border-rose-100 bg-gradient-to-br from-rose-50 via-white to-sky-50 p-4 shadow-sm">
-        <div className="text-[11px] tracking-wide text-rose-400">今日の予定にそなえて</div>
-        <div className="mt-1 text-lg font-bold text-gray-800">{fmtNow(now)}</div>
-        <div className="mt-1 text-xs text-gray-500">{weather?.place || placeQuery}</div>
+    <>
+      {/* スマホ用: やわらかいフルカード（md+ では非表示） */}
+      <div className="md:hidden">
+        <div className="rounded-2xl border border-rose-100 bg-gradient-to-br from-rose-50 via-white to-sky-50 p-4 shadow-sm">
+          <div className="text-[11px] tracking-wide text-rose-400">今日の予定にそなえて</div>
+          <div className="mt-1 text-lg font-bold text-gray-800">{fmtNow(now)}</div>
+          <div className="mt-1 text-xs text-gray-500">{placeLabel}</div>
 
-        {!weather && !error && (
-          <div className="mt-3 text-xs text-gray-400">天気を取得中…</div>
-        )}
-        {error && (
-          <div className="mt-3 rounded-lg bg-amber-50 px-2.5 py-1.5 text-[11px] text-amber-700">
-            天気情報を取得できませんでした
-          </div>
-        )}
+          {!weather && !error && (
+            <div className="mt-3 text-xs text-gray-400">天気を取得中…</div>
+          )}
+          {error && (
+            <div className="mt-3 rounded-lg bg-amber-50 px-2.5 py-1.5 text-[11px] text-amber-700">
+              天気情報を取得できませんでした
+            </div>
+          )}
 
-        {weather && today && tomorrow && (
-          <div className="mt-3 grid grid-cols-2 gap-3">
-            <div className="rounded-xl bg-white/80 px-3 py-3 shadow-inner">
-              <div className="text-[11px] text-gray-500">今日</div>
-              <div className="mt-1 flex items-center gap-2">
-                <span className="text-3xl leading-none">{wmoOf(today.code).icon}</span>
-                <span className="text-sm font-bold text-gray-800">{wmoOf(today.code).name}</span>
+          {weather && today && tomorrow && (
+            <>
+              <div className="mt-3 grid grid-cols-2 gap-3">
+                <div className="rounded-xl bg-white/80 px-3 py-3 shadow-inner">
+                  <div className="text-[11px] text-gray-500">今日</div>
+                  <div className="mt-1 flex items-center gap-2">
+                    <span className="text-3xl leading-none">{wmoOf(today.code).icon}</span>
+                    <span className="text-sm font-bold text-gray-800">{wmoOf(today.code).name}</span>
+                  </div>
+                  <div className="mt-1.5 text-[11px] text-gray-600">
+                    最高 <span className="font-bold text-rose-500">{Math.round(today.max)}℃</span>
+                    　/ 最低 <span className="font-bold text-sky-500">{Math.round(today.min)}℃</span>
+                  </div>
+                </div>
+                <div className="rounded-xl bg-white/80 px-3 py-3 shadow-inner">
+                  <div className="text-[11px] text-gray-500">明日</div>
+                  <div className="mt-1 flex items-center gap-2">
+                    <span className="text-3xl leading-none">{wmoOf(tomorrow.code).icon}</span>
+                    <span className="text-sm font-bold text-gray-800">{wmoOf(tomorrow.code).name}</span>
+                  </div>
+                  <div className="mt-1.5 text-[11px] text-gray-600">
+                    最高 <span className="font-bold text-rose-500">{Math.round(tomorrow.max)}℃</span>
+                    　/ 最低 <span className="font-bold text-sky-500">{Math.round(tomorrow.min)}℃</span>
+                  </div>
+                  {tomorrowPrecip != null && (
+                    <div className="mt-1 text-[11px] text-sky-600">
+                      降水 {tomorrowPrecip}%
+                    </div>
+                  )}
+                </div>
               </div>
-              <div className="mt-1.5 text-[11px] text-gray-600">
-                最高 <span className="font-bold text-rose-500">{Math.round(today.max)}℃</span>
-                　/ 最低 <span className="font-bold text-sky-500">{Math.round(today.min)}℃</span>
-              </div>
-            </div>
-            <div className="rounded-xl bg-white/80 px-3 py-3 shadow-inner">
-              <div className="text-[11px] text-gray-500">明日</div>
-              <div className="mt-1 flex items-center gap-2">
-                <span className="text-3xl leading-none">{wmoOf(tomorrow.code).icon}</span>
-                <span className="text-sm font-bold text-gray-800">{wmoOf(tomorrow.code).name}</span>
-              </div>
-              <div className="mt-1.5 text-[11px] text-gray-600">
-                最高 <span className="font-bold text-rose-500">{Math.round(tomorrow.max)}℃</span>
-                　/ 最低 <span className="font-bold text-sky-500">{Math.round(tomorrow.min)}℃</span>
-              </div>
-            </div>
-          </div>
-        )}
+
+              {/* 雨アラート（明日の降水確率 80% 以上） */}
+              {rainAlert && (
+                <div className="mt-3 rounded-xl border border-rose-200 bg-rose-50/70 px-3 py-2.5">
+                  <div className="flex items-start gap-2">
+                    <span className="text-xl leading-none">☂</span>
+                    <div className="text-[12px] leading-snug text-rose-700">
+                      <div className="font-bold">明日の降水確率 {tomorrowPrecip}%</div>
+                      <div className="mt-0.5 text-rose-600">
+                        明日は雨の可能性が高いです。<br />
+                        ご来店・配送の確認にご注意ください。
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+        </div>
       </div>
-    </div>
+
+      {/* PC 用: コンパクト 1 行ウィジェット（mobile では非表示） */}
+      <div className="hidden md:block">
+        <div className="rounded-xl border border-rose-100 bg-gradient-to-r from-rose-50 via-white to-sky-50 px-4 py-2 shadow-sm">
+          <div className="flex flex-wrap items-center gap-x-5 gap-y-1.5 text-xs">
+            {/* 日時 */}
+            <div className="text-gray-700">
+              <span className="font-medium">{fmtNow(now)}</span>
+              <span className="ml-2 text-gray-400">{placeLabel}</span>
+            </div>
+
+            {!weather && !error && (
+              <div className="text-gray-400">天気を取得中…</div>
+            )}
+            {error && (
+              <div className="rounded bg-amber-50 px-2 py-0.5 text-[11px] text-amber-700">
+                天気を取得できませんでした
+              </div>
+            )}
+
+            {weather && today && tomorrow && (
+              <>
+                {/* 今日 */}
+                <div className="flex items-center gap-1.5">
+                  <span className="text-gray-500">今日</span>
+                  <span className="text-base">{wmoOf(today.code).icon}</span>
+                  <span className="text-gray-800">{wmoOf(today.code).name}</span>
+                  <span className="text-gray-600">
+                    <span className="font-bold text-rose-500">{Math.round(today.max)}℃</span>
+                    /
+                    <span className="font-bold text-sky-500">{Math.round(today.min)}℃</span>
+                  </span>
+                </div>
+
+                {/* 明日 */}
+                <div className="flex items-center gap-1.5">
+                  <span className="text-gray-500">明日</span>
+                  <span className="text-base">{wmoOf(tomorrow.code).icon}</span>
+                  <span className="text-gray-800">{wmoOf(tomorrow.code).name}</span>
+                  <span className="text-gray-600">
+                    <span className="font-bold text-rose-500">{Math.round(tomorrow.max)}℃</span>
+                    /
+                    <span className="font-bold text-sky-500">{Math.round(tomorrow.min)}℃</span>
+                  </span>
+                  {tomorrowPrecip != null && (
+                    <span className="ml-1 rounded bg-sky-50 px-1.5 py-0.5 text-[11px] text-sky-700">
+                      降水 {tomorrowPrecip}%
+                    </span>
+                  )}
+                </div>
+
+                {/* 雨アラート */}
+                {rainAlert && (
+                  <div className="rounded-full border border-rose-200 bg-rose-50 px-2.5 py-0.5 text-[11px] font-medium text-rose-700">
+                    ☂ 明日は雨に注意
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+    </>
   )
 }
