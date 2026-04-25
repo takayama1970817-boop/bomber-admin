@@ -36,6 +36,106 @@ function ActionKpi({ label, count, emoji, accent, helper }) {
 }
 
 // =====================================================
+// 推奨アクション（PR-1）
+// 既存データだけから「次にやること」を1行で提案。
+// 雨連動 / 対応履歴 / カスタムは PR-4 / PR-3 で拡張予定。
+// =====================================================
+function recommendAction(salon) {
+  if (!salon) return '定期フォロー'
+  const d = salon.daysSinceLast ?? 0
+  const diff = salon.diffRate
+  if (salon.orderCount === 1 && d >= 30) return '研修案内・初回後フォロー'
+  if (d >= 30) return '再注文確認の電話'
+  if (diff != null && diff <= -0.3) return '対面フォロー検討'
+  if (d >= 7 && salon.status !== 'green') return '3日以内に LINE 連絡'
+  return '定期フォロー'
+}
+
+// =====================================================
+// スマホ用 フォローカード（PR-1）
+// 表ではなくカード1枚にサロン情報＋推奨アクションを集約。
+// 電話 / メモ / 対応済は disabled、PR-2/PR-3 で実装予定。
+// =====================================================
+function MobileFollowCard({ salon }) {
+  const badge = STATUS_BADGE[salon.status] || STATUS_BADGE.yellow
+  const action = recommendAction(salon)
+  const diffColor =
+    salon.diffRate == null
+      ? 'text-gray-400'
+      : salon.diffRate > 0
+        ? 'text-emerald-600'
+        : salon.diffRate < 0
+          ? 'text-red-600'
+          : 'text-gray-500'
+  const detailHref = `/dealer/salons?salon=${encodeURIComponent(salon.companyName)}`
+  return (
+    <div className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm">
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0 flex-1 truncate text-base font-bold text-gray-900" title={salon.companyName}>
+          {salon.companyName}
+        </div>
+        <span className={`shrink-0 rounded px-2 py-0.5 text-[11px] font-medium ${badge.cls}`}>
+          {badge.label}
+        </span>
+      </div>
+      <div className="mt-2 grid grid-cols-3 gap-2 text-[11px]">
+        <div>
+          <div className="text-gray-400">前月比</div>
+          <div className={`mt-0.5 text-sm font-bold ${diffColor}`}>
+            {salon.diffRate == null ? '—' : fmtPct(salon.diffRate)}
+          </div>
+        </div>
+        <div>
+          <div className="text-gray-400">最終発注</div>
+          <div className="mt-0.5 text-sm font-medium text-gray-800">
+            {fmtDate(salon.lastOrderDate)}
+          </div>
+          <div className="text-[10px] text-gray-400">{salon.daysSinceLast}日前</div>
+        </div>
+        <div>
+          <div className="text-gray-400">今月売上</div>
+          <div className="mt-0.5 text-sm font-medium text-gray-800">
+            {fmtYen(salon.currentSales)}
+          </div>
+        </div>
+      </div>
+      <div className="mt-3 rounded-lg bg-indigo-50 px-3 py-2 text-[12px] text-indigo-800">
+        💡 推奨：{action}
+      </div>
+      <div className="mt-2 grid grid-cols-4 gap-2 text-[11px]">
+        <button
+          disabled
+          title="次PR対応予定"
+          className="rounded-lg border border-gray-200 bg-gray-50 px-2 py-2 text-gray-400"
+        >
+          📞 電話
+        </button>
+        <button
+          disabled
+          title="次PR対応予定"
+          className="rounded-lg border border-gray-200 bg-gray-50 px-2 py-2 text-gray-400"
+        >
+          ✏️ メモ
+        </button>
+        <Link
+          to={detailHref}
+          className="flex items-center justify-center rounded-lg border border-indigo-300 bg-indigo-50 px-2 py-2 font-medium text-indigo-700 hover:bg-indigo-100"
+        >
+          → 詳細
+        </Link>
+        <button
+          disabled
+          title="次PR対応予定"
+          className="rounded-lg border border-gray-200 bg-gray-50 px-2 py-2 text-gray-400"
+        >
+          ✓ 対応済
+        </button>
+      </div>
+    </div>
+  )
+}
+
+// =====================================================
 // アラート節
 // =====================================================
 
@@ -149,8 +249,39 @@ export default function DealerDashboard() {
             />
           </div>
 
-          {/* フォロー優先サロン Top 10 */}
-          <div className="rounded-2xl border border-gray-200 bg-white">
+          {/* スマホ専用：最優先フォロー Top5 カード */}
+          <div className="space-y-3 md:hidden">
+            <div className="flex items-center justify-between">
+              <div className="text-sm font-bold text-gray-900">最優先フォロー Top 5</div>
+              <div className="text-[11px] text-gray-500">
+                警告 → 要注意の順
+              </div>
+            </div>
+            {top10FollowNeeded.length === 0 ? (
+              <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-6 text-center text-sm text-emerald-800">
+                フォロー必要なサロンはありません 👍
+              </div>
+            ) : (
+              <>
+                {top10FollowNeeded.slice(0, 5).map((s) => (
+                  <MobileFollowCard key={s.companyName} salon={s} />
+                ))}
+                {top10FollowNeeded.length > 5 && (
+                  <div className="text-center">
+                    <Link
+                      to="/dealer/dashboard-exec"
+                      className="inline-block rounded-lg border border-indigo-300 bg-white px-4 py-2 text-xs font-medium text-indigo-700"
+                    >
+                      他 {top10FollowNeeded.length - 5} 店も見る →
+                    </Link>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+
+          {/* PC専用：フォロー優先サロン Top 10 テーブル（従来） */}
+          <div className="hidden rounded-2xl border border-gray-200 bg-white md:block">
             <div className="flex items-center justify-between border-b border-gray-100 px-5 py-3">
               <div className="text-sm font-bold text-gray-900">
                 フォロー優先サロン Top 10
@@ -211,8 +342,8 @@ export default function DealerDashboard() {
             )}
           </div>
 
-          {/* アラート3種 */}
-          <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+          {/* アラート3種（PC のみ表示。スマホは Top5 カード＋推奨アクションでカバー） */}
+          <div className="hidden grid-cols-1 gap-4 md:grid lg:grid-cols-3">
             <AlertSection
               title="売上急落"
               emoji="📉"
@@ -242,9 +373,9 @@ export default function DealerDashboard() {
             />
           </div>
 
-          {/* アラートがすべて空ならメッセージ */}
+          {/* アラートがすべて空ならメッセージ（PC のみ。スマホは Top5 カード側で表示） */}
           {sharpDeclines.length === 0 && inactiveSalons.length === 0 && firstOrderStopped.length === 0 && (
-            <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-6 text-center text-sm text-emerald-800">
+            <div className="hidden rounded-2xl border border-emerald-200 bg-emerald-50 p-6 text-center text-sm text-emerald-800 md:block">
               🎉 すべてのサロンが順調に発注しています
             </div>
           )}
