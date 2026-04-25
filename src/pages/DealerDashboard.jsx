@@ -392,16 +392,13 @@ export default function DealerDashboard() {
                 💬 チャット
               </Link>
             </div>
-            {/* PC: 従来通り 4 リンク */}
-            <div className="hidden grid-cols-2 gap-3 md:grid lg:grid-cols-4">
+            {/* PC: 3 リンク均等配置（請求書はノイズなので非表示） */}
+            <div className="hidden grid-cols-3 gap-3 md:grid">
               <Link to="/dealer/salons" className="rounded-xl border border-gray-200 bg-white p-4 text-center text-sm font-medium text-gray-700 hover:bg-gray-50">
                 👥 サロン管理
               </Link>
               <Link to="/dealer/orders" className="rounded-xl border border-gray-200 bg-white p-4 text-center text-sm font-medium text-gray-700 hover:bg-gray-50">
                 📦 注文一覧
-              </Link>
-              <Link to="/dealer/invoices" className="rounded-xl border border-gray-200 bg-white p-4 text-center text-sm font-medium text-gray-700 hover:bg-gray-50">
-                📄 請求書一覧
               </Link>
               <Link to="/dealer/chat" className="rounded-xl border border-gray-200 bg-white p-4 text-center text-sm font-medium text-gray-700 hover:bg-gray-50">
                 💬 チャット
