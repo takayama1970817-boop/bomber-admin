@@ -60,11 +60,20 @@ export function fmtDateTime(ts) {
 }
 
 /**
- * 前年比など割合表示（+12.3% / -8.4% / —）
+ * 割合表示（12.3% / —）。稼働率など符号なし用途。
  * @param {number|null|undefined} ratio 0.123 のような小数 or null
  * @param {number} digits 小数点以下桁数（既定1）
  */
 export function fmtPct(ratio, digits = 1) {
+  if (ratio == null || Number.isNaN(Number(ratio))) return '—'
+  return `${(Number(ratio) * 100).toFixed(digits)}%`
+}
+
+/**
+ * 前年比 / 前月比など符号付き割合表示（+12.3% / -8.4% / —）
+ * 0% は無符号の "0.0%"。
+ */
+export function fmtPctSigned(ratio, digits = 1) {
   if (ratio == null || Number.isNaN(Number(ratio))) return '—'
   const v = Number(ratio) * 100
   const sign = v > 0 ? '+' : ''
