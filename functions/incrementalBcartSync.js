@@ -27,10 +27,28 @@ const MAX_PAGES = 50 // 安全弁: 5000件まで
 exports.runIncrementalBcartSync = onCall(
   { region: 'asia-northeast1', timeoutSeconds: 300, memory: '512MiB' },
   async (request) => {
+    // 未捕捉例外を必ず HttpsError に包んで詳細メッセージをクライアントに返す。
+    // 'internal' のまま渡すと UI で原因が分からない。
+    try {
+      return await runSyncImpl(request)
+    } catch (e) {
+      if (e instanceof HttpsError) throw e
+      console.error('[runIncrementalBcartSync] unexpected error:', e?.stack || e)
+      throw new HttpsError(
+        'internal',
+        `Bカート 同期で例外発生: ${e?.message || e}`,
+        { name: e?.name, stack: e?.stack?.split('\n').slice(0, 5).join(' | ') },
+      )
+    }
+  },
+)
+
+async function runSyncImpl(request) {
     if (!request.auth) {
       throw new HttpsError('unauthenticated', 'ログインが必要です')
     }
     const db = getFirestore()
+    console.log('[runIncrementalBcartSync] start uid=', request.auth.uid, 'data=', request.data)
 
     // 呼び出しユーザーの dealerCode を取得
     const userDoc = await db.collection('users').doc(request.auth.uid).get()
@@ -124,6 +142,7 @@ exports.runIncrementalBcartSync = onCall(
       }
     }
 
+    console.log('[runIncrementalBcartSync] done', { dealerCode, days, fetched: fetched.length, matched: mine.length, created, updated, failed })
     return {
       success: true,
       dealerCode,
@@ -134,5 +153,4 @@ exports.runIncrementalBcartSync = onCall(
       updated,
       failed,
     }
-  },
-)
+}
