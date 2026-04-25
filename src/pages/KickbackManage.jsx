@@ -475,6 +475,10 @@ export default function KickbackManage() {
           orderedAt: o.ordered_at || '',
           payment: o.payment || '',
           status: o.status || '',
+          // dealer CSV 詳細出力用（2026-04-25 拡張）
+          orderCode: o.code || '',
+          customerId: o.customer_id || '',
+          finalPrice: Number(o.final_price ?? o.total_price ?? 0) || 0,
         }
       }
 
@@ -530,7 +534,18 @@ export default function KickbackManage() {
 
         const name = order.companyName || '（不明）'
         if (!salonMap[name]) {
-          salonMap[name] = { orderDates: new Set(), total: 0, kb: 0, orderGroups: {} }
+          salonMap[name] = {
+            orderDates: new Set(),
+            total: 0,
+            kb: 0,
+            orderGroups: {},
+            // dealer CSV 詳細出力用：最初に確認できた customer_id をサロンコードとして採用
+            salonCode: order.customerId || '',
+          }
+        }
+        // 後発で salonCode が確認できた場合に上書き（先行が空文字の場合のみ）
+        if (!salonMap[name].salonCode && order.customerId) {
+          salonMap[name].salonCode = order.customerId
         }
 
         const date = order.orderedAt?.split(' ')[0] || ''
@@ -548,15 +563,31 @@ export default function KickbackManage() {
         // 注文日ごとにグループ化
         const groupKey = `${date}_${p.order_id}`
         if (!salonMap[name].orderGroups[groupKey]) {
-          salonMap[name].orderGroups[groupKey] = { date, payment: order.payment || '', items: [], total: 0, kb: 0 }
+          salonMap[name].orderGroups[groupKey] = {
+            date,
+            payment: order.payment || '',
+            items: [],
+            total: 0,
+            kb: 0,
+            // dealer CSV 詳細出力用
+            orderId: p.order_id,
+            orderCode: order.orderCode || '',
+            orderStatus: order.status || '',
+            orderFinalPrice: order.finalPrice || 0,
+          }
         }
+        const qty = Number(p.order_pro_count) || 0
         salonMap[name].orderGroups[groupKey].items.push({
           productName,
           setName,
+          // 商品コード（Bカート product_code フィールド。無ければ空）
+          productCode: p.product_code || p.code || '',
           unitPrice: p.unit_price || 0,
-          quantity: p.order_pro_count || 0,
+          quantity: qty,
           subtotal,
           kb,
+          // 商品別キックバック率を保存（subtotal=0 のときは null）
+          kbRate: subtotal > 0 ? (kb / subtotal) : null,
         })
         salonMap[name].orderGroups[groupKey].total += subtotal
         salonMap[name].orderGroups[groupKey].kb += kb
@@ -565,6 +596,8 @@ export default function KickbackManage() {
       const entries = Object.entries(salonMap)
         .map(([name, data]) => ({
           salonName: name,
+          // dealer CSV 詳細出力用：サロンコード（Bカート customer_id）
+          salonCode: data.salonCode || '',
           type: 'sub',
           orderCount: data.orderDates.size,
           orderTotal: data.total,
@@ -885,9 +918,11 @@ export default function KickbackManage() {
       // 3) 代理店配布専用 CSV を生成 → Storage アップロード
       const kbForCsv = {
         dealerCode: code,
+        dealerName: selectedDealer?.companyName || code,
         month,
         entries: calcResult.entries,
         totalKickback: calcResult.totalKickback,
+        totalSales: calcResult.totalSales,
         grandTotal: calcResult.grandTotal,
       }
       const csvText = generateDealerKickbackCsv(kbForCsv)
@@ -1143,9 +1178,12 @@ export default function KickbackManage() {
           const pdfUrl = await getDownloadURL(pdfRef)
 
           const csvText = generateDealerKickbackCsv({
-            dealerCode: code, month,
+            dealerCode: code,
+            dealerName: selectedDealer?.companyName || code,
+            month,
             entries: calcResult.entries,
             totalKickback: calcResult.totalKickback,
+            totalSales: calcResult.totalSales,
             grandTotal: calcResult.grandTotal,
           })
           const csvFileName = buildDealerCsvFileName({ dealerCode: code, month })
