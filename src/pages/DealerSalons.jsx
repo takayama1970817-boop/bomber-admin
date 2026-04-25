@@ -247,35 +247,52 @@ export default function DealerSalons() {
     const salon = sortedStats.find((s) => s.companyName === selected)
     if (!salon) { setSelected(null); return null }
 
-    // 月別集計
-    const monthly = {}
-    // 年別集計（コロナ前後・市場変化の比較用に追加）
+    // === 表示枠を「過去3年 / 過去36ヶ月」で固定（データなしも 0 で出す） ===
+    const now = new Date()
+    const currentYear = now.getFullYear()
+
+    // 年別: 直近3年を必ず空枠で用意
     const yearly = {}
+    const yearKeysDesc = [currentYear, currentYear - 1, currentYear - 2].map(String)
+    for (const y of yearKeysDesc) yearly[y] = { count: 0, total: 0, yoyRate: null }
+
+    // 月別: 直近36ヶ月を必ず空枠で用意（新しい順）
+    const monthly = {}
+    const monthlyKeys = []
+    for (let i = 0; i < 36; i += 1) {
+      const d = new Date(now.getFullYear(), now.getMonth() - i, 1)
+      const k = `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, '0')}`
+      monthlyKeys.push(k)
+      monthly[k] = { count: 0, total: 0 }
+    }
+
+    // === orders を集計（過去3年外の古い注文は無視） ===
     let lastOrderDate = null
     for (const o of salon.orders) {
       const d = o.orderDate?.toDate ? o.orderDate.toDate() : o.orderDate ? new Date(o.orderDate) : null
       if (!d) continue
       const t = Number(o.total) || 0
-      const ymKey = `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, '0')}`
-      if (!monthly[ymKey]) monthly[ymKey] = { count: 0, total: 0 }
-      monthly[ymKey].count++
-      monthly[ymKey].total += t
       const yKey = String(d.getFullYear())
-      if (!yearly[yKey]) yearly[yKey] = { count: 0, total: 0, yoyRate: null }
-      yearly[yKey].count++
-      yearly[yKey].total += t
+      const mKey = `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, '0')}`
+      if (yearly[yKey]) {
+        yearly[yKey].count++
+        yearly[yKey].total += t
+      }
+      if (monthly[mKey]) {
+        monthly[mKey].count++
+        monthly[mKey].total += t
+      }
       if (!lastOrderDate || d > lastOrderDate) lastOrderDate = d
     }
-    const monthlyKeys = Object.keys(monthly).sort().reverse()
-    // 年別 → 前年比を算出（古い→新しい順で比較）
-    const yearKeysAsc = Object.keys(yearly).sort()
-    for (let i = 1; i < yearKeysAsc.length; i++) {
-      const prev = yearly[yearKeysAsc[i - 1]].total
-      if (prev > 0) {
-        yearly[yearKeysAsc[i]].yoyRate = (yearly[yearKeysAsc[i]].total - prev) / prev
+
+    // 前年比（新しい→古い順 yearKeysDesc に対し、各年と1つ古い年を比較）
+    for (let i = 0; i < yearKeysDesc.length - 1; i += 1) {
+      const cur = yearly[yearKeysDesc[i]]
+      const prev = yearly[yearKeysDesc[i + 1]]
+      if (prev?.total > 0) {
+        cur.yoyRate = (cur.total - prev.total) / prev.total
       }
     }
-    const yearKeysDesc = [...yearKeysAsc].reverse() // 新しい順で表示
 
     return (
       <div>
