@@ -268,13 +268,14 @@ export default function DealerDashboard() {
                 ))}
                 {top10FollowNeeded.length > 5 && (
                   <div className="text-center">
-                    {/* hotfix: filter=followNeeded で表示崩れ報告のため、暫定でクエリ無しに戻す。
-                        フィルタ連携は原因切り分け後に別PRで再実装。 */}
+                    {/* Top5 の続き（6位以降）が見える状態で /dealer/salons へ遷移。
+                        DealerSalons 側で view=priority を見て優先順ソートする
+                        （filter ではなく sort で実装。空リスト等の不具合を回避）。 */}
                     <Link
-                      to="/dealer/salons"
+                      to="/dealer/salons?view=priority"
                       className="inline-block rounded-lg border border-indigo-300 bg-white px-4 py-2 text-xs font-medium text-indigo-700"
                     >
-                      他 {top10FollowNeeded.length - 5} 店も見る →
+                      優先フォロー一覧へ →
                     </Link>
                   </div>
                 )}
