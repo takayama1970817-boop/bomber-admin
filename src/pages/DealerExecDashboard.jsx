@@ -53,69 +53,6 @@ function StatTile({ label, value, accent, active, onClick, disabled }) {
   )
 }
 
-// スマホ専用：要フォローサロンカード
-//   PC は既存テーブル / フィルタ UI を維持し、スマホは 1 サロン=1 カードで表示
-//   メモボタンは仮配置（disabled）。詳細は /dealer/salons?salon=name へ遷移。
-function MobileFollowCard({ salon }) {
-  const days = salon.lastOrderDate
-    ? Math.floor((Date.now() - salon.lastOrderDate.getTime()) / 86400000)
-    : null
-  const detailHref = `/dealer/salons?salon=${encodeURIComponent(salon.displayName || '')}`
-  return (
-    <div className="rounded-2xl border border-red-200 bg-white p-4 shadow-sm">
-      <div className="flex items-start justify-between gap-2">
-        <div className="min-w-0 flex-1 truncate text-base font-bold text-gray-900" title={salon.displayName}>
-          {salon.displayName || '名称未設定'}
-        </div>
-        <span className="shrink-0 rounded bg-red-100 px-2 py-0.5 text-[11px] font-medium text-red-700">
-          要フォロー
-        </span>
-      </div>
-      <div className="mt-2 grid grid-cols-2 gap-2 text-[11px]">
-        <div>
-          <div className="text-gray-400">最終注文</div>
-          {salon.lastOrderDate ? (
-            <>
-              <div className="mt-0.5 text-sm font-medium text-gray-800">
-                {fmtDate(salon.lastOrderDate)}
-              </div>
-              <div className="text-[10px] text-red-600">{days}日前</div>
-            </>
-          ) : (
-            <>
-              <div className="mt-0.5 text-sm font-medium text-gray-500">—</div>
-              <div className="text-[10px] text-red-600">注文履歴なし</div>
-            </>
-          )}
-        </div>
-        <div>
-          <div className="text-gray-400">累計売上</div>
-          <div className="mt-0.5 text-sm font-medium text-gray-800">
-            {fmtYen(salon.cumulativeSales)}
-          </div>
-          <div className="text-[10px] text-gray-400">{salon.orderCount} 件</div>
-        </div>
-      </div>
-      <div className="mt-3 grid grid-cols-2 gap-2 text-[11px]">
-        <button
-          type="button"
-          disabled
-          title="次PR対応予定"
-          className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-gray-400"
-        >
-          ✏️ メモ
-        </button>
-        <Link
-          to={detailHref}
-          className="flex items-center justify-center rounded-lg border border-indigo-300 bg-indigo-50 px-3 py-2 font-medium text-indigo-700"
-        >
-          → 詳細を見る
-        </Link>
-      </div>
-    </div>
-  )
-}
-
 // サロン状態バッジ
 function StateBadge({ state }) {
   const map = {
@@ -553,91 +490,10 @@ export default function DealerExecDashboard() {
 
       {!loading && !error && kpis && (
         <>
-          {/* ===== スマホ専用：朝1分で見れる営業画面 ===== */}
-          {(() => {
-            // 要フォロー = 当月発注なし かつ 履歴なし or 91日以上
-            // 一覧は 履歴なし → 古い順 でソート
-            const followNeeded = (Array.isArray(uniqueSalons) ? uniqueSalons : [])
-              .filter((s) => statusFromDays(s.currentSales, s.lastOrderDate) === '要フォロー')
-              .sort((a, b) => {
-                const ad = a.lastOrderDate?.getTime?.() ?? null
-                const bd = b.lastOrderDate?.getTime?.() ?? null
-                if (ad == null && bd == null) return 0
-                if (ad == null) return -1 // 履歴なしを上
-                if (bd == null) return 1
-                return ad - bd // 古い順
-              })
-            const followCount = followNeeded.length
-            return (
-              <div className="space-y-4 md:hidden">
-                {/* 要フォロー（最も目立たせる赤カード） */}
-                <div className="rounded-2xl border-2 border-red-300 bg-red-50 p-5 shadow-sm">
-                  <div className="text-xs font-bold text-red-700">🚨 要フォロー</div>
-                  <div className="mt-1 text-4xl font-bold text-red-700">
-                    {followCount} <span className="text-2xl">店</span>
-                  </div>
-                  <div className="mt-1 text-[11px] text-red-600">
-                    最終注文から 91日以上 / 注文履歴なし
-                  </div>
-                </div>
-
-                {/* 今月動いている / これまでの取引（補助情報） */}
-                <div className="grid grid-cols-2 gap-3">
-                  <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4">
-                    <div className="text-[11px] font-bold text-emerald-700">今月動いている</div>
-                    <div className="mt-1 text-3xl font-bold text-emerald-700">
-                      {currentActiveCount} <span className="text-xl">店</span>
-                    </div>
-                    <div className="mt-1 text-[10px] text-emerald-600">当月発注あり</div>
-                  </div>
-                  <div className="rounded-2xl border border-gray-200 bg-white p-4">
-                    <div className="text-[11px] font-bold text-gray-700">これまでの取引</div>
-                    <div className="mt-1 text-3xl font-bold text-gray-800">
-                      {allTimeSalonCount} <span className="text-xl">店</span>
-                    </div>
-                    <div className="mt-1 text-[10px] text-gray-500">Bカート 顧客全体</div>
-                  </div>
-                </div>
-
-                {/* 母集団の説明（数字を混ぜないための注記） */}
-                <div className="rounded-lg bg-gray-50 px-3 py-2 text-[11px] leading-relaxed text-gray-500">
-                  これまでの取引（{allTimeSalonCount}）には、今月動いているサロン（{currentActiveCount}）と要フォロー（{followCount}）が含まれます。
-                  集合の差はそれぞれの分類に由来します（重複なし）。
-                </div>
-
-                {/* 要フォロー一覧（初期で開いた状態） */}
-                <div>
-                  <div className="mb-2 flex items-baseline justify-between">
-                    <div className="text-sm font-bold text-gray-900">
-                      要フォローのサロン
-                    </div>
-                    <div className="text-[11px] text-gray-500">
-                      履歴なし → 最終注文の古い順
-                    </div>
-                  </div>
-                  {followCount === 0 ? (
-                    <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-6 text-center text-sm text-emerald-800">
-                      要フォローのサロンはありません 👍
-                    </div>
-                  ) : (
-                    <div className="space-y-3">
-                      {followNeeded.slice(0, 30).map((s) => (
-                        <MobileFollowCard key={s.key} salon={s} />
-                      ))}
-                      {followNeeded.length > 30 && (
-                        <div className="text-center text-[11px] text-gray-400">
-                          他 {followNeeded.length - 30} 店（再設計後に表示予定）
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </div>
-              </div>
-            )
-          })()}
-
-          {/* ===== ここから下は PC 専用（既存レイアウト） ===== */}
-          <div className="hidden space-y-5 md:block">
+          {/* PR #103 のスマホ専用 営業 UI（要フォロー主役）は撤回。
+              経営ダッシュボードは「数字を判断する画面」として、
+              スマホでも PC でも同じレスポンシブ KPI（売上 → 前月比 → 母集団 → 稼働）を最上部に置く。
+              要フォロー寄りの行動 UI は /dealer 側に集約。 */}
           {/* KPI 4 枚 */}
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
             <KpiCard
@@ -657,21 +513,13 @@ export default function DealerExecDashboard() {
                     : 'text-gray-500'
               }
             />
-            {/* スロット3: 管理対象がある場合のみ稼働率、無い場合は「これまでの取引サロン」 */}
-            {showRate ? (
-              <KpiCard
-                label="稼働率"
-                value={fmtPct(rate)}
-                sub={`${currentActiveCount} / ${dealerSalonsCount} 店`}
-                subColor={activeRateColor(rate)}
-              />
-            ) : (
-              <KpiCard
-                label="これまでの取引サロン"
-                value={`${allTimeSalonCount} 店`}
-                sub={snapshotTotalSalonCount != null ? 'Bカート 顧客全件（最新スナップショット）' : '過去に1回以上注文のあったサロン'}
-              />
-            )}
+            {/* スロット3: これまでの取引サロン（社長指定の優先表示順に固定）
+                稼働率はサロン状況パネル内でのみ表示する */}
+            <KpiCard
+              label="これまでの取引サロン"
+              value={`${allTimeSalonCount} 店`}
+              sub={snapshotTotalSalonCount != null ? 'Bカート 顧客全件（最新スナップショット）' : '過去に1回以上注文のあったサロン'}
+            />
             {/* スロット4: 今月動いているサロン */}
             <KpiCard
               label="今月動いているサロン"
@@ -1038,7 +886,6 @@ export default function DealerExecDashboard() {
               </div>
             )}
           </div>
-          </div>{/* /PC専用ラッパ */}
         </>
       )}
     </div>
