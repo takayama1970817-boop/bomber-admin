@@ -1,4 +1,4 @@
-// 請求書 PDF 生成（グループC代理店向け）
+// 請求書 PDF 生成（全代理店共通）
 // html2canvas で DOM をキャンバス化し、jsPDF で A4 PDF にして保存する
 // 構成: 1ページ目=表紙（合計+注文番号一覧）、2ページ目以降=注文ごとの明細（インボイス）
 
@@ -10,8 +10,15 @@ function fmtEn(n) {
   return Number(n).toLocaleString() + '円'
 }
 
-function buildFileName(dealerCode, month) {
-  return `請求書_${dealerCode}_${month.replace('-', '')}.pdf`
+// 請求書PDFのファイル名。請求書番号があれば優先（例: 請求書_DINV2604-001.pdf）。
+// invoiceNo 採番前の保存・プレビュー段階では dealerCode + 年月 にフォールバック。
+function buildFileName(invoice) {
+  if (invoice.invoiceNo) {
+    return `請求書_${invoice.invoiceNo}.pdf`
+  }
+  const code = invoice.dealerCode || 'unknown'
+  const month = (invoice.month || '').replace('-', '')
+  return `請求書_${code}_${month}.pdf`
 }
 
 // 共通ヘッダー（宛先+発行者情報）
@@ -223,12 +230,10 @@ async function renderPageToCanvas(html) {
   }
 }
 
-/**
- * 請求書PDFを生成してダウンロード
- * 1ページ目: 表紙（合計+注文番号一覧）
- * 2ページ目以降: 注文ごとの明細（インボイス）
- */
-export async function generateInvoicePdf(invoice) {
+// 請求書PDFを構築（保存せずに jsPDF インスタンスを返す）。
+// generateInvoicePdf（ダウンロード）と generateInvoicePdfBase64（メール添付）の
+// 共通ロジック。
+async function buildInvoicePdf(invoice) {
   const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' })
   const pageWidth = pdf.internal.pageSize.getWidth()
   const pageHeight = pdf.internal.pageSize.getHeight()
@@ -255,7 +260,6 @@ export async function generateInvoicePdf(invoice) {
       pdf.addImage(canvas.toDataURL('image/png'), 'PNG', margin, margin, printableWidth, imgHeight)
     } else {
       // 長い明細はページ分割
-      const scale = 2
       const pxPerPage = Math.floor((printableHeight / imgHeight) * canvas.height)
       let srcY = 0
       let page = 0
@@ -281,7 +285,29 @@ export async function generateInvoicePdf(invoice) {
     }
   }
 
-  const fileName = buildFileName(invoice.dealerCode, invoice.month)
+  return pdf
+}
+
+/**
+ * 請求書PDFを生成してダウンロード
+ * 1ページ目: 表紙（合計+注文番号一覧）
+ * 2ページ目以降: 注文ごとの明細（インボイス）
+ */
+export async function generateInvoicePdf(invoice) {
+  const pdf = await buildInvoicePdf(invoice)
+  const fileName = buildFileName(invoice)
   pdf.save(fileName)
   return fileName
+}
+
+/**
+ * 請求書PDFを生成して base64 文字列で返す（SendGrid 添付用）。
+ * dataURI のプレフィックスは除去し、純粋な base64 のみ返す。
+ */
+export async function generateInvoicePdfBase64(invoice) {
+  const pdf = await buildInvoicePdf(invoice)
+  const dataUri = pdf.output('datauristring')
+  const base64 = dataUri.split('base64,')[1] || ''
+  const fileName = buildFileName(invoice)
+  return { base64, fileName }
 }

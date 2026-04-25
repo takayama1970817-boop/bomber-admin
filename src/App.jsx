@@ -54,6 +54,7 @@ import BpMaster from './pages/BpMaster.jsx'
 import Calendar from './pages/Calendar.jsx'
 import GeneralSettings from './pages/GeneralSettings.jsx'
 import InvoiceManage from './pages/InvoiceManage.jsx'
+import InvoiceEmailHistory from './pages/InvoiceEmailHistory.jsx'
 import PurchaseManage from './pages/PurchaseManage.jsx'
 import QuotationManage from './pages/QuotationManage.jsx'
 import KickbackSettings from './pages/KickbackSettings.jsx'
@@ -188,6 +189,7 @@ export default function App() {
         <Route path="/admin/kickback" element={<ProtectedRoute requireFeature="kickback"><KickbackManage /></ProtectedRoute>} />
         <Route path="/settlements" element={<ProtectedRoute requireRole={['admin', 'staff']}><SettlementManage /></ProtectedRoute>} />
         <Route path="/admin/invoices" element={<ProtectedRoute requireRole="admin"><InvoiceManage /></ProtectedRoute>} />
+        <Route path="/admin/invoice-email-history" element={<ProtectedRoute requireRole="admin"><InvoiceEmailHistory /></ProtectedRoute>} />
         <Route path="/admin/users" element={<ProtectedRoute requireFeature="users"><AdminUsers /></ProtectedRoute>} />
         <Route path="/admin/bcart-import" element={<ProtectedRoute requireFeature="bcartImport"><BcartImport /></ProtectedRoute>} />
         <Route path="/admin/receipt-preview" element={<ProtectedRoute requireFeature="receiptPreview"><ReceiptPreview /></ProtectedRoute>} />

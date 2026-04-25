@@ -16,6 +16,7 @@ import {
 import { db } from '../lib/firebase.js'
 import { generateInvoicePdf } from '../lib/generateInvoicePdf.js'
 import { fetchOrdersByMonth, fetchOrderProductsBatch, fetchLogisticsByIds } from '../lib/bcartApi.js'
+import InvoiceSendModal from '../components/InvoiceSendModal.jsx'
 
 function fmtYen(n) {
   if (n == null) return '—'
@@ -78,6 +79,11 @@ export default function InvoiceManage() {
   const [companyInfo, setCompanyInfo] = useState(null)
 
   const [confirmAction, setConfirmAction] = useState(null)
+  const [sendModalInvoice, setSendModalInvoice] = useState(null)
+
+  // 絞り込み: グループ（'' = 全グループ）、コード/名前検索
+  const [groupFilter, setGroupFilter] = useState('')
+  const [searchText, setSearchText] = useState('')
 
   // 初期データ取得
   useEffect(() => {
@@ -88,14 +94,17 @@ export default function InvoiceManage() {
           getDocs(collection(db, 'dealerSalons')),
         ])
 
+        // 全代理店を保持（グループC専用ではなく、UI 側のフィルタで絞り込む）。
+        // 初期利用対象はグループC（請求書発行・KBなし）だが、機能としては
+        // 全代理店共通の請求書メール送信基盤として運用する。
         const allDealers = dealerSnap.docs
           .map((d) => ({ id: d.id, ...d.data() }))
           .filter((d) => d.role === 'dealer' && d.dealerCode)
+          .sort((a, b) => (a.dealerCode || '').localeCompare(b.dealerCode || ''))
 
-        const groupCDealers = allDealers.filter((d) => d.kbGroup === 'C')
-        setDealers(groupCDealers)
-        if (groupCDealers.length > 0 && !selectedCode) {
-          setSelectedCode(groupCDealers[0].dealerCode)
+        setDealers(allDealers)
+        if (allDealers.length > 0 && !selectedCode) {
+          setSelectedCode(allDealers[0].dealerCode)
         }
 
         setSalonLinks(linkSnap.docs.map((d) => ({ id: d.id, ...d.data() })))
@@ -146,7 +155,9 @@ export default function InvoiceManage() {
         return
       }
 
-      // グループCは代理店自身の注文を抽出（会社名で特定）
+      // 代理店自身の注文を抽出（会社名で特定）。dealerSalons の type='own'
+      // か、フォールバックで代理店マスタの companyName をキーに使う。
+      // この識別ロジックは KBグループに依存せず全代理店共通で動作する。
       const ownCompanyNames = salonLinks
         .filter((s) => s.dealerCode === selectedCode && s.type === 'own')
         .map((s) => s.companyName.replace(/\s/g, ''))
@@ -374,16 +385,60 @@ export default function InvoiceManage() {
   if (dealers.length === 0) {
     return (
       <div className="rounded-xl border border-dashed border-gray-300 bg-white py-12 text-center">
-        <p className="text-sm text-gray-400">グループCの代理店が登録されていません</p>
-        <p className="mt-1 text-xs text-gray-300">代理店管理でKBグループを「C」に設定してください</p>
+        <p className="text-sm text-gray-400">代理店が登録されていません</p>
+        <p className="mt-1 text-xs text-gray-300">代理店管理から代理店を登録してください</p>
       </div>
     )
   }
 
+  // グループ + コード/名前で代理店を絞り込み（UI 表示用）。
+  // 元の dealers は全代理店、filteredDealers は select 用に絞り込んだもの。
+  const normalizedSearch = searchText.trim().toLowerCase()
+  const filteredDealers = dealers.filter((d) => {
+    if (groupFilter && (d.kbGroup || 'A') !== groupFilter) return false
+    if (normalizedSearch) {
+      const hay = `${d.dealerCode || ''} ${d.companyName || ''} ${d.email || ''}`.toLowerCase()
+      if (!hay.includes(normalizedSearch)) return false
+    }
+    return true
+  })
+
   return (
     <div>
       <h1 className="mb-2 text-2xl font-bold text-gray-900">請求書管理</h1>
-      <p className="mb-6 text-sm text-gray-500">グループC代理店向けの請求書作成・ステータス管理</p>
+      <p className="mb-6 text-sm text-gray-500">
+        全代理店向けの請求書作成・ステータス管理・メール送信。グループ・コード・名前で絞り込めます。
+      </p>
+
+      {/* 絞り込み行 */}
+      <div className="mb-3 flex flex-wrap items-end gap-3">
+        <div>
+          <label className="mb-1 block text-xs font-medium text-gray-500">KBグループ</label>
+          <select
+            value={groupFilter}
+            onChange={(e) => setGroupFilter(e.target.value)}
+            className="rounded-lg border border-gray-300 px-3 py-2 text-sm"
+          >
+            <option value="">全グループ</option>
+            <option value="A">A（KBあり）</option>
+            <option value="B">B（KBあり）</option>
+            <option value="C">C（請求書発行・KBなし）</option>
+          </select>
+        </div>
+        <div className="flex-1 min-w-[200px]">
+          <label className="mb-1 block text-xs font-medium text-gray-500">代理店検索（コード／会社名）</label>
+          <input
+            type="text"
+            value={searchText}
+            onChange={(e) => setSearchText(e.target.value)}
+            placeholder="例: J0015 / 株式会社○○"
+            className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
+          />
+        </div>
+        <div className="text-xs text-gray-400">
+          {filteredDealers.length} / {dealers.length} 社
+        </div>
+      </div>
 
       {/* 代理店・月選択 */}
       <div className="mb-6 flex flex-wrap items-end gap-4">
@@ -392,11 +447,14 @@ export default function InvoiceManage() {
           <select
             value={selectedCode}
             onChange={(e) => { setSelectedCode(e.target.value); setCalcResult(null) }}
-            className="rounded-lg border border-gray-300 px-3 py-2 text-sm"
+            className="rounded-lg border border-gray-300 px-3 py-2 text-sm min-w-[260px]"
           >
-            {dealers.map((d) => (
+            {filteredDealers.length === 0 && (
+              <option value="">該当する代理店がありません</option>
+            )}
+            {filteredDealers.map((d) => (
               <option key={d.dealerCode} value={d.dealerCode}>
-                {d.dealerCode} — {d.companyName || d.email}
+                [{d.kbGroup || 'A'}] {d.dealerCode} — {d.companyName || d.email}
               </option>
             ))}
           </select>
@@ -547,6 +605,20 @@ export default function InvoiceManage() {
                   </button>
                 )}
                 <button
+                  onClick={async () => {
+                    // 番号未採番なら、メール送信前に採番（PDF/メールで番号を一致させる）
+                    let target = inv
+                    if (!inv.invoiceNo) {
+                      const newNo = await assignInvoiceNo(inv)
+                      target = { ...inv, invoiceNo: newNo }
+                    }
+                    setSendModalInvoice(target)
+                  }}
+                  className="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-700"
+                >
+                  メール送信
+                </button>
+                <button
                   onClick={() => handleDownloadPdf(inv)}
                   className="rounded-lg border border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
                 >
@@ -566,10 +638,42 @@ export default function InvoiceManage() {
                     削除
                   </button>
                 )}
+                {inv.lastEmailedAt && (
+                  <span className="ml-auto text-xs text-gray-400">
+                    最終送信: {fmtDate(inv.lastEmailedAt)}
+                  </span>
+                )}
               </div>
             </div>
           ))}
         </div>
+      )}
+
+      {/* メール送信モーダル */}
+      {sendModalInvoice && (
+        <InvoiceSendModal
+          invoice={sendModalInvoice}
+          companyInfoFallback={companyInfo}
+          stampDataUrlFallback={stampDataUrl}
+          onClose={() => setSendModalInvoice(null)}
+          onSent={() => {
+            setSendModalInvoice(null)
+            // 送信成功後、Cloud Function 側で lastEmailedAt 更新と
+            // draft→sent 自動昇格をしているので、ローカル状態も追従。
+            setInvoices((prev) =>
+              prev.map((i) =>
+                i.id === sendModalInvoice.id
+                  ? {
+                      ...i,
+                      status: i.status === 'draft' ? 'sent' : i.status,
+                      lastEmailedAt: new Date(),
+                    }
+                  : i
+              )
+            )
+            alert(`${sendModalInvoice.dealerName || sendModalInvoice.dealerCode} に請求書メールを送信しました`)
+          }}
+        />
       )}
 
       {/* 確認モーダル */}

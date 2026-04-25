@@ -419,14 +419,28 @@ service cloud.firestore {
     }
 
     // ========================================
-    // invoices コレクション（グループC代理店向け請求書）
-    // admin は全件読み書き。dealer は自社の請求書のみ読める
+    // invoices コレクション（全代理店共通の請求書）
+    // 初期利用対象はグループC（請求書発行・KBなし）だが、データモデル・rules は
+    // 全代理店共通として運用。admin は全件読み書き、dealer は自社のみ読める。
     // ========================================
     match /invoices/{docId} {
       allow read:  if isSignedIn()
                     && (isAdmin()
                         || resource.data.dealerCode == userDoc().dealerCode);
       allow write: if isAdmin();
+    }
+
+    // ========================================
+    // invoiceEmailLogs コレクション（請求書メール送信履歴・追記型）
+    // sendInvoice Cloud Function（Admin SDK）からのみ書き込み。
+    // クライアント側 SDK は read のみ可能。再送は履歴ドキュメント自体を
+    // 書き換えるのではなく、新しい invoiceEmailLogs を append する設計。
+    // - read   : admin のみ
+    // - write  : 全面禁止（クライアント側）
+    // ========================================
+    match /invoiceEmailLogs/{logId} {
+      allow read:  if isAdmin();
+      allow create, update, delete: if false;
     }
 
     // ========================================
