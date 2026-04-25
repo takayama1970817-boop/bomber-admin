@@ -6,8 +6,19 @@ export default function ProtectedRoute({ children, requireRole, requireFeature, 
   const location = useLocation()
 
   if (loading) {
+    // Tailwind 未適用でも崩れないようにインライン style を併用（FOUC 対策）
     return (
-      <div className="flex h-screen items-center justify-center text-gray-500">
+      <div
+        className="flex h-screen items-center justify-center text-gray-500"
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          minHeight: '100vh',
+          color: '#9ca3af',
+          fontSize: '14px',
+        }}
+      >
         読み込み中...
       </div>
     )
