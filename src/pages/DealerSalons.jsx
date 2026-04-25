@@ -37,8 +37,8 @@ export default function DealerSalons() {
   const loadData = async (forceRefresh = false) => {
     if (!dealerCode) { setLoading(false); return }
 
-    // キャッシュキーを v2 に上げて、旧 v1（12ヶ月 Bカート 受注を保持）を自動無効化
-    const cacheKey = `dealerSalonsPage:${dealerCode}:v2`
+    // キャッシュキー v3: 3年間（36ヶ月）に拡張＋orderNumber フォールバック追加で旧 v2 を自動無効化
+    const cacheKey = `dealerSalonsPage:${dealerCode}:v3`
     const today = new Date().toISOString().slice(0, 10)
 
     // キャッシュ確認
@@ -77,12 +77,11 @@ export default function DealerSalons() {
     try {
       // 並列実行: Bカート所属サロン名 + Firestore dealerSalons + Firestore orders
       // Firestore orders は dealerCode で絞った全期間を1リクエスト取得し、
-      // クライアント側で直近12ヶ月にフィルタ。
-      // 旧実装は Bカート fetchOrdersByMonth を 12 ヶ月連続で叩いていたため、
-      // J0002 のような大規模代理店では数十秒かかっていた。
+      // クライアント側で直近 36 ヶ月（3年）にフィルタ。
+      //   → コロナ前後・市場変化の比較ができるよう、12ヶ月から拡張。
       setProgress('サロン名を取得しています...')
       const cutoff = new Date()
-      cutoff.setMonth(cutoff.getMonth() - 12)
+      cutoff.setMonth(cutoff.getMonth() - 36)
       cutoff.setHours(0, 0, 0, 0)
 
       const [bcartNames, salonSnap, ordersSnap] = await Promise.all([
@@ -111,21 +110,32 @@ export default function DealerSalons() {
       })
       setSalons(combinedSalons)
 
-      // Firestore orders を直近12ヶ月でフィルタしてマップ
+      // Firestore orders を直近 36 ヶ月でフィルタしてマップ
+      // orderNumber は複数キーをフォールバック（旧 fetch 経由 doc は bcartOrderNumber が
+      // 無く bcartCode しか入っていないため）
+      //   優先: bcartOrderNumber → bcartCode → bcartOrderId → orderNumber → orderNo
       const cutoffMs = cutoff.getTime()
       const allOrders = []
       for (const d of ordersSnap.docs) {
         const o = d.data()
         const od = o.orderDate?.toDate?.() ?? (o.orderDate?._seconds ? new Date(o.orderDate._seconds * 1000) : null)
         if (od && od.getTime() < cutoffMs) continue
+        const orderNo = (
+          o.bcartOrderNumber
+          || o.bcartCode
+          || (o.bcartOrderId != null ? String(o.bcartOrderId) : '')
+          || o.orderNumber
+          || o.orderNo
+          || ''
+        )
         allOrders.push({
           id: d.id,
           companyName: o.companyName || '',
           total: Number(o.total) || 0,
           subtotal: Number(o.subtotal) || 0,
           orderDate: od,
-          orderNumber: o.bcartOrderNumber || '',
-          bcartOrderNumber: o.bcartOrderNumber || '',
+          orderNumber: orderNo,
+          bcartOrderNumber: orderNo,
         })
       }
       setOrders(allOrders)
@@ -224,15 +234,33 @@ export default function DealerSalons() {
 
     // 月別集計
     const monthly = {}
+    // 年別集計（コロナ前後・市場変化の比較用に追加）
+    const yearly = {}
+    let lastOrderDate = null
     for (const o of salon.orders) {
       const d = o.orderDate?.toDate ? o.orderDate.toDate() : o.orderDate ? new Date(o.orderDate) : null
       if (!d) continue
-      const key = `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, '0')}`
-      if (!monthly[key]) monthly[key] = { count: 0, total: 0 }
-      monthly[key].count++
-      monthly[key].total += Number(o.total) || 0
+      const t = Number(o.total) || 0
+      const ymKey = `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, '0')}`
+      if (!monthly[ymKey]) monthly[ymKey] = { count: 0, total: 0 }
+      monthly[ymKey].count++
+      monthly[ymKey].total += t
+      const yKey = String(d.getFullYear())
+      if (!yearly[yKey]) yearly[yKey] = { count: 0, total: 0, yoyRate: null }
+      yearly[yKey].count++
+      yearly[yKey].total += t
+      if (!lastOrderDate || d > lastOrderDate) lastOrderDate = d
     }
     const monthlyKeys = Object.keys(monthly).sort().reverse()
+    // 年別 → 前年比を算出（古い→新しい順で比較）
+    const yearKeysAsc = Object.keys(yearly).sort()
+    for (let i = 1; i < yearKeysAsc.length; i++) {
+      const prev = yearly[yearKeysAsc[i - 1]].total
+      if (prev > 0) {
+        yearly[yearKeysAsc[i]].yoyRate = (yearly[yearKeysAsc[i]].total - prev) / prev
+      }
+    }
+    const yearKeysDesc = [...yearKeysAsc].reverse() // 新しい順で表示
 
     return (
       <div>
@@ -252,10 +280,42 @@ export default function DealerSalons() {
           <h1 className="text-2xl font-bold text-gray-900">{salon.companyName}</h1>
         </div>
 
-        <div className="mb-6 flex gap-6 text-sm text-gray-500">
+        <div className="mb-6 flex flex-wrap gap-4 text-sm text-gray-500 md:gap-6">
           <span>注文数：<strong className="text-gray-900">{salon.totalOrders}件</strong></span>
           <span>累計売上：<strong className="text-gray-900">{fmtYen(salon.totalSales)}</strong></span>
           <span>今月：<strong className="text-indigo-600">{fmtYen(salon.thisMonthSales)}</strong></span>
+          <span>最終注文：<strong className="text-gray-900">{fmtDate(lastOrderDate)}</strong></span>
+        </div>
+
+        {/* 年別サマリ（直近3年）+ 前年比 */}
+        <div className="mb-6">
+          <h2 className="mb-3 text-sm font-bold text-gray-700">年別売上（前年比）</h2>
+          {yearKeysDesc.length === 0 ? (
+            <span className="text-sm text-gray-400">データなし</span>
+          ) : (
+            <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-4">
+              {yearKeysDesc.map((y) => {
+                const yoy = yearly[y].yoyRate
+                const yoyColor = yoy == null
+                  ? 'text-gray-400'
+                  : yoy > 0
+                    ? 'text-emerald-600'
+                    : yoy < 0
+                      ? 'text-red-600'
+                      : 'text-gray-500'
+                return (
+                  <div key={y} className="rounded-xl border border-gray-200 bg-white p-4">
+                    <div className="text-xs text-gray-500">{y}年</div>
+                    <div className="mt-1 text-lg font-bold text-gray-900">{fmtYen(yearly[y].total)}</div>
+                    <div className="text-xs text-gray-400">{yearly[y].count} 件</div>
+                    <div className={`mt-1 text-xs ${yoyColor}`}>
+                      前年比：{yoy == null ? '—' : `${(yoy * 100).toFixed(1)}%`}
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          )}
         </div>
 
         {/* 月別売上 */}
