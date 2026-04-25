@@ -1,6 +1,7 @@
 import { Link } from 'react-router-dom'
 import { useAuth } from '../contexts/AuthContext.jsx'
 import useDealerDashboard, { STATUS_BADGE } from '../hooks/useDealerDashboard.js'
+import DealerWeatherCard from '../components/DealerWeatherCard.jsx'
 
 const fmtYen = (n) => `¥${Math.round(Number(n) || 0).toLocaleString()}`
 const fmtPct = (n) => (n == null ? '—' : `${(n * 100).toFixed(0)}%`)
@@ -79,6 +80,9 @@ export default function DealerDashboard() {
 
   return (
     <div className="mx-auto max-w-7xl space-y-5">
+      {/* 日時・天気カード（最上部・スマホはフルカード／PCはコンパクト） */}
+      <DealerWeatherCard dealerCode={profile?.dealerCode} />
+
       {/* ヘッダー */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
