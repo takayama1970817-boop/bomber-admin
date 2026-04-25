@@ -1,6 +1,16 @@
 import { useEffect, useState } from 'react'
 import { collection, getDocs, limit, orderBy, query, where } from 'firebase/firestore'
 import { db } from '../lib/firebase.js'
+// PR-B（2026-04-25）: phase / mailStatus 分離仕様（src/lib/kickbackStatus.js）に準拠
+import {
+  derivePhase,
+  deriveMailStatus,
+  deriveDisplayLabel,
+  displayBadgeClass,
+  isPortalVisible,
+  PHASE,
+  MAIL_STATUS,
+} from '../lib/kickbackStatus.js'
 
 /**
  * dealer 自身のキックバック清算書を Firestore から取得する Hook。
@@ -45,13 +55,16 @@ export default function useDealerKickbacks(user, options = {}) {
           const cached = JSON.parse(raw)
           if (cached.date === today && Array.isArray(cached.kickbacks) && cached.kickbacks.length > 0) {
             // タイムスタンプは ISO 文字列で保存されているため Date 化
-            const restored = cached.kickbacks.map((kb) => ({
-              ...kb,
-              paidAt: kb.paidAt ? new Date(kb.paidAt) : null,
-              scheduledAt: kb.scheduledAt ? new Date(kb.scheduledAt) : null,
-              updatedAt: kb.updatedAt ? new Date(kb.updatedAt) : null,
-              calculatedAt: kb.calculatedAt ? new Date(kb.calculatedAt) : null,
-            }))
+            const restored = cached.kickbacks
+              .map((kb) => ({
+                ...kb,
+                paidAt: kb.paidAt ? new Date(kb.paidAt) : null,
+                scheduledAt: kb.scheduledAt ? new Date(kb.scheduledAt) : null,
+                updatedAt: kb.updatedAt ? new Date(kb.updatedAt) : null,
+                calculatedAt: kb.calculatedAt ? new Date(kb.calculatedAt) : null,
+              }))
+              // PR-B: 旧キャッシュに calculating / skeleton が混入していたら除外
+              .filter((kb) => isPortalVisible(kb) && !kb.isSkeleton)
             setKickbacks(restored)
             setLoading(false)
             setError(null)
@@ -74,7 +87,10 @@ export default function useDealerKickbacks(user, options = {}) {
     getDocs(q)
       .then((snap) => {
         if (cancelled) return
-        const list = snap.docs.map((d) => ({ id: d.id, ...d.data() }))
+        const raw = snap.docs.map((d) => ({ id: d.id, ...d.data() }))
+        // PR-B: phase='calculating' は代理店ポータル非表示（要件 §6）
+        // skeleton（isSkeleton=true）も非表示。集計済み以降のみ dealer に出す。
+        const list = raw.filter((kb) => isPortalVisible(kb) && !kb.isSkeleton)
         // 0件取得で既存データを上書きしない（fullSync 横展開要件）
         if (list.length === 0 && kickbacks.length > 0) {
           console.warn('[useDealerKickbacks] 0 件取得のため既存データを保持')
@@ -121,15 +137,21 @@ export default function useDealerKickbacks(user, options = {}) {
   return { kickbacks, loading, error, reload }
 }
 
-// ステータス正規化。kickbacks ドキュメントには status フィールドが無い可能性があるため、
-// 存在しない場合は「計算済み」（記録がある＝計算完了とみなす）扱い。
+/**
+ * PR-B: phase + mailStatus を反映した「5 値ラベル」を返す。
+ *   計算中 / 計算済み / PDF作成済み（メール未送信）/ メール送信済み / メール送信失敗
+ *
+ * 旧 normalizeKickbackStatus / KICKBACK_STATUS_LABELS / KICKBACK_STATUS_BADGE は
+ * 後方互換のため残すが、新規コードは deriveDisplayLabel を直接 import すること。
+ */
 export function normalizeKickbackStatus(kb) {
+  // 後方互換: 旧キー（draft/calculated/approved/paid）を返し続ける
   if (!kb) return 'draft'
   const raw = String(kb.status || '').toLowerCase()
   if (raw === 'paid' || kb.paidAt) return 'paid'
   if (raw === 'approved') return 'approved'
   if (raw === 'draft') return 'draft'
-  return 'calculated' // デフォルト: 記録あり = 計算済み
+  return 'calculated'
 }
 
 export const KICKBACK_STATUS_LABELS = {
@@ -144,6 +166,16 @@ export const KICKBACK_STATUS_BADGE = {
   calculated: 'bg-blue-100 text-blue-700',
   approved: 'bg-amber-100 text-amber-800',
   paid: 'bg-emerald-100 text-emerald-800',
+}
+
+// PR-B: 新仕様の helper を再 export（呼び出し側の import を 1 箇所にまとめるため）
+export {
+  derivePhase,
+  deriveMailStatus,
+  deriveDisplayLabel,
+  displayBadgeClass,
+  PHASE,
+  MAIL_STATUS,
 }
 
 /**
@@ -164,26 +196,30 @@ export function extractSalesAmount(kb) {
 }
 
 /**
- * PDF ダウンロード可否。
- * - pdfUrl が存在することが第一条件
- * - ステータスが approved / paid に達していること
- *
- * 備考:
- *   現状 kickbacks ドキュメントには status フィールドが未整備のため、
- *   status が欠落している場合は pdfUrl の有無だけで判定するフォールバック付き。
- *   将来 status が本格運用されたら、この分岐を削除してもよい。
+ * PR-B: PDF ダウンロード可否
+ * - pdfUrl があれば常に可。mailStatus は問わない（要件: メール送信と分離）
+ * - 旧 approved/paid 縛りは廃止（docs/KICKBACK_REQUIREMENTS.md §6）
  */
 export function canDownloadKickbackPdf(kb) {
-  if (!kb?.pdfUrl) return false
-  const status = normalizeKickbackStatus(kb)
-  // フォールバック: status が未整備（= 'calculated' に正規化）でも、
-  // 明示 status 未保存なら pdfUrl だけで許可する
-  if (!kb.status) return true
-  return status === 'approved' || status === 'paid'
+  return !!kb?.pdfUrl
+}
+
+/**
+ * PR-B 新設: CSV ダウンロード可否
+ * - csvUrl があれば常に可。mailStatus は問わない
+ */
+export function canDownloadKickbackCsv(kb) {
+  return !!kb?.csvUrl
 }
 
 /** 新しいタブで PDF を開く。ブラウザ標準のPDFビューワに委ねる。 */
 export function openKickbackPdf(url) {
+  if (!url) return
+  window.open(url, '_blank', 'noopener,noreferrer')
+}
+
+/** PR-B: 新しいタブで CSV を開く（ブラウザのデフォルト挙動でダウンロード） */
+export function openKickbackCsv(url) {
   if (!url) return
   window.open(url, '_blank', 'noopener,noreferrer')
 }

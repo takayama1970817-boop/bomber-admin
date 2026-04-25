@@ -1,11 +1,14 @@
 import { useMemo, useState } from 'react'
 import { useAuth } from '../contexts/AuthContext.jsx'
 import useDealerKickbacks, {
-  KICKBACK_STATUS_LABELS,
-  KICKBACK_STATUS_BADGE,
-  normalizeKickbackStatus,
   extractKickbackAmount,
   extractSalesAmount,
+  canDownloadKickbackPdf,
+  canDownloadKickbackCsv,
+  openKickbackPdf,
+  openKickbackCsv,
+  deriveDisplayLabel,
+  displayBadgeClass,
 } from '../hooks/useDealerKickbacks.js'
 import DealerKickbacksTable from '../components/DealerKickbacksTable.jsx'
 import DealerKickbackDetailModal from '../components/DealerKickbackDetailModal.jsx'
@@ -125,7 +128,6 @@ export default function DealerKickbacks() {
     [kickbacks, selectedMonth],
   )
 
-  const currentStatus = currentKb ? normalizeKickbackStatus(currentKb) : 'draft'
   const currentAmount = currentKb ? extractKickbackAmount(currentKb) : 0
   const prevAmount = prevKb ? extractKickbackAmount(prevKb) : 0
 
@@ -195,10 +197,17 @@ export default function DealerKickbacks() {
             <div className="rounded-2xl border border-gray-200 bg-white p-5">
               <div className="text-xs text-gray-500">ステータス</div>
               <div className="mt-2">
-                <span className={`inline-block rounded-lg px-3 py-1 text-sm font-bold ${KICKBACK_STATUS_BADGE[currentStatus]}`}>
-                  {KICKBACK_STATUS_LABELS[currentStatus]}
+                {/* PR-B: 5 値ラベル（phase + mailStatus）。
+                    ※ メール状態は補助表示。ダウンロード可否には影響しない。 */}
+                <span className={`inline-block rounded-lg px-3 py-1 text-sm font-bold ${displayBadgeClass(currentKb)}`}>
+                  {deriveDisplayLabel(currentKb)}
                 </span>
               </div>
+              {currentKb?.mailSentAt && (
+                <div className="mt-1 text-[11px] text-gray-500">
+                  メール送信日: {fmtDate(currentKb.mailSentAt)}
+                </div>
+              )}
               {currentKb?.paidAt && (
                 <div className="mt-1 text-xs text-emerald-700">支払日: {fmtDate(currentKb.paidAt)}</div>
               )}
@@ -244,7 +253,26 @@ export default function DealerKickbacks() {
                   </div>
                 </div>
               </div>
-              <div className="mt-3 flex justify-end">
+              {/* PR-B: PDF / CSV ダウンロード（メール送信有無に関わらず取得可） */}
+              <div className="mt-3 flex flex-wrap items-center justify-end gap-2">
+                {canDownloadKickbackPdf(currentKb) && (
+                  <button
+                    onClick={() => openKickbackPdf(currentKb.pdfUrl)}
+                    className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50"
+                    title="清算書PDFを開く"
+                  >
+                    📄 PDFをダウンロード
+                  </button>
+                )}
+                {canDownloadKickbackCsv(currentKb) && (
+                  <button
+                    onClick={() => openKickbackCsv(currentKb.csvUrl)}
+                    className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50"
+                    title="明細CSVをダウンロード"
+                  >
+                    📊 CSVをダウンロード
+                  </button>
+                )}
                 <button
                   onClick={() => setSelectedKickback(currentKb)}
                   className="rounded-lg bg-indigo-600 px-4 py-2 text-xs font-medium text-white hover:bg-indigo-700"
@@ -252,6 +280,12 @@ export default function DealerKickbacks() {
                   この月の詳細を見る →
                 </button>
               </div>
+              {/* PDF/CSV まだ未生成のとき案内 */}
+              {!canDownloadKickbackPdf(currentKb) && !canDownloadKickbackCsv(currentKb) && (
+                <div className="mt-2 text-[11px] text-amber-700">
+                  PDF / CSV はまだ作成されていません（管理側で作成され次第ダウンロードできます）。
+                </div>
+              )}
             </div>
           )}
 
@@ -268,9 +302,7 @@ export default function DealerKickbacks() {
             <div className="rounded-2xl border border-gray-200 bg-white p-5">
               <div className="mb-3 text-sm font-bold text-gray-900">最近の清算履歴</div>
               <div className="space-y-1">
-                {recentHistory.map((kb) => {
-                  const status = normalizeKickbackStatus(kb)
-                  return (
+                {recentHistory.map((kb) => (
                     <div key={kb.id} className="flex items-center gap-3 rounded-lg px-3 py-2 hover:bg-gray-50">
                       <div className="w-20 text-sm font-medium text-gray-900">
                         {fmtMonth(kb.month || kb.period)}
@@ -278,12 +310,12 @@ export default function DealerKickbacks() {
                       <div className="flex-1 text-right text-sm font-bold text-gray-900">
                         {fmtYen(extractKickbackAmount(kb))}
                       </div>
-                      <span className={`rounded px-2 py-0.5 text-[11px] font-medium ${KICKBACK_STATUS_BADGE[status]}`}>
-                        {KICKBACK_STATUS_LABELS[status]}
+                      {/* PR-B: 5 値ラベル */}
+                      <span className={`rounded px-2 py-0.5 text-[11px] font-medium ${displayBadgeClass(kb)}`}>
+                        {deriveDisplayLabel(kb)}
                       </span>
                     </div>
-                  )
-                })}
+                  ))}
               </div>
             </div>
           )}
