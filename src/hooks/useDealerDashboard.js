@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { collection, getDocs, orderBy, query, where, Timestamp } from 'firebase/firestore'
+import { collection, getDocs, query, where } from 'firebase/firestore'
 import { db } from '../lib/firebase.js'
 import { filterValidOrders } from '../lib/ordersFilter.js'
 import { computeOrderStats } from '../lib/orderStats.js'
@@ -21,13 +21,15 @@ import { normalizeCompanyName, pickDisplayName } from '../lib/nameNormalize.js'
  *   newStartups, monthlyTrend, productsRanking, statusDistribution
  */
 export default function useDealerDashboard(user) {
-  const [orders, setOrders] = useState([])
+  // PR-A 統合（2026-04-25）: dealerCode 絞り込みのみで全期間 orders を 1 回取得し、
+  // 6ヶ月窓は内部派生する。DealerExecDashboard の独自全期間 fetch を解消。
+  const [allOrders, setAllOrders] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
 
   useEffect(() => {
     if (!user?.dealerCode) {
-      setOrders([])
+      setAllOrders([])
       setLoading(false)
       return
     }
@@ -36,23 +38,16 @@ export default function useDealerDashboard(user) {
     setLoading(true)
     setError(null)
 
-    const sixMonthsAgo = new Date()
-    sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6)
-    sixMonthsAgo.setHours(0, 0, 0, 0)
-
+    // 単一 where のみで複合 index 不要
     const q = query(
       collection(db, 'orders'),
       where('dealerCode', '==', user.dealerCode),
-      where('orderDate', '>=', Timestamp.fromDate(sixMonthsAgo)),
-      orderBy('orderDate', 'desc'),
     )
 
     getDocs(q)
       .then((snap) => {
         if (cancelled) return
-        // 旧データ（isDeprecated === true）はメトリクス計算から除外する。
-        // 最終発注日・売上・件数すべてここから派生するため必須。
-        setOrders(filterValidOrders(snap.docs.map((d) => ({ id: d.id, ...d.data() }))))
+        setAllOrders(filterValidOrders(snap.docs.map((d) => ({ id: d.id, ...d.data() }))))
       })
       .catch((e) => {
         console.error('useDealerDashboard fetch error:', e)
@@ -65,12 +60,31 @@ export default function useDealerDashboard(user) {
     return () => { cancelled = true }
   }, [user?.dealerCode])
 
-  const metrics = useMemo(() => computeMetrics(orders), [orders])
+  // 6ヶ月窓に絞った orders 配列（従来の hook 入力と同じ意味）
+  const sixMoOrders = useMemo(() => {
+    const cutoff = new Date()
+    cutoff.setMonth(cutoff.getMonth() - 6)
+    cutoff.setHours(0, 0, 0, 0)
+    const cutoffMs = cutoff.getTime()
+    return allOrders.filter((o) => {
+      const d = orderDateToDate(o.orderDate)
+      return d && d.getTime() >= cutoffMs
+    })
+  }, [allOrders])
+
+  const metrics = useMemo(() => computeMetrics(sixMoOrders), [sixMoOrders])
   // 共通 stats（売上・最低/最高/平均・返品など）。最終的な KPI は metrics.kpis を使うが、
   // 集計の正本は orderStats に寄せて、両者がズレないようにする。
-  const summary = useMemo(() => computeOrderStats(orders), [orders])
+  const summary = useMemo(() => computeOrderStats(sixMoOrders), [sixMoOrders])
 
-  return { loading, error, ...metrics, ordersCount: orders.length, summary }
+  return {
+    loading,
+    error,
+    ...metrics,
+    ordersCount: sixMoOrders.length,
+    summary,
+    allOrders, // 全期間 orders（DealerExecDashboard のサロン構成計算用）
+  }
 }
 
 // =====================================================
