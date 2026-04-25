@@ -513,21 +513,13 @@ export default function DealerExecDashboard() {
                     : 'text-gray-500'
               }
             />
-            {/* スロット3: 管理対象がある場合のみ稼働率、無い場合は「これまでの取引サロン」 */}
-            {showRate ? (
-              <KpiCard
-                label="稼働率"
-                value={fmtPct(rate)}
-                sub={`${currentActiveCount} / ${dealerSalonsCount} 店`}
-                subColor={activeRateColor(rate)}
-              />
-            ) : (
-              <KpiCard
-                label="これまでの取引サロン"
-                value={`${allTimeSalonCount} 店`}
-                sub={snapshotTotalSalonCount != null ? 'Bカート 顧客全件（最新スナップショット）' : '過去に1回以上注文のあったサロン'}
-              />
-            )}
+            {/* スロット3: これまでの取引サロン（社長指定の優先表示順に固定）
+                稼働率はサロン状況パネル内でのみ表示する */}
+            <KpiCard
+              label="これまでの取引サロン"
+              value={`${allTimeSalonCount} 店`}
+              sub={snapshotTotalSalonCount != null ? 'Bカート 顧客全件（最新スナップショット）' : '過去に1回以上注文のあったサロン'}
+            />
             {/* スロット4: 今月動いているサロン */}
             <KpiCard
               label="今月動いているサロン"
