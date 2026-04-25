@@ -3,6 +3,7 @@ import { collection, getDocs, query, where } from 'firebase/firestore'
 import { httpsCallable } from 'firebase/functions'
 import { db, functions } from '../lib/firebase.js'
 import { generateInvoicePdfBase64 } from '../lib/generateInvoicePdf.js'
+import { validateAddressList } from '../lib/emailValidation.js'
 
 // 完全自動送信ではなく、人間が「宛先・件名・本文」を確認してから送信するための
 // プレビュー兼送信モーダル。InvoiceManage の一覧から起動する。
@@ -141,12 +142,41 @@ export default function InvoiceSendModal({
     return () => { cancelled = true }
   }, [invoice, companyInfoFallback, stampDataUrlFallback])
 
+  // クライアント側バリデーション（サーバー側でも同じロジックで再検証する）
+  const validation = useMemo(() => {
+    const toCheck = validateAddressList(to)
+    if (toCheck.addresses.length === 0) {
+      return { ok: false, message: '宛先（To）を入力してください' }
+    }
+    if (!toCheck.valid) {
+      return { ok: false, message: `宛先のメール形式が不正です: ${toCheck.invalid}` }
+    }
+    if (cc.trim()) {
+      const ccCheck = validateAddressList(cc)
+      if (!ccCheck.valid) {
+        return { ok: false, message: `CC のメール形式が不正です: ${ccCheck.invalid}` }
+      }
+    }
+    if (bcc.trim()) {
+      const bccCheck = validateAddressList(bcc)
+      if (!bccCheck.valid) {
+        return { ok: false, message: `BCC のメール形式が不正です: ${bccCheck.invalid}` }
+      }
+    }
+    return { ok: true, message: '' }
+  }, [to, cc, bcc])
+
   const canSend = useMemo(() => {
-    return !!to && !!subject && !!body && !!pdfBase64 && !sending && !pdfBuilding
-  }, [to, subject, body, pdfBase64, sending, pdfBuilding])
+    return validation.ok && !!subject && !!body && !!pdfBase64 && !sending && !pdfBuilding
+  }, [validation.ok, subject, body, pdfBase64, sending, pdfBuilding])
 
   const handleSend = async () => {
     setError('')
+    if (!validation.ok) {
+      setError(validation.message)
+      setConfirming(false)
+      return
+    }
     setSending(true)
     try {
       const fn = httpsCallable(functions, 'sendInvoice')
@@ -275,6 +305,13 @@ export default function InvoiceSendModal({
           </div>
         </div>
 
+        {/* バリデーションエラー（リアルタイム表示） */}
+        {!validation.ok && (to || cc || bcc) && (
+          <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+            {validation.message}
+          </div>
+        )}
+
         {error && (
           <div className="mt-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
             {error}
@@ -293,6 +330,7 @@ export default function InvoiceSendModal({
             onClick={() => setConfirming(true)}
             disabled={!canSend}
             className="rounded-lg bg-indigo-600 px-5 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:bg-gray-300 disabled:cursor-not-allowed"
+            title={!canSend && !validation.ok ? validation.message : ''}
           >
             {sending ? '送信中…' : 'この内容で送信'}
           </button>

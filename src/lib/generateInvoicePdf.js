@@ -10,8 +10,15 @@ function fmtEn(n) {
   return Number(n).toLocaleString() + '円'
 }
 
-function buildFileName(dealerCode, month) {
-  return `請求書_${dealerCode}_${month.replace('-', '')}.pdf`
+// 請求書PDFのファイル名。請求書番号があれば優先（例: 請求書_DINV2604-001.pdf）。
+// invoiceNo 採番前の保存・プレビュー段階では dealerCode + 年月 にフォールバック。
+function buildFileName(invoice) {
+  if (invoice.invoiceNo) {
+    return `請求書_${invoice.invoiceNo}.pdf`
+  }
+  const code = invoice.dealerCode || 'unknown'
+  const month = (invoice.month || '').replace('-', '')
+  return `請求書_${code}_${month}.pdf`
 }
 
 // 共通ヘッダー（宛先+発行者情報）
@@ -288,7 +295,7 @@ async function buildInvoicePdf(invoice) {
  */
 export async function generateInvoicePdf(invoice) {
   const pdf = await buildInvoicePdf(invoice)
-  const fileName = buildFileName(invoice.dealerCode, invoice.month)
+  const fileName = buildFileName(invoice)
   pdf.save(fileName)
   return fileName
 }
@@ -301,6 +308,6 @@ export async function generateInvoicePdfBase64(invoice) {
   const pdf = await buildInvoicePdf(invoice)
   const dataUri = pdf.output('datauristring')
   const base64 = dataUri.split('base64,')[1] || ''
-  const fileName = buildFileName(invoice.dealerCode, invoice.month)
+  const fileName = buildFileName(invoice)
   return { base64, fileName }
 }

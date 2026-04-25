@@ -19,14 +19,31 @@
 // - 失敗時は invoiceEmailLogs に status='failed' で記録し、UI から再送可能
 // - 成功時は invoices.{id}.lastEmailedAt 更新 + status='draft' のときのみ
 //   'sent' に自動昇格（draft 以外のステータスは触らない）
+//
+// SendGrid 基盤の役割分担（重要）:
+// - 本 Function は「請求書送信専用」。From: inv@royaltrust.jp 固定。
+// - 将来的にメルマガ送信（sendEmailCampaign）や受信処理（receiveInboundEmail）
+//   を追加する想定だが、それぞれ用途・送信元・ログ collection・配信停止管理が
+//   異なるため **別 Function として実装する**。
+// - 本 Function の DEFAULT_FROM_* 定数を SendGrid 全体の共通仕様として
+//   再利用しないこと。
+// - 共通利用してよいのは以下のみ:
+//   1) defineSecret('SENDGRID_API_KEY')（SendGrid API キー自体）
+//   2) functions/lib/emailValidation.js（アドレス検証ユーティリティ）
+//   3) sgMail.setApiKey() の呼び出しパターン
+// - 各メール用途ごとに自身の From / 件名規約 / ログスキーマ / 検証ルールを
+//   明示的に定義する設計とする。
 
 const { onCall, HttpsError } = require('firebase-functions/v2/https')
 const { defineSecret } = require('firebase-functions/params')
 const { getFirestore, FieldValue } = require('firebase-admin/firestore')
 const sgMail = require('@sendgrid/mail')
+const { validateAddressList } = require('./lib/emailValidation')
 
 const SENDGRID_API_KEY = defineSecret('SENDGRID_API_KEY')
 
+// 請求書メール専用の送信元。他用途（メルマガ等）では別アドレスを別 Function で
+// 定義すること。
 const DEFAULT_FROM_EMAIL = 'inv@royaltrust.jp'
 const DEFAULT_FROM_NAME = 'ロイヤルトラスト株式会社'
 
@@ -70,6 +87,42 @@ const sendInvoice = onCall(
       )
     }
 
+    // === メールアドレス検証（SendGrid 呼び出し前に弾く）===
+    // To は最低1件必須、CC/BCC は任意だが指定があれば全アドレスが形式適合必須。
+    const toCheck = validateAddressList(to)
+    if (toCheck.addresses.length === 0) {
+      throw new HttpsError('invalid-argument', '宛先（To）が空です')
+    }
+    if (!toCheck.valid) {
+      throw new HttpsError(
+        'invalid-argument',
+        `宛先（To）のメールアドレス形式が不正です: ${toCheck.invalid}`
+      )
+    }
+    const ccCheck = validateAddressList(cc)
+    if (cc && !ccCheck.valid) {
+      throw new HttpsError(
+        'invalid-argument',
+        `CC のメールアドレス形式が不正です: ${ccCheck.invalid}`
+      )
+    }
+    const bccCheck = validateAddressList(bcc)
+    if (bcc && !bccCheck.valid) {
+      throw new HttpsError(
+        'invalid-argument',
+        `BCC のメールアドレス形式が不正です: ${bccCheck.invalid}`
+      )
+    }
+    if (replyTo) {
+      const replyCheck = validateAddressList(replyTo)
+      if (!replyCheck.valid || replyCheck.addresses.length === 0) {
+        throw new HttpsError(
+          'invalid-argument',
+          `Reply-To のメールアドレス形式が不正です: ${replyTo}`
+        )
+      }
+    }
+
     const invoiceRef = db.collection('invoices').doc(invoiceId)
     const invoiceSnap = await invoiceRef.get()
     if (!invoiceSnap.exists) {
@@ -83,8 +136,9 @@ const sendInvoice = onCall(
     }
     sgMail.setApiKey(apiKey)
 
+    // パース済みアドレスを SendGrid に渡す（カンマ区切りなどの揺れを正規化）。
     const msg = {
-      to,
+      to: toCheck.addresses.length === 1 ? toCheck.addresses[0] : toCheck.addresses,
       from: { email: DEFAULT_FROM_EMAIL, name: DEFAULT_FROM_NAME },
       subject,
       text: bodyText,
@@ -98,8 +152,12 @@ const sendInvoice = onCall(
         },
       ],
     }
-    if (cc) msg.cc = cc
-    if (bcc) msg.bcc = bcc
+    if (cc && ccCheck.addresses.length > 0) {
+      msg.cc = ccCheck.addresses.length === 1 ? ccCheck.addresses[0] : ccCheck.addresses
+    }
+    if (bcc && bccCheck.addresses.length > 0) {
+      msg.bcc = bccCheck.addresses.length === 1 ? bccCheck.addresses[0] : bccCheck.addresses
+    }
     if (replyTo) msg.replyTo = replyTo
 
     const baseLog = {
