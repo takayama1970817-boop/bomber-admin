@@ -207,8 +207,13 @@ export default function DealerSalons() {
       // Firestore を再取得してキャッシュを上書き
       await loadData(true)
     } catch (e) {
-      console.warn('runBcartSync error:', e)
-      setBcartSyncError(e?.message || '同期に失敗しました')
+      // Cloud Functions httpsCallable のエラー: code / message / details を全部出す
+      console.warn('runBcartSync error:', e?.code, e?.message, e?.details, e)
+      const parts = []
+      if (e?.code) parts.push(`[${e.code}]`)
+      if (e?.message) parts.push(e.message)
+      if (e?.details?.stack) parts.push(`stack: ${e.details.stack}`)
+      setBcartSyncError(parts.join(' ') || '同期に失敗しました')
     } finally {
       setBcartSyncing(false)
     }
