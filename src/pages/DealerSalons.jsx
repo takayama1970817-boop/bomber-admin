@@ -1,10 +1,10 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { collection, getDocs, query, where } from 'firebase/firestore'
 import { db } from '../lib/firebase.js'
 import { useAuth } from '../contexts/AuthContext.jsx'
 import { fetchDealerSalonNamesFromBcart } from '../lib/dashboardAggregator.js'
-import { fetchOrdersByMonth } from '../lib/bcartApi.js'
+import { normalizeCompanyName } from '../lib/nameNormalize.js'
 
 function fmtDate(ts) {
   if (!ts) return '—'
@@ -30,10 +30,15 @@ export default function DealerSalons() {
   const [searchParams] = useSearchParams()
   const [selected, setSelected] = useState(searchParams.get('salon'))
 
+  // unmount 後の setState 抑止用
+  const aliveRef = useRef(true)
+  useEffect(() => () => { aliveRef.current = false }, [])
+
   const loadData = async (forceRefresh = false) => {
     if (!dealerCode) { setLoading(false); return }
 
-    const cacheKey = `dealerSalonsPage:${dealerCode}:v1`
+    // キャッシュキーを v2 に上げて、旧 v1（12ヶ月 Bカート 受注を保持）を自動無効化
+    const cacheKey = `dealerSalonsPage:${dealerCode}:v2`
     const today = new Date().toISOString().slice(0, 10)
 
     // キャッシュ確認
@@ -43,6 +48,7 @@ export default function DealerSalons() {
         if (raw) {
           const cached = JSON.parse(raw)
           if (cached.date === today && cached.salons && cached.orders) {
+            if (!aliveRef.current) return
             setRawCount(cached.rawCount || cached.salons.length)
             setSalons(cached.salons)
             setOrders(cached.orders.map((o) => ({
@@ -58,27 +64,36 @@ export default function DealerSalons() {
     }
 
     setLoading(true)
-    setProgress('Bカート 接続中...')
+    setProgress('読み込み中...')
     try {
-      // Bカートから所属サロン名を取得
-      setProgress('Bカート 所属サロン取得中...')
-      const bcartNames = await fetchDealerSalonNamesFromBcart(dealerCode, {
-        fallbackMonths: 6,
-        forceRefresh,
-      })
+      // 並列実行: Bカート所属サロン名 + Firestore dealerSalons + Firestore orders
+      // Firestore orders は dealerCode で絞った全期間を1リクエスト取得し、
+      // クライアント側で直近12ヶ月にフィルタ。
+      // 旧実装は Bカート fetchOrdersByMonth を 12 ヶ月連続で叩いていたため、
+      // J0002 のような大規模代理店では数十秒かかっていた。
+      setProgress('サロン名を取得しています...')
+      const cutoff = new Date()
+      cutoff.setMonth(cutoff.getMonth() - 12)
+      cutoff.setHours(0, 0, 0, 0)
+
+      const [bcartNames, salonSnap, ordersSnap] = await Promise.all([
+        fetchDealerSalonNamesFromBcart(dealerCode, { fallbackMonths: 6, forceRefresh }),
+        getDocs(query(collection(db, 'dealerSalons'), where('dealerCode', '==', dealerCode))),
+        getDocs(query(collection(db, 'orders'), where('dealerCode', '==', dealerCode))),
+      ])
+      if (!aliveRef.current) return
+
       const computedRawCount = bcartNames.rawCount || bcartNames.size
       setRawCount(computedRawCount)
 
-      // dealerSalons のメタ情報も取得（type: 'own' 等）
-      const salonSnap = await getDocs(
-        query(collection(db, 'dealerSalons'), where('dealerCode', '==', dealerCode))
-      )
+      // dealerSalons メタ情報（type='own' 等）
       const metaByName = new Map()
       for (const d of salonSnap.docs) {
         const data = d.data()
         if (data.companyName) metaByName.set(data.companyName, { id: d.id, ...data })
       }
 
+      // サロンリスト（Bカート + dealerSalons の和集合）
       const combinedNameSet = new Set([...bcartNames, ...metaByName.keys()])
       const combinedSalons = Array.from(combinedNameSet).map((name) => {
         const meta = metaByName.get(name)
@@ -87,35 +102,24 @@ export default function DealerSalons() {
       })
       setSalons(combinedSalons)
 
-      // Bカートから直近12ヶ月の受注を取得
-      const months = 12
-      const nowDate = new Date()
-      const allBcart = []
-      for (let i = 0; i < months; i += 1) {
-        let ty = nowDate.getFullYear()
-        let tm = nowDate.getMonth() - i
-        while (tm < 0) { tm += 12; ty -= 1 }
-        const ymStr = `${ty}-${String(tm + 1).padStart(2, '0')}`
-        setProgress(`Bカート 受注取得中 ${ymStr} (${i + 1}/${months})`)
-        try {
-          const raw = await fetchOrdersByMonth(ymStr)
-          for (const o of raw) {
-            if (String(o.customer_parent_id || '') !== String(dealerCode)) continue
-            allBcart.push({
-              id: o.id,
-              companyName: (o.customer_comp_name || o.comp_name || o.customer_name || '').trim(),
-              total: Number(o.final_price ?? o.total_price) || 0,
-              subtotal: Number(o.total_price ?? o.final_price) || 0,
-              orderDate: o.ordered_at ? new Date(o.ordered_at.replace(' ', 'T')) : null,
-              orderNumber: o.order_no || o.order_number || '',
-              bcartOrderNumber: o.order_no || o.order_number || '',
-            })
-          }
-        } catch (e) {
-          console.warn('bcart month skip', ymStr, e.message)
-        }
+      // Firestore orders を直近12ヶ月でフィルタしてマップ
+      const cutoffMs = cutoff.getTime()
+      const allOrders = []
+      for (const d of ordersSnap.docs) {
+        const o = d.data()
+        const od = o.orderDate?.toDate?.() ?? (o.orderDate?._seconds ? new Date(o.orderDate._seconds * 1000) : null)
+        if (od && od.getTime() < cutoffMs) continue
+        allOrders.push({
+          id: d.id,
+          companyName: o.companyName || '',
+          total: Number(o.total) || 0,
+          subtotal: Number(o.subtotal) || 0,
+          orderDate: od,
+          orderNumber: o.bcartOrderNumber || '',
+          bcartOrderNumber: o.bcartOrderNumber || '',
+        })
       }
-      setOrders(allBcart)
+      setOrders(allOrders)
 
       // キャッシュ保存（Date は ISO 文字列に）
       const fetchedAt = new Date().toLocaleString('ja-JP')
@@ -126,7 +130,7 @@ export default function DealerSalons() {
           fetchedAt,
           rawCount: computedRawCount,
           salons: combinedSalons,
-          orders: allBcart.map((o) => ({
+          orders: allOrders.map((o) => ({
             ...o,
             orderDate: o.orderDate ? o.orderDate.toISOString() : null,
           })),
@@ -135,47 +139,70 @@ export default function DealerSalons() {
     } catch (e) {
       console.error('データ取得エラー:', e)
     } finally {
-      setLoading(false)
-      setProgress('')
+      if (aliveRef.current) {
+        setLoading(false)
+        setProgress('')
+      }
     }
   }
 
   useEffect(() => {
+    aliveRef.current = true
     loadData(false)
+    return () => { aliveRef.current = false }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dealerCode])
 
-  const now = new Date()
-  const thisMonth = `${now.getFullYear()}/${String(now.getMonth() + 1).padStart(2, '0')}`
+  // サロンごとの集計（O(N+M) 化＋ useMemo で memoize）
+  // 旧実装は salons.map 内で orders.filter を呼ぶ O(N×M) で、
+  // J0002 のような 200 サロン × 数千注文では数十万回の比較が走り重かった。
+  const sortedStats = useMemo(() => {
+    const now = new Date()
+    const thisMonthKey = `${now.getFullYear()}/${String(now.getMonth() + 1).padStart(2, '0')}`
 
-  // サロンごとの集計
-  const salonStats = salons.map((salon) => {
-    const salonOrders = orders.filter((o) => o.companyName === salon.companyName)
-    const thisMonthOrders = salonOrders.filter((o) => {
-      const d = o.orderDate?.toDate ? o.orderDate.toDate() : o.orderDate ? new Date(o.orderDate) : null
-      if (!d) return false
-      return `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, '0')}` === thisMonth
-    })
-    const lastOrderDate = salonOrders.length > 0
-      ? salonOrders.reduce((latest, o) => {
-          const d = o.orderDate?.toDate ? o.orderDate.toDate() : o.orderDate ? new Date(o.orderDate) : null
-          return d && (!latest || d > latest) ? d : latest
-        }, null)
-      : null
-
-    return {
-      ...salon,
-      totalOrders: salonOrders.length,
-      totalSales: salonOrders.reduce((s, o) => s + (Number(o.total) || 0), 0),
-      thisMonthOrders: thisMonthOrders.length,
-      thisMonthSales: thisMonthOrders.reduce((s, o) => s + (Number(o.total) || 0), 0),
-      lastOrderDate,
-      orders: salonOrders,
+    // companyName 正規化キー → 集計バケット
+    const bucket = new Map()
+    const ensure = (key) => {
+      if (!bucket.has(key)) {
+        bucket.set(key, {
+          totalOrders: 0,
+          totalSales: 0,
+          thisMonthOrders: 0,
+          thisMonthSales: 0,
+          lastOrderDate: null,
+          orders: [],
+        })
+      }
+      return bucket.get(key)
     }
-  })
 
-  // 売上順ソート
-  const sortedStats = [...salonStats].sort((a, b) => b.totalSales - a.totalSales)
+    for (const o of orders) {
+      const key = normalizeCompanyName(o.companyName)
+      if (!key) continue
+      const b = ensure(key)
+      const total = Number(o.total) || 0
+      b.totalOrders += 1
+      b.totalSales += total
+      b.orders.push(o)
+      const d = o.orderDate instanceof Date ? o.orderDate : (o.orderDate ? new Date(o.orderDate) : null)
+      if (d) {
+        if (!b.lastOrderDate || d > b.lastOrderDate) b.lastOrderDate = d
+        const ym = `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, '0')}`
+        if (ym === thisMonthKey) {
+          b.thisMonthOrders += 1
+          b.thisMonthSales += total
+        }
+      }
+    }
+
+    const stats = salons.map((salon) => {
+      const key = normalizeCompanyName(salon.companyName)
+      const b = bucket.get(key) || { totalOrders: 0, totalSales: 0, thisMonthOrders: 0, thisMonthSales: 0, lastOrderDate: null, orders: [] }
+      return { ...salon, ...b }
+    })
+    stats.sort((a, b) => b.totalSales - a.totalSales)
+    return stats
+  }, [salons, orders])
 
   if (loading) {
     return <div className="flex items-center justify-center py-20 text-gray-400">読み込み中...</div>
@@ -183,7 +210,7 @@ export default function DealerSalons() {
 
   // サロン詳細表示
   if (selected) {
-    const salon = salonStats.find((s) => s.companyName === selected)
+    const salon = sortedStats.find((s) => s.companyName === selected)
     if (!salon) { setSelected(null); return null }
 
     // 月別集計
@@ -271,8 +298,8 @@ export default function DealerSalons() {
   }
 
   // サロン一覧
-  const totalSales = salonStats.reduce((s, salon) => s + salon.totalSales, 0)
-  const totalOrders = salonStats.reduce((s, salon) => s + salon.totalOrders, 0)
+  const totalSales = sortedStats.reduce((s, salon) => s + salon.totalSales, 0)
+  const totalOrders = sortedStats.reduce((s, salon) => s + salon.totalOrders, 0)
 
   return (
     <div>
