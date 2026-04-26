@@ -16,7 +16,9 @@ import { validateAddressList } from '../lib/emailValidation.js'
 //   onSent(result)    : 送信成功時。一覧の status を 'sent' に更新するため
 //   retryFromLog      : 再送モード時の元ログ（任意）。{ id, to, cc, subject, ... }
 
-const DEFAULT_FROM_LABEL = 'inv@royaltrust.jp（ロイヤルトラスト株式会社）'
+// UI 表示用の送信元ラベル（変更不可フィールドに表示）。
+// functions/sendInvoice.js の DEFAULT_FROM_NAME / DEFAULT_FROM_EMAIL と一致させること。
+const DEFAULT_FROM_LABEL = 'inv@royaltrust.jp（ロイヤルトラスト株式会社経理部）'
 
 function fmtYen(n) {
   if (n == null) return '—'

@@ -44,8 +44,10 @@ const SENDGRID_API_KEY = defineSecret('SENDGRID_API_KEY')
 
 // 請求書メール専用の送信元。他用途（メルマガ等）では別アドレスを別 Function で
 // 定義すること。
+// From 名は「経理部」を明記し、受信側で請求書メールであることを一目で判別できる
+// ようにする（メルマガ・営業メール等と混同されないため）。
 const DEFAULT_FROM_EMAIL = 'inv@royaltrust.jp'
-const DEFAULT_FROM_NAME = 'ロイヤルトラスト株式会社'
+const DEFAULT_FROM_NAME = 'ロイヤルトラスト株式会社経理部'
 
 const sendInvoice = onCall(
   {
